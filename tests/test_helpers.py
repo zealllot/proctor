@@ -78,3 +78,38 @@ def test_fix_pr_ref_minimum_valid():
     valid = {"number": 124, "url": "https://x", "branch": "fix-123-abc",
              "covers": ["t-002"]}
     validate_fix_pr_ref(valid)
+
+
+from plugins.proctor.scripts.pr_fetch import parse_pr_arg, PRArg
+from plugins.proctor.scripts.runlog import make_run_id, log_line
+
+
+def test_parse_pr_arg_number_only():
+    arg = parse_pr_arg("123")
+    assert arg == PRArg(number=123, repo=None)
+
+
+def test_parse_pr_arg_full_url():
+    arg = parse_pr_arg("https://github.com/owner/name/pull/42")
+    assert arg == PRArg(number=42, repo="owner/name")
+
+
+def test_parse_pr_arg_rejects_garbage():
+    with pytest.raises(ValueError):
+        parse_pr_arg("not-a-pr")
+
+
+def test_make_run_id_is_deterministic_for_same_inputs():
+    a = make_run_id(pr_number=1, head_sha="abc1234", started_at_iso="2026-05-09T10:00:00Z")
+    b = make_run_id(pr_number=1, head_sha="abc1234", started_at_iso="2026-05-09T10:00:00Z")
+    assert a == b
+    assert "abc1234" in a
+    assert "1" in a
+
+
+def test_log_line_format(capsys):
+    log_line("analyze", "start", pr=123, sha="abc1234")
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("[proctor:analyze] start")
+    assert "pr=123" in out
+    assert "sha=abc1234" in out
