@@ -25,33 +25,40 @@ The same skills, agents, and JSON contracts power both modes.
 
 ## 3. Form Factor
 
-A Claude Code plugin in the form below; no server, no daemon, no DB.
+A Claude Code plugin in the form below; no server, no daemon, no DB. The plugin itself lives under `plugins/proctor/` (Claude Code multi-plugin convention; mirrors the layout of the sibling `dsfix` repo).
 
 ```
 proctor/
-├── plugin.json                       # Claude Code plugin manifest
-├── commands/
-│   └── proctor.md                    # /proctor slash command entry point
-├── skills/
-│   ├── analyzing-pr-changes/         # PR + diff → ChangeMap
-│   ├── planning-pr-tests/            # ChangeMap → TestPlan
-│   ├── executing-pr-tests/           # ApprovedPlan → TestResults
-│   ├── fixing-test-failures/         # failures → FixPRRef
-│   └── reporting-pr-test-results/    # TestResults + FixPRRef → PR comment
-├── agents/
-│   ├── pr-test-executor.md           # runs one test item, returns one result
-│   └── pr-test-fixer.md              # generates a patch for one failure
+├── plugins/
+│   └── proctor/
+│       ├── .claude-plugin/plugin.json    # Claude Code plugin manifest
+│       ├── commands/
+│       │   └── proctor.md                # /proctor slash command entry point
+│       ├── skills/
+│       │   ├── analyzing-pr-changes/SKILL.md      # PR + diff → ChangeMap
+│       │   ├── planning-pr-tests/SKILL.md         # ChangeMap → TestPlan
+│       │   ├── executing-pr-tests/SKILL.md        # ApprovedPlan → TestResults
+│       │   ├── fixing-test-failures/SKILL.md      # failures → FixPRRef
+│       │   └── reporting-pr-test-results/SKILL.md # TestResults + FixPRRef → comment
+│       ├── agents/
+│       │   ├── pr-test-executor.md       # runs one test item, returns one result
+│       │   └── pr-test-fixer.md          # generates a patch for one failure
+│       └── scripts/                      # shared helpers (gh wrappers, schema validators)
+│           ├── pr_fetch.py
+│           ├── schema.py
+│           └── runlog.py
 ├── github-action/
-│   ├── action.yml                    # GitHub Action wrapper around `claude /proctor`
+│   ├── action.yml                        # GitHub Action wrapper around `claude /proctor`
 │   └── README.md
 ├── examples/
-│   └── .pr-test.yml                  # repo-side config example
+│   └── .pr-test.yml                      # repo-side config example
 ├── tests/
-│   ├── fixtures/                     # diff JSON + config snapshots
-│   ├── run-skill.sh                  # unit-level skill runner
-│   └── run-e2e.sh                    # end-to-end against fixture repo
-└── docs/
-    └── superpowers/specs/...
+│   ├── fixtures/                         # diff JSON + config snapshots
+│   ├── run-skill.sh                      # unit-level skill runner
+│   └── run-e2e.sh                        # end-to-end against fixture repo
+├── docs/
+│   └── superpowers/{specs,plans}/...
+└── README.md
 ```
 
 ## 4. Repo-side Configuration
