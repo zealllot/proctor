@@ -7,6 +7,8 @@ from plugins.proctor.scripts.schema import (
     validate_fix_pr_ref,
     SchemaError,
 )
+from plugins.proctor.scripts.pr_fetch import parse_pr_arg, PRArg
+from plugins.proctor.scripts.runlog import make_run_id, log_line
 
 
 def test_change_map_minimum_valid():
@@ -78,10 +80,6 @@ def test_fix_pr_ref_minimum_valid():
     valid = {"number": 124, "url": "https://x", "branch": "fix-123-abc",
              "covers": ["t-002"]}
     validate_fix_pr_ref(valid)
-
-
-from plugins.proctor.scripts.pr_fetch import parse_pr_arg, PRArg
-from plugins.proctor.scripts.runlog import make_run_id, log_line
 
 
 def test_parse_pr_arg_number_only():
