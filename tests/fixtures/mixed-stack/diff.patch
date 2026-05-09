@@ -1,0 +1,29 @@
+diff --git a/src/pages/Settings.tsx b/src/pages/Settings.tsx
+index 0000001..0000002 100644
+--- a/src/pages/Settings.tsx
++++ b/src/pages/Settings.tsx
+@@ -10,6 +10,15 @@ export default function Settings() {
+   return (
+     <form onSubmit={save}>
+       <input name="email" />
++      <label>Display name
++        <input name="display_name" data-testid="display-name" />
++      </label>
+       <button>Save</button>
+     </form>
+   );
+ }
+diff --git a/api/profile_handler.go b/api/profile_handler.go
+index 0000003..0000004 100644
+--- a/api/profile_handler.go
++++ b/api/profile_handler.go
+@@ -20,6 +20,12 @@ func UpdateProfile(w http.ResponseWriter, r *http.Request) {
+   if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+     http.Error(w, "bad json", 400); return
+   }
++  if len(req.DisplayName) > 100 {
++    http.Error(w, "display name too long", 400); return
++  }
+   if err := store.SaveProfile(ctx, req); err != nil {
+     http.Error(w, err.Error(), 500); return
+   }

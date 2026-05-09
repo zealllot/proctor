@@ -1,0 +1,6 @@
+{
+  "required_categories_present_subset": ["frontend"],
+  "min_hunks": 2,
+  "max_hunks": 4,
+  "must_not_contain_categories": ["api", "schema", "mobile", "cli", "infra"]
+}

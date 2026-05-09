@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+
+      - name: Run unit tests
+        run: python -m pytest tests/test_helpers.py -v
+
+      - name: Validate plugin manifest
+        run: python -c "import json; json.load(open('plugins/proctor/.claude-plugin/plugin.json'))"
+
+      - name: Validate Action manifest
+        run: python -c "import yaml; yaml.safe_load(open('github-action/action.yml'))"
+
+      - name: Validate example config
+        run: python -c "import yaml; yaml.safe_load(open('examples/.pr-test.yml'))"
