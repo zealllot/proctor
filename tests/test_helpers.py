@@ -1,5 +1,6 @@
 import json
 import pytest
+from unittest import mock
 from plugins.proctor.scripts.schema import (
     validate_change_map,
     validate_test_plan,
@@ -9,6 +10,7 @@ from plugins.proctor.scripts.schema import (
 )
 from plugins.proctor.scripts.pr_fetch import parse_pr_arg, PRArg
 from plugins.proctor.scripts.runlog import make_run_id, log_line
+from plugins.proctor.scripts import gh_lock
 
 
 def test_change_map_minimum_valid():
@@ -111,3 +113,33 @@ def test_log_line_format(capsys):
     assert out.startswith("[proctor:analyze] start")
     assert "pr=123" in out
     assert "sha=abc1234" in out
+
+
+def test_acquire_lock_calls_gh_label_add():
+    with mock.patch.object(gh_lock.subprocess, "check_output") as co, \
+         mock.patch.object(gh_lock.subprocess, "check_call") as cc:
+        co.return_value = "[]"   # no labels yet
+        ok = gh_lock.acquire(pr_number=1, repo=None)
+        assert ok
+        cc.assert_called_once()
+        args = cc.call_args[0][0]
+        assert args[:4] == ["gh", "pr", "edit", "1"]
+        assert "--add-label" in args
+        assert "proctor:running" in args
+
+
+def test_acquire_lock_returns_false_when_already_held():
+    with mock.patch.object(gh_lock.subprocess, "check_output") as co, \
+         mock.patch.object(gh_lock.subprocess, "check_call") as cc:
+        co.return_value = '[{"name":"proctor:running"}]'
+        ok = gh_lock.acquire(pr_number=1, repo=None)
+        assert not ok
+        cc.assert_not_called()
+
+
+def test_release_lock_removes_label():
+    with mock.patch.object(gh_lock.subprocess, "check_call") as cc:
+        gh_lock.release(pr_number=1, repo=None)
+        args = cc.call_args[0][0]
+        assert "--remove-label" in args
+        assert "proctor:running" in args
