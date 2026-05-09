@@ -89,7 +89,7 @@ jobs:
       pull-requests: write
       contents: write
     steps:
-      - uses: zealllot/proctor/github-action@v0.1.5
+      - uses: zealllot/proctor/github-action@v0.1.9
         with:
           # use exactly ONE of these:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -98,7 +98,24 @@ jobs:
 
 That's it. Open a PR; PRoctor will analyze it, run tests, and post a comment.
 
-### 4. Approval mode (optional)
+### 4. Repository settings (required for auto-fix PRs)
+
+If you want PRoctor's `auto_fix` flow to actually open fix PRs, enable these in your repo's **Settings → Actions → General → Workflow permissions**:
+
+- ✅ Read and write permissions
+- ✅ Allow GitHub Actions to create and approve pull requests
+
+Without these, the executor reaches the report stage successfully but the fix-PR creation fails with `GitHub Actions is not permitted to create or approve pull requests`. The report comment will note the fix branch was pushed and ask you to open the PR manually.
+
+You can flip both via the API in one call:
+
+```bash
+gh api -X PUT "/repos/<owner>/<repo>/actions/permissions/workflow" \
+  -f default_workflow_permissions=write \
+  -F can_approve_pull_request_reviews=true
+```
+
+### 5. Approval mode (optional)
 
 Set `require_approval: true` in `.pr-test.yml`. PRoctor will post the test plan as a comment and exit; reply with `/proctor run` from any account with write access to resume execution.
 
@@ -179,7 +196,7 @@ The wait loop is critical: if PRoctor starts dispatching test items before the s
 
 Pin the action to a tag, not `@main`:
 
-- `v0.1.5` — current (planner static-first, full pipeline in CI)
+- `v0.1.9` — current (stage-by-stage bash orchestration, schema relaxation for headless logs_ref)
 - `v0.1` — track latest 0.1.x patch (we don't move this tag, but you can `gh release` track via dependabot)
 
 Breaking changes will bump to `v0.2.0`; we'll document migration in the release notes.
