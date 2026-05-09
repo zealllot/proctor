@@ -1,73 +1,104 @@
 # PRoctor
 
-> AI-driven PR test runner as a Claude Code plugin.
+> AI-driven PR test runner. Reads a PR's diff, plans tests, runs them, posts a structured report comment with screenshots — and opens a fix PR when something fails.
 
-Given a GitHub PR, PRoctor:
+## Quick Start (60 seconds)
 
-1. **Analyzes** the diff and categorizes changes (frontend / api / schema / mobile / cli / e2e-flow / infra / docs).
-2. **Plans** concrete tests per category.
-3. **Confirms** the plan (interactively in local mode, by PR comment in CI mode).
-4. **Executes** tests via `chrome-devtools` MCP, Bash, curl, etc.
-5. If anything fails and `auto_fix: true`, **opens a fix PR** with minimal patches.
-6. **Reports** back as a structured PR comment.
-
-## Install (local)
+In the repo you want PRoctor on:
 
 ```bash
-claude plugin add /path/to/proctor/plugins/proctor
-```
-
-## Drop into your project (fastest)
-
-```bash
+claude plugin add /path/to/proctor/plugins/proctor    # one-time
 cd /your/repo
 claude /proctor-init
 ```
 
-5 questions, ~2 minutes. The wizard detects your stack, asks for setup commands / auto-fix / approval / auth method, writes `.pr-test.yml` + `.github/workflows/proctor.yml`, walks you through the auth secret, and offers to flip the Actions PR-creation setting via API.
+The wizard asks 5 questions (your stack, server setup, auto-fix on/off, run mode, auth method), generates `.pr-test.yml` + `.github/workflows/proctor.yml`, and walks you through the auth secret. Open a PR — comment lands in ~10 minutes.
 
-See [docs/INTEGRATION.md](docs/INTEGRATION.md) for the manual path and full reference (recipes for Node+Vite / Python+uvicorn / Go / multi-process, troubleshooting).
+Live demo: every PR on [proctor-fixtures](https://github.com/zealllot/proctor-fixtures) is a working example. See [#21](https://github.com/zealllot/proctor-fixtures/pull/21) (admin visual change with screenshots) or [#18](https://github.com/zealllot/proctor-fixtures/pull/18) (5/5 chrome-devtools pass).
 
-## Usage
+## What it does, end-to-end
+
+```
+Diff in        →  Categorize each hunk (frontend / api / schema / mobile / cli / e2e-flow / infra / docs)
+.pr-test.yml   →  Plan one test item per behavior the diff or PR-body claims (lint-only / curl / chrome-devtools)
+                  Setup commands run; per-item executor dispatches in parallel (concurrency 3)
+Tests run      →  Each item produces evidence + command + output + screenshot
+Failures       →  Fixer subagent generates a minimal patch; opens fix-<PR#>-<sha> PR
+Report out     →  PR comment with collapsible per-item sections, inline screenshots, cost line, links to logs
+```
+
+Reads PR body for context — Slack/Jira/Linear links and acceptance criteria become test items, phrased in the body's wording.
+
+## Local CLI (alternative to the wizard)
 
 ```bash
-claude /proctor 123
+claude /proctor 123                                # PR number in current repo
 claude /proctor https://github.com/org/repo/pull/123
 ```
 
-## Configure
+PRoctor will print the test plan, ask you to approve (uncheck items you don't want), then execute.
 
-Place `.pr-test.yml` at the repo being tested. See [`examples/.pr-test.yml`](examples/.pr-test.yml).
+## Manual setup
 
-## CI
+If `/proctor-init` isn't an option (e.g. you want to template a workflow without running an interactive command), see [`docs/INTEGRATION.md`](docs/INTEGRATION.md). Recipes for Node + Vite, Python + uvicorn, Go, Rust, multi-process stacks.
 
-See [`github-action/README.md`](github-action/README.md) for the GitHub Action wrapper.
+## Architecture
 
-## Pipeline
+PRoctor is a Claude Code plugin. The pipeline is five skills + two subagents glued by a slash command:
 
 ```
-[1] analyze → ChangeMap
-[2] plan    → TestPlan
-[3] approve → ApprovedPlan
-[4] execute → TestResults     (subagent: pr-test-executor)
-[5] fix     → FixPRRef        (subagent: pr-test-fixer)
-[6] report  → PR comment
+analyze → plan → execute → fix → report
+              (with PR-body context as test inputs;
+               concurrency-3 per-item dispatch in execute)
 ```
 
-Each stage is a Claude Code skill with a JSON contract:
+Each stage is a Markdown SKILL.md with a JSON contract validated by `scripts/schema.py`. Subagents (`pr-test-executor`, `pr-test-fixer`) run isolated for per-item work.
 
-- [`analyzing-pr-changes`](plugins/proctor/skills/analyzing-pr-changes/SKILL.md)
-- [`planning-pr-tests`](plugins/proctor/skills/planning-pr-tests/SKILL.md)
-- [`executing-pr-tests`](plugins/proctor/skills/executing-pr-tests/SKILL.md)
-- [`fixing-test-failures`](plugins/proctor/skills/fixing-test-failures/SKILL.md)
-- [`reporting-pr-test-results`](plugins/proctor/skills/reporting-pr-test-results/SKILL.md)
+| Component | What |
+|---|---|
+| [`commands/proctor.md`](plugins/proctor/commands/proctor.md) | `/proctor <PR>` orchestrator |
+| [`commands/proctor-init.md`](plugins/proctor/commands/proctor-init.md) | Setup wizard for consumers |
+| [`skills/analyzing-pr-changes`](plugins/proctor/skills/analyzing-pr-changes/SKILL.md) | Diff + PR body → ChangeMap (with `pr_context`) |
+| [`skills/planning-pr-tests`](plugins/proctor/skills/planning-pr-tests/SKILL.md) | ChangeMap → TestPlan (cheapest tool first; reads PR body for ACs) |
+| [`skills/executing-pr-tests`](plugins/proctor/skills/executing-pr-tests/SKILL.md) | TestPlan → TestResults (parallel per-item) |
+| [`skills/fixing-test-failures`](plugins/proctor/skills/fixing-test-failures/SKILL.md) | Failed items → fix PR |
+| [`skills/reporting-pr-test-results`](plugins/proctor/skills/reporting-pr-test-results/SKILL.md) | Markdown report posted as PR comment |
+| [`agents/pr-test-executor`](plugins/proctor/agents/pr-test-executor.md) | One item → one result (incl. screenshot for chrome-devtools) |
+| [`agents/pr-test-fixer`](plugins/proctor/agents/pr-test-fixer.md) | One failed item → minimal git patch |
 
-Subagents:
+## CI integration (GitHub Action)
 
-- [`pr-test-executor`](plugins/proctor/agents/pr-test-executor.md) — runs one item.
-- [`pr-test-fixer`](plugins/proctor/agents/pr-test-fixer.md) — produces one patch.
+See [`github-action/README.md`](github-action/README.md). Auth via either Anthropic API key or Claude.ai OAuth token (`claude setup-token`). Workflow triggers on `pull_request` and on `/proctor run` comments (for `require_approval: true` mode).
+
+## Configuration reference
+
+`.pr-test.yml` at the consuming repo's root:
+
+```yaml
+setup:                                  # Bash run before any test item
+  - "pnpm install --frozen-lockfile"
+  - "pnpm dev > /tmp/dev.log 2>&1 &"
+  - "..."                               # Wait loop for readiness
+base_url: "http://127.0.0.1:5173"       # For chrome-devtools / curl tests
+test_focus: ["frontend", "api"]         # Hint to planner
+require_approval: false                 # true = wait for /proctor run comment
+auto_fix: true                          # Open fix PR on failures
+fix_pr_target_branch: "${PR_BRANCH}"
+per_test_timeout_seconds: 60
+mobile_emulator: false
+```
+
+See [`examples/.pr-test.yml`](examples/.pr-test.yml) for an annotated reference and [`docs/INTEGRATION.md`](docs/INTEGRATION.md) for stack-specific recipes.
+
+## Versioning + changelog
+
+Pin the action to a tag: `zealllot/proctor/github-action@v0.2.1`.
+
+[`CHANGELOG.md`](CHANGELOG.md) summarizes every release. Latest highlights: `/proctor-init` wizard (v0.2.1), parallel execute + cost surfacing + screenshot_focus (v0.2.0), inline screenshots via dedicated branch (v0.1.14).
 
 ## Design + plan docs
+
+For implementers and contributors:
 
 - Spec: [`docs/superpowers/specs/2026-05-09-proctor-design.md`](docs/superpowers/specs/2026-05-09-proctor-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-05-09-proctor.md`](docs/superpowers/plans/2026-05-09-proctor.md)
@@ -75,12 +106,12 @@ Subagents:
 ## Test PRoctor itself
 
 ```bash
-# Unit (Python helpers + skill harness)
+# Unit tests for Python helpers + skill harness
 python3 -m pytest tests/test_helpers.py -q
 ./tests/run-skill.sh analyzing-pr-changes frontend-only
 ./tests/run-skill.sh planning-pr-tests   mixed-stack
 
-# End-to-end (requires the proctor-fixtures repo)
+# End-to-end against the live fixtures repo (requires auth)
 ./tests/run-e2e.sh
 ```
 
