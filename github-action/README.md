@@ -1,57 +1,65 @@
 # PRoctor GitHub Action
 
-Composite Action that runs `/proctor` against a PR.
+Composite Action wrapping `/proctor`. Runs PRoctor on every PR and posts a structured report comment.
 
-## Triggers
+## Quick Start (manual)
 
 ```yaml
+# .github/workflows/proctor.yml
+name: PRoctor
+
 on:
   pull_request:
-    types: [opened, synchronize]   # default: run plan + execute
-  pull_request_target:             # for forked PRs (use carefully)
     types: [opened, synchronize]
-  issue_comment:                   # for `/proctor run` resume
+  issue_comment:
     types: [created]
-```
 
-## Authentication
-
-Provide **one** of the following inputs:
-
-- `anthropic-api-key` — an Anthropic API key from <https://console.anthropic.com>.
-- `claude-code-oauth-token` — a long-lived OAuth token obtained by running `claude setup-token` locally. Use this when you have a Claude.ai subscription and want to consume your subscription quota in CI instead of paying per token through the API.
-
-The Action errors fast if neither is provided.
-
-## Minimal usage (API key)
-
-```yaml
 jobs:
   proctor:
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write              # needed to push fix branches
-    steps:
-      - uses: zealllot/proctor/github-action@v0
-        with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-```
-
-## Minimal usage (Claude subscription)
-
-```yaml
-jobs:
-  proctor:
+    if: github.event_name != 'issue_comment' || contains(github.event.comment.body, '/proctor run')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
       contents: write
     steps:
-      - uses: zealllot/proctor/github-action@v0
+      - uses: zealllot/proctor/github-action@v0.2.1
         with:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
+
+Plus a `.pr-test.yml` at the repo root and a secret. The fastest path is `claude /proctor-init` — see the [main README](../README.md).
+
+## Authentication
+
+Provide one of:
+
+| Input | Source | Best for |
+|---|---|---|
+| `claude-code-oauth-token` | `claude setup-token` (browser flow) | Claude.ai subscribers — uses subscription quota |
+| `anthropic-api-key` | <https://console.anthropic.com> | Orgs with API billing |
+
+The Action errors fast if neither is provided.
+
+```bash
+# Set the secret without leaking it to the conversation:
+claude setup-token            # prints token; copy it
+pbpaste | gh secret set CLAUDE_CODE_OAUTH_TOKEN -R <owner>/<repo>
+echo -n | pbcopy              # clear clipboard
+```
+
+## Repo permissions (required for auto-fix)
+
+Auto-fix needs the workflow to push branches and open PRs:
+
+```bash
+gh api -X PUT "/repos/<owner>/<repo>/actions/permissions/workflow" \
+  -f default_workflow_permissions=write \
+  -F can_approve_pull_request_reviews=true
+```
+
+Or via web UI: **Settings → Actions → General → Workflow permissions** → "Read and write" + "Allow GitHub Actions to create and approve pull requests".
+
+Without these, the report comment still posts but fix-PR creation fails with a clear error.
 
 ## Approval mode
 
@@ -61,11 +69,71 @@ In the consuming repo's `.pr-test.yml`:
 require_approval: true
 ```
 
-When set, the Action posts the test plan as a comment and exits. A
-maintainer comments `/proctor run` to resume from the execute stage.
+Workflow posts the test plan and exits. A maintainer comments `/proctor run` to resume from the execute stage. Commenter must hold write access on the repo.
+
+## What runs in the Action
+
+```
+checkout
+    ↓
+cache Claude Code  (v0.1.13+, ~10s skipped on hit)
+    ↓
+install Claude (if cache miss)
+    ↓
+run /proctor pipeline:  analyze → plan → execute (parallel) → fix → report
+    ↓
+push screenshots → proctor-screenshots branch  (for inline-rendered PR comment images)
+    ↓
+upload .proctor/runs/ as Action artifact  (proctor-run-<PR>)
+```
+
+Per-item execute dispatches at concurrency 3 by default (override via `PROCTOR_EXECUTE_CONCURRENCY` env). 7-item plan runs in ~10–12 minutes wall-clock.
 
 ## Run artifacts
 
-Each run uploads `.proctor/runs/<run-id>/` as an Action artifact named
-`proctor-run-<pr-number>`. Includes ChangeMap, TestPlan, ApprovedPlan,
-TestResults, FixPRRef, and per-item logs.
+Every run uploads `.proctor/runs/<run-id>/` as `proctor-run-<PR>.zip`:
+
+```
+<run-id>/
+├── pr.json            ← gh pr view --json
+├── diff.patch         ← gh pr diff
+├── change-map.json    ← analyze output
+├── test-plan.json     ← plan output
+├── test-results.json  ← execute output (with summary counters)
+├── fix-pr-ref.json    ← fix output (number, url, branch — or null)
+├── report.md          ← what was posted
+├── usage.jsonl        ← per-stage / per-item token usage
+├── logs/<id>.log      ← per-test-item executor log
+└── screenshots/<id>.png   ← chrome-devtools screenshots
+```
+
+Linked from the PR comment header — click "download artifacts" to get everything.
+
+## Speeding up runs
+
+Add toolchain caching steps **before** the PRoctor action:
+
+```yaml
+- uses: actions/setup-go@v5      # Go module + build cache
+  with: { go-version: "1.22" }
+
+- uses: pnpm/action-setup@v3     # pnpm content-addressable store
+  with: { version: 9 }
+
+- uses: actions/setup-python@v5  # pip wheel cache
+  with: { python-version: "3.12", cache: pip }
+
+- uses: zealllot/proctor/github-action@v0.2.1
+  with:
+    claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+Saves ~30–90s per warm-cache run.
+
+## Anti-loop
+
+The action skips itself on `fix-*-*` branches and PRs authored by `github-actions[bot]` (PRoctor's own auto-fix outputs). Stops the recursion: fix → analyzed → fails → opens fix-of-fix → ...
+
+## Troubleshooting
+
+See the [Troubleshooting section in INTEGRATION.md](../docs/INTEGRATION.md#troubleshooting) for common failure modes (auth, no-server skips, force-push detection, fix-branch conflicts, rate limits).
