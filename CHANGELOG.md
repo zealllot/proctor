@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.1.9 — 2026-05-09
+
+### Fixed
+- **`logs_ref` is now optional on `TestResults` items.** In headless CI mode the executor reports inline and may not produce a per-item log file. The strict requirement was failing v0.1.8 stage-by-stage runs at validation time even when results were otherwise complete (e.g. fixtures PR #1: 2/2 pass with no log files written → SchemaError). `id`/`status`/`evidence` remain required.
+
 ## v0.1.8 — 2026-05-09
 
 ### Changed
