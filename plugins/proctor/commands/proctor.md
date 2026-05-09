@@ -103,9 +103,13 @@ Save output to `.proctor/runs/<run-id>/test-results.json`. Validate.
 If `aborted` field is set, post a PR comment "PRoctor: run aborted
 (<reason>)" and skip Stages 4 + 5.
 
-### 8. Stage 4 — fix (later task)
+### 8. Stage 4 — fix
 
-(Stub.)
+If `test-results.json` has any `fail` items AND `.pr-test.yml.auto_fix`
+is true (default), apply skill `fixing-test-failures`. Save output to
+`.proctor/runs/<run-id>/fix-pr-ref.json`.
+
+If no failures or `auto_fix: false`, write `null` to that path.
 
 ### 9. Stage 5 — report (later task)
 
