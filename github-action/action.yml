@@ -77,7 +77,13 @@ runs:
         # --plugin-dir; the model picks up the skills from there.
         PR="${{ steps.resolve.outputs.pr }}"
         PROMPT="You have the PRoctor plugin loaded. Run the full PRoctor pipeline against PR #${PR} in this repo. Apply skills in order: analyzing-pr-changes, planning-pr-tests, executing-pr-tests, fixing-test-failures, reporting-pr-test-results. Persist intermediate JSON to .proctor/runs/<run-id>/. Use 'gh pr view ${PR} --json ...' and 'gh pr diff ${PR}' for real data; use the Task tool to dispatch pr-test-executor for each test item. Honor .pr-test.yml at the repo root if present. The reporting stage should post the markdown report as a PR comment on PR #${PR} via 'gh pr comment'."
-        claude --print --plugin-dir "${{ github.action_path }}/../plugins/proctor" "$PROMPT"
+        # --dangerously-skip-permissions: in CI the workflow file is the
+        # trust boundary; the runner is ephemeral and credentials are
+        # scoped to one PR. Without this, gh/git operations stall waiting
+        # for an approval prompt that --print mode can't service.
+        claude --print --dangerously-skip-permissions \
+               --plugin-dir "${{ github.action_path }}/../plugins/proctor" \
+               "$PROMPT"
 
     - name: Upload run artifacts
       if: always()
