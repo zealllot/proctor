@@ -59,6 +59,36 @@ def test_change_map_rejects_malformed_pr_context():
         validate_change_map(bad)
 
 
+def test_change_map_accepts_directives():
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "directives": {
+                "skip_paths": ["vendor/", "third_party/**"],
+                "skip_categories": ["docs"],
+                "focus_paths": ["src/payments/"],
+                "max_items": 5,
+            },
+        },
+        "hunks": [{"file": "src/payments/charge.go", "category": "api", "risk": "high", "summary": "."}],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_rejects_bad_directive_types():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "directives": {"skip_paths": "not-a-list"},
+        },
+        "hunks": [{"file": "a.go", "category": "api", "risk": "low", "summary": "."}],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
 def test_test_plan_minimum_valid():
     valid = {
         "items": [
