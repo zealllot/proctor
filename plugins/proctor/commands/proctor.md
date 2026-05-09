@@ -111,9 +111,11 @@ is true (default), apply skill `fixing-test-failures`. Save output to
 
 If no failures or `auto_fix: false`, write `null` to that path.
 
-### 9. Stage 5 — report (later task)
+### 9. Stage 5 — report
 
-(Stub.)
+Apply skill `reporting-pr-test-results`. Pass test-results, fix-pr-ref,
+change-map, run-id, PR number. The skill posts the comment itself; the
+command just needs to surface success/failure to the user.
 
 ### 10. Release mutex (always, including on failure)
 
