@@ -55,6 +55,25 @@ def validate_change_map(cm: dict) -> None:
         _require(c in VALID_CATEGORIES,
                  f"ChangeMap.categories_present contains unknown {c!r}")
 
+    # Optional pr_context (added in v0.1.11): the analyzer surfaces the
+    # PR's title/body/links so the planner can use documented requirements
+    # as test inputs. Old ChangeMaps without this field are still valid.
+    if "pr_context" in cm:
+        ctx = cm["pr_context"]
+        _require(isinstance(ctx, dict), "ChangeMap.pr_context must be a dict if present")
+        if "title" in ctx:
+            _require(isinstance(ctx["title"], str),
+                     "ChangeMap.pr_context.title must be a string")
+        if "body" in ctx:
+            _require(isinstance(ctx["body"], str),
+                     "ChangeMap.pr_context.body must be a string")
+        if "links" in ctx:
+            _require(isinstance(ctx["links"], list),
+                     "ChangeMap.pr_context.links must be a list")
+        if "requirement_hints" in ctx:
+            _require(isinstance(ctx["requirement_hints"], list),
+                     "ChangeMap.pr_context.requirement_hints must be a list")
+
 
 def validate_test_plan(tp: dict) -> None:
     _require(isinstance(tp, dict), "TestPlan: must be a dict")

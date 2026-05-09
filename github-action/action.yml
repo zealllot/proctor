@@ -146,10 +146,12 @@ runs:
         run_stage analyze "Apply the analyzing-pr-changes skill against PR #${PR} in ${REPO}.
 
         Inputs (already fetched, just read them):
-        - $RUN_DIR/pr.json — PR metadata as JSON
+        - $RUN_DIR/pr.json — PR metadata as JSON (includes title and body)
         - $RUN_DIR/diff.patch — unified diff
 
-        Output: write a ChangeMap JSON to $RUN_DIR/change-map.json matching the contract documented in the skill (pr, hunks, categories_present). Use only the categories: frontend, api, schema, infra, mobile, cli, docs (no e2e-flow — that's added by the planner). Use only risks: low, medium, high.
+        Output: write a ChangeMap JSON to $RUN_DIR/change-map.json matching the contract documented in the skill: pr, pr_context, hunks, categories_present. Use only the categories: frontend, api, schema, infra, mobile, cli, docs (no e2e-flow — that's added by the planner). Use only risks: low, medium, high.
+
+        IMPORTANT: populate pr_context per the skill's procedure step 2 — extract title, body, links (URLs in the body, especially Slack/Jira/Linear/Notion/Confluence/Figma), and requirement_hints (acceptance-criteria style snippets). Do NOT follow the URLs.
 
         Do not output anything but a single short status line confirming the file is written. Do NOT include the full JSON in your reply." || exit 1
         validate_json "$RUN_DIR/change-map.json" validate_change_map || exit 1
@@ -158,10 +160,12 @@ runs:
         run_stage plan "Apply the planning-pr-tests skill.
 
         Inputs:
-        - $RUN_DIR/change-map.json
+        - $RUN_DIR/change-map.json — including pr_context (title, body, links, requirement_hints)
         - .pr-test.yml at the repo root (read it for setup, base_url, test_focus, per_test_timeout_seconds, auto_fix)
 
         Output: write a TestPlan JSON to $RUN_DIR/test-plan.json matching the contract. Honor the tool selection priority documented in the skill (lint-only first, then bash with existing tests, then curl, then chrome-devtools). Only plan curl / chrome-devtools items if .pr-test.yml has setup commands that bring up the relevant server.
+
+        IMPORTANT — read pr_context. The PR description often contains the actual acceptance criteria (concrete numbers, behaviors, references to Slack/Jira/Linear tickets). When pr_context.body or pr_context.requirement_hints contain a concrete claim, generate test items that verify that exact claim, phrased in the body's wording. When body links to an off-PR doc without quoting it, write 'Per <ticket-id>: ...' in the item's how: field and mark risk: medium. If body and diff disagree, plan items for both.
 
         Reply with only a short status line." || exit 1
         validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1

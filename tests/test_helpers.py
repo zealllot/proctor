@@ -33,6 +33,32 @@ def test_change_map_rejects_unknown_category():
         validate_change_map(bad)
 
 
+def test_change_map_accepts_pr_context():
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "title": "Add display_name with 100-char limit",
+            "body": "Per ACME-42: max 100 chars.",
+            "links": ["https://acme.atlassian.net/browse/ACME-42"],
+            "requirement_hints": ["max 100 chars on display_name"],
+        },
+        "hunks": [{"file": "a.go", "category": "api", "risk": "medium", "summary": "."}],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_rejects_malformed_pr_context():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": "not-a-dict",
+        "hunks": [{"file": "a.go", "category": "api", "risk": "low", "summary": "."}],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
 def test_test_plan_minimum_valid():
     valid = {
         "items": [
