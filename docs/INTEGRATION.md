@@ -89,7 +89,7 @@ jobs:
       pull-requests: write
       contents: write
     steps:
-      - uses: zealllot/proctor/github-action@v0.1.9
+      - uses: zealllot/proctor/github-action@v0.1.13
         with:
           # use exactly ONE of these:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -178,6 +178,50 @@ base_url: "http://127.0.0.1:5173"
 
 The wait loop is critical: if PRoctor starts dispatching test items before the server responds, browser items will fail with connection errors instead of recoverable skips.
 
+## Speeding up CI runs
+
+Each Action run pays for: Claude Code install (~10s), tool installs, and your repo's `setup:` deps. PRoctor itself caches the Claude Code binary across runs (you don't have to do anything for that). For your toolchain, add the standard caching steps before the PRoctor action — the official setup-* actions all cache by default.
+
+```yaml
+jobs:
+  proctor:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      # Caches Go module + build cache automatically
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # Caches the pnpm content-addressable store automatically
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      # Caches pip wheels automatically (cache: 'pip' enables it)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: zealllot/proctor/github-action@v0.1.13
+        with:
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+Typical impact on a warm cache: 1–2 min off the run time, or about 30% on small PRs.
+
+If your repo uses a tool not covered above (Java/Maven, Rust/Cargo, etc.), use `actions/cache@v4` directly with the standard cache paths:
+
+| Tool | Cache path | Cache key |
+|---|---|---|
+| Cargo | `~/.cargo/registry`, `~/.cargo/git`, `target/` | `${{ hashFiles('**/Cargo.lock') }}` |
+| Maven | `~/.m2/repository` | `${{ hashFiles('**/pom.xml') }}` |
+| Gradle | `~/.gradle/caches` | `${{ hashFiles('**/*.gradle*') }}` |
+| Bun | `~/.bun/install/cache` | `${{ hashFiles('**/bun.lockb') }}` |
+
 ## Troubleshooting
 
 **Workflow fails immediately with auth error.** You set the secret but PRoctor reports `Not logged in`. Likely cause: `gh secret set` was run interactively without input, leaving the value empty. Re-set with stdin: `pbpaste | gh secret set ... -R owner/repo`.
@@ -196,7 +240,12 @@ The wait loop is critical: if PRoctor starts dispatching test items before the s
 
 Pin the action to a tag, not `@main`:
 
-- `v0.1.9` — current (stage-by-stage bash orchestration, schema relaxation for headless logs_ref)
+- `v0.1.13` — current (Claude Code install cached between runs, ~10s saved per run)
+- `v0.1.12` — rich report comments (per-item evidence + Action/artifact links + screenshot refs)
+- `v0.1.11` — planner uses PR body context (Slack/Jira/requirement links)
+- `v0.1.10` — tolerant fix stage (fixer error doesn't kill the report)
+- `v0.1.9` — schema relaxation for headless logs_ref (no per-item log files required)
+- `v0.1.8` — stage-by-stage bash orchestration (eliminates multi-stage bailout)
 - `v0.1` — track latest 0.1.x patch (we don't move this tag, but you can `gh release` track via dependabot)
 
 Breaking changes will bump to `v0.2.0`; we'll document migration in the release notes.
