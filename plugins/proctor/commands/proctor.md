@@ -18,6 +18,13 @@ Run the PRoctor test pipeline against a GitHub PR.
 - If env var `GITHUB_ACTIONS=true` is set → CI mode.
 - Otherwise → local mode.
 
+### Dry-run
+
+If env `PROCTOR_DRY_RUN=1` is set:
+
+- Skip the fix-PR `git push` and `gh pr create`. Print what *would* be pushed and the would-be PR title/body to stdout. The reporting stage prints the rendered markdown to stdout instead of posting.
+- The mutex label is still acquired and released (locking is not output).
+
 ## Flow
 
 ### 1. Pre-flight
