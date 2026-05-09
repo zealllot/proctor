@@ -10,16 +10,57 @@ the contents of the repo's `.pr-test.yml`.
 
 Output: a single JSON object matching the `TestPlan` contract.
 
+## Tool selection priority (read FIRST)
+
+For every test item, pick the **cheapest tool that can verify the
+change**, in this order. Only escalate to the next tier when the
+current one cannot answer the question.
+
+1. **`lint-only`** — pure source-level facts. Examples: an attribute
+   was added (`aria-label="..."`, `type="button"`); an identifier was
+   renamed; a comment was updated; a markdown table is well-formed; a
+   YAML/JSON file parses. Verify via grep/awk/jq against the diff or
+   the file at PR head.
+
+2. **`bash` running the repo's existing test suite** — when the diff
+   touches code that the repo's own tests cover. Look for:
+   `package.json` scripts (`test`, `vitest`, `jest`), `pytest.ini` /
+   `pyproject.toml`, `go test ./...`, `Cargo.toml`, `Makefile`
+   targets. If a relevant target exists, plan ONE item that runs it
+   scoped to the changed paths (e.g. `pytest tests/api/`,
+   `go test ./api/...`, `pnpm test --run -- src/components/Login`).
+
+3. **`bash` with `curl`** — API contract verification when the repo's
+   `.pr-test.yml setup:` actually starts a server. The planner can
+   know this by inspecting `.pr-test.yml`: if `setup:` is empty or
+   missing, **do not plan** curl items against `base_url`.
+
+4. **`chrome-devtools`** — visible UI behavior, real user
+   interactions, visual regressions. Most expensive; reserve for
+   things steps 1–3 cannot verify. Same pre-flight as curl: only plan
+   chrome-devtools items if `.pr-test.yml setup:` brings up a server,
+   otherwise plan a `lint-only` item that checks the source.
+
+5. **`skip`** — only when the change genuinely cannot be verified
+   (e.g. behavior depends on external network state we can't reach,
+   or the change is purely cosmetic in a binary asset).
+
+When a behavior can ONLY be verified at runtime but `setup:` is
+missing, plan a `lint-only` item that grep-checks the source AND
+mark `risk: high` so the operator sees an environment was missing.
+
 ## Procedure
 
-1. For each hunk in `change-map.json`, generate **one or more** test
-   items. Map category → tool:
+1. For each hunk in `change-map.json`, decide what behavior changed,
+   then walk the priority above and pick the cheapest tool. The
+   category → tool mapping below is a **fallback default**, not a
+   forcing function:
 
-   | Category | Tool |
+   | Category | Default tool when nothing cheaper fits |
    |---|---|
-   | `frontend` | `chrome-devtools` |
-   | `api` | `bash` (curl or repo's test command) |
-   | `schema` | `bash` (run migration up + down on a throwaway DB) |
+   | `frontend` | `chrome-devtools` (only if `setup:` brings up a UI server) |
+   | `api` | `bash` (existing `*_test.go` / `pytest` / curl when server runs) |
+   | `schema` | `bash` (migration up + down on a throwaway DB) |
    | `infra` | `bash` (build dry-run, actionlint) |
    | `mobile` | `chrome-devtools` (mobile viewport) + `bash` (lint) |
    | `cli` | `bash` (run binary, golden-file diff) |
@@ -29,7 +70,8 @@ Output: a single JSON object matching the `TestPlan` contract.
    and `api`, append at least one extra item with `category: "e2e-flow"`
    that exercises the user-visible path involving both layers. Use
    `tool: "chrome-devtools"` and write `how:` as a short scripted
-   journey.
+   journey. **Skip this rule** if `.pr-test.yml setup:` doesn't bring
+   up both layers.
 
 3. Each item gets a unique `id` (`t-001`, `t-002`, ...) in declaration
    order. Use `depends_on` only when one test must run after another
