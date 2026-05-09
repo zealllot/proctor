@@ -73,6 +73,19 @@ def validate_change_map(cm: dict) -> None:
         if "requirement_hints" in ctx:
             _require(isinstance(ctx["requirement_hints"], list),
                      "ChangeMap.pr_context.requirement_hints must be a list")
+        # directives: user-provided HTML-comment overrides extracted from
+        # the PR body. Added in v0.2.3. All sub-fields optional.
+        if "directives" in ctx:
+            d = ctx["directives"]
+            _require(isinstance(d, dict),
+                     "ChangeMap.pr_context.directives must be a dict if present")
+            for list_key in ("skip_paths", "skip_categories", "focus_paths"):
+                if list_key in d:
+                    _require(isinstance(d[list_key], list),
+                             f"ChangeMap.pr_context.directives.{list_key} must be a list")
+            if "max_items" in d:
+                _require(isinstance(d["max_items"], int) and d["max_items"] > 0,
+                         "ChangeMap.pr_context.directives.max_items must be a positive int")
 
 
 def validate_test_plan(tp: dict) -> None:

@@ -66,18 +66,34 @@ runs:
         fi
 
     - name: Gate on issue_comment trigger
+      id: comment-gate
       if: github.event_name == 'issue_comment'
       shell: bash
       run: |
-        if [[ "${{ github.event.comment.body }}" != *"/proctor run"* ]]; then
-          echo "Comment is not a PRoctor run trigger; skipping."
-          exit 78  # neutral exit (older runners) — newer ignore this
+        BODY=${{ toJSON(github.event.comment.body) }}
+        # Trigger formats:
+        #   /proctor run                   → resume after require_approval
+        #   /proctor rerun [t-001 t-002]   → re-execute selected items only
+        #                                    (no IDs = re-run all items)
+        if [[ "$BODY" == *"/proctor rerun"* ]]; then
+          MODE=rerun
+          # Extract IDs after '/proctor rerun' on its line; tolerate trailing words
+          IDS=$(echo "$BODY" | grep -oE '/proctor rerun[^\\n]*' | head -1 | sed 's|^/proctor rerun||' | tr -s ' \t' '\n' | grep -E '^t-[0-9]+$' | tr '\n' ' ')
+          echo "mode=rerun" >> "$GITHUB_OUTPUT"
+          echo "rerun_ids=$IDS" >> "$GITHUB_OUTPUT"
+        elif [[ "$BODY" == *"/proctor run"* ]]; then
+          MODE=run
+          echo "mode=run" >> "$GITHUB_OUTPUT"
+        else
+          echo "Comment is not a PRoctor trigger; skipping."
+          exit 78  # neutral exit
         fi
-        # Require write access to the repo from the commenter
+        # Require write access on the commenter
         gh api -H "Accept: application/vnd.github+json" \
           repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission \
           --jq '.permission' | grep -E '^(admin|write|maintain)$' \
           || { echo "commenter lacks write access"; exit 1; }
+        echo "::notice::Trigger: $MODE${IDS:+ (IDs: $IDS)}"
       env:
         GH_TOKEN: ${{ github.token }}
 
@@ -118,6 +134,8 @@ runs:
         GITHUB_ACTIONS: "true"
         PR: ${{ steps.resolve.outputs.pr }}
         REPO: ${{ github.repository }}
+        PROCTOR_MODE: ${{ steps.comment-gate.outputs.mode || 'run' }}
+        PROCTOR_RERUN_IDS: ${{ steps.comment-gate.outputs.rerun_ids || '' }}
       run: |
         # Stage-by-stage orchestration: bash drives the pipeline; each
         # claude invocation handles ONE stage with a focused prompt.
@@ -136,7 +154,80 @@ runs:
         RUN_ID="pr${PR}-${PR_HEAD_SHA:0:7}-${HASH}"
         RUN_DIR=".proctor/runs/${RUN_ID}"
         mkdir -p "$RUN_DIR"
-        echo "[proctor:run] start pr=$PR sha=$PR_HEAD_SHA run_id=$RUN_ID"
+        echo "[proctor:run] start pr=$PR sha=$PR_HEAD_SHA run_id=$RUN_ID mode=$PROCTOR_MODE${PROCTOR_RERUN_IDS:+ rerun_ids=$PROCTOR_RERUN_IDS}"
+
+        # Rerun mode: skip analyze + plan, hydrate them from the most recent
+        # successful artifact for this PR, filter the plan to the requested
+        # IDs (or use all), and let the rest of the pipeline run normally.
+        if [[ "$PROCTOR_MODE" == "rerun" ]]; then
+          echo "::group::Rerun: hydrating from prior run artifact"
+          mkdir -p "$RUN_DIR/results"
+          PREV_RUN_ID=$(gh run list -R "$REPO" --workflow "$(basename ${{ github.workflow_ref }} 2>/dev/null || echo proctor.yml)" --limit 30 --json databaseId,conclusion,createdAt,event \
+            --jq "[.[] | select(.databaseId != ${{ github.run_id }} and (.event==\"pull_request\" or .event==\"pull_request_target\"))][0].databaseId" 2>/dev/null || echo "")
+          # Fallback: look up the last run on this branch
+          if [[ -z "$PREV_RUN_ID" || "$PREV_RUN_ID" == "null" ]]; then
+            HEAD_REF="$(gh pr view "$PR" -R "$REPO" --json headRefName --jq '.headRefName')"
+            PREV_RUN_ID=$(gh run list -R "$REPO" --branch "$HEAD_REF" --limit 5 --json databaseId,conclusion --jq "[.[] | select(.databaseId != ${{ github.run_id }})][0].databaseId" 2>/dev/null || echo "")
+          fi
+          if [[ -z "$PREV_RUN_ID" || "$PREV_RUN_ID" == "null" ]]; then
+            echo "::error::No previous run artifact found to rerun from."
+            echo "PROCTOR_PIPELINE_FAILED stage=rerun-init reason=no-previous-run" | tee -a /tmp/proctor-stdout.log
+            exit 1
+          fi
+          rm -rf /tmp/proctor-prev
+          mkdir -p /tmp/proctor-prev
+          if ! gh run download "$PREV_RUN_ID" -R "$REPO" --name "proctor-run-$PR" --dir /tmp/proctor-prev 2>/dev/null; then
+            echo "::error::Could not download artifact 'proctor-run-$PR' from run $PREV_RUN_ID."
+            echo "PROCTOR_PIPELINE_FAILED stage=rerun-init reason=artifact-missing" | tee -a /tmp/proctor-stdout.log
+            exit 1
+          fi
+          PREV_DIR=$(ls -d /tmp/proctor-prev/*/ 2>/dev/null | head -1)
+          if [[ -z "$PREV_DIR" ]]; then
+            echo "::error::Artifact extracted to no directory; aborting rerun."
+            exit 1
+          fi
+          echo "[proctor:rerun] hydrating from previous run $PREV_RUN_ID at $PREV_DIR"
+          for f in pr.json diff.patch change-map.json test-plan.json test-results.json fix-pr-ref.json; do
+            [[ -f "$PREV_DIR/$f" ]] && cp "$PREV_DIR/$f" "$RUN_DIR/$f"
+          done
+          # Carry over previous per-item logs and screenshots so the merged
+          # report still references unchanged items' evidence.
+          [[ -d "$PREV_DIR/logs" ]] && cp -r "$PREV_DIR/logs" "$RUN_DIR/logs"
+          [[ -d "$PREV_DIR/screenshots" ]] && cp -r "$PREV_DIR/screenshots" "$RUN_DIR/screenshots"
+          [[ -d "$PREV_DIR/results" ]] && cp -r "$PREV_DIR/results" "$RUN_DIR/results"
+          # Filter the plan: if rerun_ids is empty, run all items;
+          # otherwise keep only the listed IDs.
+          if [[ -n "$PROCTOR_RERUN_IDS" ]]; then
+            python3 - <<PY
+        import json, os
+        ids = set("$PROCTOR_RERUN_IDS".split())
+        plan = json.load(open(os.path.join("$RUN_DIR","test-plan.json")))
+        kept = [i for i in plan["items"] if i["id"] in ids]
+        plan["items"] = kept
+        json.dump(plan, open(os.path.join("$RUN_DIR","test-plan.json"),"w"), indent=2)
+        # Drop the PRIOR result entries for re-run IDs so execute writes fresh ones
+        rdir = os.path.join("$RUN_DIR","results")
+        for rid in ids:
+            p = os.path.join(rdir, f"{rid}.json")
+            if os.path.exists(p):
+                os.remove(p)
+        print(f"[proctor:rerun] re-executing {len(kept)} items: {sorted(i['id'] for i in kept)}")
+        PY
+          else
+            # No specific IDs → re-execute all items
+            python3 - <<PY
+        import json, os, glob
+        rdir = os.path.join("$RUN_DIR","results")
+        for p in glob.glob(os.path.join(rdir, "*.json")):
+            os.remove(p)
+        plan = json.load(open(os.path.join("$RUN_DIR","test-plan.json")))
+        print(f"[proctor:rerun] re-executing all {len(plan['items'])} items")
+        PY
+          fi
+          echo "::endgroup::"
+          # Force-push detection still applies in rerun mode (PR head SHA
+          # may have moved since the previous plan was made).
+        fi
 
         # Pre-fetch PR data so the model doesn't have to (and to make
         # the analyze stage purely about classification).
@@ -210,8 +301,9 @@ runs:
           python3 -c "import json, sys; sys.path.insert(0, '$PYTHONPATH'); from plugins.proctor.scripts.schema import $validator as v; v(json.load(open('$path'))); print('$path validated')"
         }
 
-        # ---- Stage 1: analyze ----
-        run_stage analyze "Apply the analyzing-pr-changes skill against PR #${PR} in ${REPO}.
+        # ---- Stage 1: analyze (skipped in rerun mode) ----
+        if [[ "$PROCTOR_MODE" != "rerun" ]]; then
+          run_stage analyze "Apply the analyzing-pr-changes skill against PR #${PR} in ${REPO}.
 
         Inputs (already fetched, just read them):
         - $RUN_DIR/pr.json — PR metadata as JSON (includes title and body)
@@ -219,24 +311,32 @@ runs:
 
         Output: write a ChangeMap JSON to $RUN_DIR/change-map.json matching the contract documented in the skill: pr, pr_context, hunks, categories_present. Use only the categories: frontend, api, schema, infra, mobile, cli, docs (no e2e-flow — that's added by the planner). Use only risks: low, medium, high.
 
-        IMPORTANT: populate pr_context per the skill's procedure step 2 — extract title, body, links (URLs in the body, especially Slack/Jira/Linear/Notion/Confluence/Figma), and requirement_hints (acceptance-criteria style snippets). Do NOT follow the URLs.
+        IMPORTANT: populate pr_context per the skill's procedure step 2 — extract title, body, links (URLs in the body, especially Slack/Jira/Linear/Notion/Confluence/Figma), and requirement_hints (acceptance-criteria style snippets), and directives (HTML comments like <!-- proctor:skip-paths a/ b/ -->, <!-- proctor:skip-categories docs --> etc. per the skill). Apply path/category directives BEFORE classifying hunks (per skill steps 3 + 6) so test items are never planned for skipped paths.
 
         Do not output anything but a single short status line confirming the file is written. Do NOT include the full JSON in your reply." || exit 1
-        validate_json "$RUN_DIR/change-map.json" validate_change_map || exit 1
+          validate_json "$RUN_DIR/change-map.json" validate_change_map || exit 1
+        else
+          echo "[proctor:analyze] skipped (rerun mode; using cached change-map.json from previous run)"
+        fi
 
-        # ---- Stage 2: plan ----
-        run_stage plan "Apply the planning-pr-tests skill.
+        # ---- Stage 2: plan (skipped in rerun mode) ----
+        if [[ "$PROCTOR_MODE" != "rerun" ]]; then
+          run_stage plan "Apply the planning-pr-tests skill.
 
         Inputs:
-        - $RUN_DIR/change-map.json — including pr_context (title, body, links, requirement_hints)
+        - $RUN_DIR/change-map.json — including pr_context (title, body, links, requirement_hints, directives)
         - .pr-test.yml at the repo root (read it for setup, base_url, test_focus, per_test_timeout_seconds, auto_fix)
 
         Output: write a TestPlan JSON to $RUN_DIR/test-plan.json matching the contract. Honor the tool selection priority documented in the skill (lint-only first, then bash with existing tests, then curl, then chrome-devtools). Only plan curl / chrome-devtools items if .pr-test.yml has setup commands that bring up the relevant server.
 
-        IMPORTANT — read pr_context. The PR description often contains the actual acceptance criteria (concrete numbers, behaviors, references to Slack/Jira/Linear tickets). When pr_context.body or pr_context.requirement_hints contain a concrete claim, generate test items that verify that exact claim, phrased in the body's wording. When body links to an off-PR doc without quoting it, write 'Per <ticket-id>: ...' in the item's how: field and mark risk: medium. If body and diff disagree, plan items for both.
+        IMPORTANT — read pr_context. The PR description often contains the actual acceptance criteria (concrete numbers, behaviors, references to Slack/Jira/Linear tickets). When pr_context.body or pr_context.requirement_hints contain a concrete claim, generate test items that verify that exact claim, phrased in the body's wording. When body links to an off-PR doc without quoting it, write 'Per <ticket-id>: ...' in the item's how: field and mark risk: medium. If body and diff disagree, plan items for both. If pr_context.directives.max_items is set, treat it as a soft cap on item count.
 
         Reply with only a short status line." || exit 1
-        validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1
+          validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1
+        else
+          echo "[proctor:plan] skipped (rerun mode; using cached test-plan.json filtered to rerun_ids)"
+          validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1
+        fi
 
         # ---- Stage 3: execute ----
         # Per-item bash dispatch. One claude --print per test item keeps each

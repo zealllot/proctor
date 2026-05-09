@@ -135,6 +135,23 @@ gh api -X PUT "/repos/<owner>/<repo>/actions/permissions/workflow" \
 
 Set `require_approval: true` in `.pr-test.yml`. PRoctor will post the test plan as a comment and exit; reply with `/proctor run` from any account with write access to resume execution.
 
+### 6. Selective re-run (optional)
+
+After a failed run, comment `/proctor rerun t-004 t-007` on the PR (must hold write access). PRoctor downloads the previous run's artifact, replays plan + previously-passed item results, and re-executes ONLY the listed items. The new report comment shows the merged outcome. With no IDs (`/proctor rerun`), all items re-execute.
+
+### 7. Skip directives in PR body (optional)
+
+Drop HTML comments anywhere in the PR body to skip noise:
+
+```html
+<!-- proctor:skip-paths vendor/ third_party/** generated/ -->
+<!-- proctor:skip-categories docs cli -->
+<!-- proctor:focus-paths src/payments/ -->
+<!-- proctor:max-items 5 -->
+```
+
+The analyzer applies these BEFORE classifying hunks, so test items are never planned for skipped paths/categories. `focus-paths` is a whitelist (only listed paths are considered). `max-items` is a soft cap on planner output.
+
 ## What PRoctor needs to actually run tests
 
 PRoctor's planner picks the cheapest tool that can verify each change:

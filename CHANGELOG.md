@@ -2,6 +2,17 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.3 — 2026-05-10
+
+### Added
+- **`/proctor rerun [t-001 t-002 ...]` comment trigger.** After a failed PR run, instead of pushing an empty commit (which re-runs the entire pipeline), maintainers with write access can comment `/proctor rerun t-004 t-007` to re-execute only those items. The action downloads the previous run's artifact, hydrates plan + cached item results, drops result entries for the requested IDs, and runs only those. With no IDs (`/proctor rerun`), all items re-execute. Skips analyze + plan stages — saves both time and cost.
+- **Skip directives in PR body.** Authors can drop HTML comments to filter what PRoctor plans:
+  - `<!-- proctor:skip-paths vendor/ third_party/** -->` — analyzer drops matching hunks before classification.
+  - `<!-- proctor:skip-categories docs cli -->` — drop hunks whose category is in the list.
+  - `<!-- proctor:focus-paths src/payments/ -->` — whitelist; keep only matching hunks.
+  - `<!-- proctor:max-items 5 -->` — soft cap on planner output.
+  Schema accepts `pr_context.directives` as optional. Analyzer applies path filters at step 3 (before classify) and category filters at step 6.
+
 ## v0.2.2 — 2026-05-10
 
 ### Changed
