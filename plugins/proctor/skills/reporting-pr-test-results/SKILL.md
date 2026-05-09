@@ -11,6 +11,7 @@ Input: `test-results.json`, `fix-pr-ref.json` (may be `null`), `change-map.json`
 - `RUN_ID` — PRoctor's run-id (the path component under `.proctor/runs/`)
 - `GITHUB_RUN_ID` — the GitHub Actions workflow run id, used to build the Action run URL and the artifact link
 - `GITHUB_SERVER_URL` — usually `https://github.com`
+- `SCREENSHOT_URL_BASE` — when present, screenshots have been pushed to a public branch and the report should inline-embed them via this URL prefix (e.g. `https://raw.githubusercontent.com/<owner>/<repo>/proctor-screenshots/<run-id>/`). When absent, fall back to a "(in artifact)" reference.
 
 Output: a markdown comment body. The skill posts the comment via `scripts/post_comment.py`.
 
@@ -49,7 +50,12 @@ For EACH item, render a `<details>`-collapsed block. Pass items default closed; 
 ```
 {end-if}
 
-{if item.screenshot_ref AND status != pass}**Screenshot:** [download from artifact](<server>/<repo>/actions/runs/<github-run-id>#artifacts) → `{item.screenshot_ref}`
+{if item.screenshot_ref}**Screenshot:**
+{if SCREENSHOT_URL_BASE is set}
+![{item.id} screenshot]({SCREENSHOT_URL_BASE}{basename of item.screenshot_ref})
+{else}
+[`{item.screenshot_ref}` in artifact](<server>/<repo>/actions/runs/<github-run-id>#artifacts)
+{end-if}
 {end-if}
 
 {if item.logs_ref}**Full log:** `{item.logs_ref}` (in artifact)
