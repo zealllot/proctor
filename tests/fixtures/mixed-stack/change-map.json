@@ -1,0 +1,23 @@
+{
+  "pr": {
+    "number": 902,
+    "head_sha": "ccccccc3333333333333333333333333333cccc",
+    "base_sha": "ddddddd4444444444444444444444444444dddd",
+    "url": "https://github.com/example/app/pull/902"
+  },
+  "hunks": [
+    {
+      "file": "src/pages/Settings.tsx",
+      "category": "frontend",
+      "risk": "medium",
+      "summary": "Add display name input field to settings form"
+    },
+    {
+      "file": "api/profile_handler.go",
+      "category": "api",
+      "risk": "medium",
+      "summary": "Validate display name length in UpdateProfile handler"
+    }
+  ],
+  "categories_present": ["frontend", "api"]
+}
