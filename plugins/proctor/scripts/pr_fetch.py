@@ -43,7 +43,7 @@ def fetch_pr(arg: PRArg) -> dict:
            "number,headRefOid,baseRefOid,url,headRefName,baseRefName,title,body,author"]
     if arg.repo:
         cmd += ["-R", arg.repo]
-    out = subprocess.check_output(cmd, text=True)
+    out = _gh_with_retry(cmd)
     return json.loads(out)
 
 
@@ -52,4 +52,21 @@ def fetch_diff(arg: PRArg) -> str:
     cmd = ["gh", "pr", "diff", str(arg.number)]
     if arg.repo:
         cmd += ["-R", arg.repo]
-    return subprocess.check_output(cmd, text=True)
+    return _gh_with_retry(cmd)
+
+
+import time as _time
+
+
+def _gh_with_retry(cmd: list[str], *, attempts: int = 3) -> str:
+    """Run a ``gh`` command with bounded retry on secondary rate limit (429)."""
+    for i in range(attempts):
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "")
+            if "rate limit" not in stderr.lower() or i == attempts - 1:
+                raise
+            wait_s = min(60 * (2 ** i), 300)
+            _time.sleep(wait_s)
+    raise RuntimeError("unreachable")
