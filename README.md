@@ -28,6 +28,10 @@ claude /proctor https://github.com/org/repo/pull/123
 
 Place `.pr-test.yml` at the repo being tested. See [`examples/.pr-test.yml`](examples/.pr-test.yml).
 
+## Drop into your project
+
+**[docs/INTEGRATION.md](docs/INTEGRATION.md)** is the complete consumer guide: install, auth (Anthropic API key or Claude.ai OAuth token), `.pr-test.yml` recipes for Node+Vite / Python+uvicorn / Go / multi-process, GitHub Action workflow file, troubleshooting.
+
 ## CI
 
 See [`github-action/README.md`](github-action/README.md) for the GitHub Action wrapper.
