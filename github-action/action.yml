@@ -171,6 +171,7 @@ runs:
         validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1
 
         # ---- Stage 3: execute ----
+        mkdir -p "$RUN_DIR/screenshots" "$RUN_DIR/logs"
         run_stage execute "Apply the executing-pr-tests skill.
 
         Inputs:
@@ -180,7 +181,13 @@ runs:
 
         Setup commands have already been run by the workflow before this stage, so DO NOT re-run them.
 
-        For each test item, dispatch the pr-test-executor subagent via the Task tool. Pass the item JSON, base_url, and timeout. The subagent must return ONE result JSON per item.
+        For each test item, dispatch the pr-test-executor subagent via the Task tool. Pass:
+        - the item JSON
+        - base_url
+        - timeout (per_test_timeout_seconds)
+        - logs_dir = $RUN_DIR  (so the executor's logs_ref / screenshot_ref end up at $RUN_DIR/logs/<id>.log and $RUN_DIR/screenshots/<id>.png and survive into the artifact)
+
+        Each subagent returns ONE result JSON. The result MUST include id, status, evidence (1–2 sentences citing the actual observed value, NOT 'test passed'). It SHOULD include command, output_excerpt (≤ 4 KB), and logs_ref when applicable. For chrome-devtools items, screenshot_ref is REQUIRED (path to a PNG at $RUN_DIR/screenshots/<id>.png).
 
         Output: write TestResults JSON to $RUN_DIR/test-results.json with the items array and summary counters. Reply with only a short status line." || exit 1
         validate_json "$RUN_DIR/test-results.json" validate_test_results || exit 1
@@ -217,14 +224,24 @@ runs:
         validate_json "$RUN_DIR/fix-pr-ref.json" validate_fix_pr_ref || exit 1
 
         # ---- Stage 5: report ----
+        # Pass through env so the report skill can build Action / artifact URLs
+        export RUN_ID
+        export GITHUB_RUN_ID="${{ github.run_id }}"
+        export GITHUB_SERVER_URL="${{ github.server_url }}"
         run_stage report "Apply the reporting-pr-test-results skill.
 
-        Inputs:
+        Inputs (read these files):
         - $RUN_DIR/test-results.json
         - $RUN_DIR/fix-pr-ref.json (may be null)
         - $RUN_DIR/change-map.json
 
-        Output: render the markdown report and post it as a PR comment via:
+        Environment values for cross-linking:
+        - PR=$PR, REPO=$REPO, RUN_ID=$RUN_ID
+        - GITHUB_RUN_ID=$GITHUB_RUN_ID, GITHUB_SERVER_URL=$GITHUB_SERVER_URL
+        - Action run URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID
+        - Artifact URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID#artifacts
+
+        Render per the skill's procedure: header with Action + artifact links, then a per-item <details> section for EACH item with What it did / Evidence / Command (if present) / Output (if present) / Screenshot ref (if present, link to artifact) / Logs ref (if present). Fail items must default <details open>. Post the rendered comment via:
           gh pr comment $PR -R $REPO --body-file <path-to-rendered>
         Confirm posting succeeded by reading the comment back via 'gh pr view $PR -R $REPO --json comments'.
 

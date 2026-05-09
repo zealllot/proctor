@@ -113,13 +113,20 @@ def validate_test_results(tr: dict) -> None:
 
     counts = {"pass": 0, "fail": 0, "skipped": 0}
     for i, item in enumerate(tr["items"]):
-        # logs_ref is optional: in headless CI runs the executor reports
-        # inline and may not produce a per-item log file. id/status/evidence
-        # are required for the report stage to render anything useful.
+        # Required: id, status, evidence (the executor's outcome summary).
+        # Optional rich-report fields (added in v0.1.12):
+        #   - command: the actual shell / browser command executed
+        #   - output_excerpt: a relevant snippet of stdout/stderr (≤ 4 KB)
+        #   - logs_ref: path inside .proctor/runs/<run-id>/ to a log file
+        #   - screenshot_ref: path to a screenshot for chrome-devtools items
         _require_keys(item, {"id", "status", "evidence"},
                       f"TestResults.items[{i}]")
         _require(item["status"] in VALID_STATUS,
                  f"TestResults.items[{i}].status {item['status']!r} invalid")
+        for opt_str in ("command", "output_excerpt", "logs_ref", "screenshot_ref"):
+            if opt_str in item:
+                _require(isinstance(item[opt_str], str),
+                         f"TestResults.items[{i}].{opt_str} must be a string if present")
         counts[item["status"]] += 1
 
     summary = tr["summary"]
