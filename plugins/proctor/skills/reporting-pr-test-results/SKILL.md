@@ -12,7 +12,10 @@ Input: `test-results.json`, `fix-pr-ref.json` (may be `null`), `change-map.json`
 - `GITHUB_RUN_ID` — the GitHub Actions workflow run id, used to build the Action run URL and the artifact link
 - `GITHUB_SERVER_URL` — usually `https://github.com`
 - `SCREENSHOT_URL_BASE` — when present, screenshots have been pushed to a public branch and the report should inline-embed them via this URL prefix (e.g. `https://raw.githubusercontent.com/<owner>/<repo>/proctor-screenshots/<run-id>/`). When absent, fall back to a "(in artifact)" reference.
-- `PROCTOR_USAGE_SUMMARY` — when present, a string like `tokens_in=45000 tokens_out=8000 cost_usd=0.1234` summarizing total claude API usage for this run. Render as a `**Cost:**` line in the header, formatting cost with a `$` sign and 4 decimals. Skip the line when empty.
+- `PROCTOR_USAGE_SUMMARY` — when present, a string like `tokens_in=45000 tokens_out=8000 cost_usd=0.1234|analyze=$0.020(1) plan=$0.030(1) execute=$0.080(5) execute-lint-batch=$0.012(1) report=$0.014(1)` summarizing total claude API usage for this run, plus a per-stage breakdown (after the `|`). Each per-stage entry is `<stage>=$<cost>(<calls>)`. Render two lines in the header:
+  - **Cost:** $<total> · <tokens_in> in / <tokens_out> out tokens
+  - **Where:** <stage>=$<cost> · <stage>=$<cost> · ... (sorted by cost desc when possible; top 5 only if there are more)
+  Skip both lines when empty.
 
 Output: a markdown comment body. The skill posts the comment via `scripts/post_comment.py`.
 

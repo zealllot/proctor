@@ -2,6 +2,12 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.2 — 2026-05-10
+
+### Changed
+- **Batched lint-only execution.** Previously, every test item — including trivial grep checks — got its own `claude --print` call, each re-loading the entire plugin context. PR #24's $1.44 run had ~470K input tokens, mostly from this duplication. The action now buckets items by tool: lint-only items go through ONE batched call, runtime items (chrome-devtools/curl/bash) still dispatch per-item in parallel. Estimated cost cut: 30–50% on grep-heavy PRs (most real PRs).
+- **Per-stage cost breakdown in report.** The `**Cost:**` line is now followed by a `**Where:**` line: `analyze=$0.02 · plan=$0.03 · execute=$0.85 (5×) · execute-lint-batch=$0.01 (1×) · report=$0.01`. Tells consumers which stage burned the budget so they know what to tune.
+
 ## v0.2.1 — 2026-05-09
 
 ### Added
