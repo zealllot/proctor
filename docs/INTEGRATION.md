@@ -89,7 +89,7 @@ jobs:
       pull-requests: write
       contents: write
     steps:
-      - uses: zealllot/proctor/github-action@v0.1.13
+      - uses: zealllot/proctor/github-action@v0.2.0
         with:
           # use exactly ONE of these:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -206,7 +206,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - uses: zealllot/proctor/github-action@v0.1.13
+      - uses: zealllot/proctor/github-action@v0.2.0
         with:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
@@ -240,12 +240,18 @@ If your repo uses a tool not covered above (Java/Maven, Rust/Cargo, etc.), use `
 
 Pin the action to a tag, not `@main`:
 
-- `v0.1.13` — current (Claude Code install cached between runs, ~10s saved per run)
-- `v0.1.12` — rich report comments (per-item evidence + Action/artifact links + screenshot refs)
+- `v0.2.0` — current (parallel execute, cost in report, anti-loop, retention, screenshot_focus, planner stub detection)
+- `v0.1.18` — per-item execute dispatch (no more context-bloat bailout)
+- `v0.1.17` — per-stage retry for transient claude failures
+- `v0.1.16` — git clone + force-push for screenshots branch
+- `v0.1.15` — fix nested-quote bash syntax error in stage 5
+- `v0.1.14` — inline screenshots via dedicated branch
+- `v0.1.13` — cache Claude Code install
+- `v0.1.12` — rich report (per-item evidence + Action/artifact links)
 - `v0.1.11` — planner uses PR body context (Slack/Jira/requirement links)
 - `v0.1.10` — tolerant fix stage (fixer error doesn't kill the report)
-- `v0.1.9` — schema relaxation for headless logs_ref (no per-item log files required)
-- `v0.1.8` — stage-by-stage bash orchestration (eliminates multi-stage bailout)
+- `v0.1.9` — schema relaxation for headless logs_ref
+- `v0.1.8` — stage-by-stage bash orchestration
 - `v0.1` — track latest 0.1.x patch (we don't move this tag, but you can `gh release` track via dependabot)
 
 Breaking changes will bump to `v0.2.0`; we'll document migration in the release notes.

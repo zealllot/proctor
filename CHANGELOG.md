@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.0 — 2026-05-09
+
+A batch of operational improvements based on lessons from running PRoctor across the fixture PRs.
+
+### Changed
+- **Parallel execute dispatch.** Per-item execute now runs at concurrency 3 (override via `PROCTOR_EXECUTE_CONCURRENCY`). A 7-item plan goes from ~34min to ~12min wall-clock. Cap protects against API rate limits and chrome-devtools port collisions.
+- **Cost surfacing.** All `claude --print` calls switched to `--output-format json` so per-call usage is captured. `usage.jsonl` records every stage and item; the report header now shows `**Cost:** $X · N in / M out tokens` so consumers know what each PR run cost.
+- **Planner detects `no test runner` stubs.** Skips planning `pnpm test`-style items when the `test` script is just an `npm init`-era stub (`echo "..." && exit 1`) or when no real runner is in deps. Same logic applies for Python (`pytest` not in `requirements.txt`), Go (no `*_test.go`), Rust (no `#[test]`), etc.
+- **Screenshot retention.** `proctor-screenshots` branch keeps only the most recent N run subdirs (default 30, override via `PROCTOR_SCREENSHOT_RETENTION`). Old subdirs are git-rm'd before push so the branch doesn't grow unbounded. Trade-off: PRs referencing >30-runs-old screenshots get broken images; the original is still in the Action artifact.
+
+### Added
+- **Anti-loop guard.** Workflow runs on `fix-*-*` branches or PRs authored by `github-actions[bot]` / `proctor-*` short-circuit immediately (early step `steps.antiloop.outputs.skip == 'true'`). Prevents the recursion: fix → analyzed → fails → opens fix-of-fix → ...
+- **`screenshot_focus` field on TestResults items.** Optional string the executor populates for chrome-devtools items pointing at WHICH region of the screenshot validates the evidence (or "verified via DOM only" when the assertion isn't visible). Renders below the image as "_What to look for:_". Catches the AC-1 failure mode where evidence checks `document.title` but the screenshot doesn't include the browser tab.
+
 ## v0.1.18 — 2026-05-09
 
 ### Changed
