@@ -1,0 +1,23 @@
+{
+  "pr": {
+    "number": 901,
+    "head_sha": "aaaaaaa1111111111111111111111111111aaaa",
+    "base_sha": "bbbbbbb2222222222222222222222222222bbbb",
+    "url": "https://github.com/example/app/pull/901"
+  },
+  "hunks": [
+    {
+      "file": "src/components/Login.tsx",
+      "category": "frontend",
+      "risk": "medium",
+      "summary": "New LoginButton React component that navigates to /login"
+    },
+    {
+      "file": "src/pages/Home.tsx",
+      "category": "frontend",
+      "risk": "low",
+      "summary": "Render LoginButton in Home page"
+    }
+  ],
+  "categories_present": ["frontend"]
+}
