@@ -123,7 +123,8 @@ def validate_test_results(tr: dict) -> None:
                       f"TestResults.items[{i}]")
         _require(item["status"] in VALID_STATUS,
                  f"TestResults.items[{i}].status {item['status']!r} invalid")
-        for opt_str in ("command", "output_excerpt", "logs_ref", "screenshot_ref"):
+        for opt_str in ("command", "output_excerpt", "logs_ref",
+                        "screenshot_ref", "screenshot_focus"):
             if opt_str in item:
                 _require(isinstance(item[opt_str], str),
                          f"TestResults.items[{i}].{opt_str} must be a string if present")

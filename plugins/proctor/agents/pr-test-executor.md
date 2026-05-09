@@ -43,6 +43,24 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
    `take_screenshot` tool with `format: "png"`, `fullPage: true`. Set
    `screenshot_ref` in your result to that exact path.
 
+   **Also set `screenshot_focus`** — a one-sentence pointer telling the
+   human reader WHERE in the screenshot to look to verify your evidence.
+   Examples:
+   - "Top-left of the nav bar shows 'PRoctor Fixtures Admin'."
+   - "Three pill-shaped status badges are visible in the table column."
+   - "Button at center of viewport with lock icon at left of 'Sign in' text."
+
+   If your assertion is on something the screenshot CAN'T show
+   (e.g. `document.title` is the browser tab; computed styles aren't
+   visible pixels), say so explicitly:
+   - "Evidence is on `document.title`, which is in the browser tab and not visible in this page screenshot — verified via DOM only."
+
+   The point is to force you (and the human reading the report) to
+   confirm the screenshot actually corroborates the evidence. If you
+   write the focus and realize the screenshot doesn't show what you
+   claim — change the assertion (test something visible) or change
+   the screenshot (capture the right region).
+
 4. Return EXACTLY ONE JSON object. Include as many of the optional
    fields as you can — they're what the report uses to give the human
    real signal:
@@ -56,6 +74,7 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
      "output_excerpt": "<button aria-label=\"Sign in to your account\" type=\"button\" class=\"px-4 py-2 ...\">Sign in</button>",
      "logs_ref": ".proctor/runs/<run-id>/<id>.log",
      "screenshot_ref": ".proctor/runs/<run-id>/screenshots/<id>.png",
+     "screenshot_focus": "Top-left nav shows the 'Sign in' button with lock icon.",
      "reason": "timeout"          // only when status=fail; one of: assertion, timeout, error, missing
    }
    ```

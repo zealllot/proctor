@@ -2,6 +2,70 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.0 — 2026-05-09
+
+A batch of operational improvements based on lessons from running PRoctor across the fixture PRs.
+
+### Changed
+- **Parallel execute dispatch.** Per-item execute now runs at concurrency 3 (override via `PROCTOR_EXECUTE_CONCURRENCY`). A 7-item plan goes from ~34min to ~12min wall-clock. Cap protects against API rate limits and chrome-devtools port collisions.
+- **Cost surfacing.** All `claude --print` calls switched to `--output-format json` so per-call usage is captured. `usage.jsonl` records every stage and item; the report header now shows `**Cost:** $X · N in / M out tokens` so consumers know what each PR run cost.
+- **Planner detects `no test runner` stubs.** Skips planning `pnpm test`-style items when the `test` script is just an `npm init`-era stub (`echo "..." && exit 1`) or when no real runner is in deps. Same logic applies for Python (`pytest` not in `requirements.txt`), Go (no `*_test.go`), Rust (no `#[test]`), etc.
+- **Screenshot retention.** `proctor-screenshots` branch keeps only the most recent N run subdirs (default 30, override via `PROCTOR_SCREENSHOT_RETENTION`). Old subdirs are git-rm'd before push so the branch doesn't grow unbounded. Trade-off: PRs referencing >30-runs-old screenshots get broken images; the original is still in the Action artifact.
+
+### Added
+- **Anti-loop guard.** Workflow runs on `fix-*-*` branches or PRs authored by `github-actions[bot]` / `proctor-*` short-circuit immediately (early step `steps.antiloop.outputs.skip == 'true'`). Prevents the recursion: fix → analyzed → fails → opens fix-of-fix → ...
+- **`screenshot_focus` field on TestResults items.** Optional string the executor populates for chrome-devtools items pointing at WHICH region of the screenshot validates the evidence (or "verified via DOM only" when the assertion isn't visible). Renders below the image as "_What to look for:_". Catches the AC-1 failure mode where evidence checks `document.title` but the screenshot doesn't include the browser tab.
+
+## v0.1.18 — 2026-05-09
+
+### Changed
+- **Per-item execute dispatch.** Previously the executing-pr-tests skill dispatched all subagents from a single `claude --print` invocation; with 5+ heavy chrome-devtools items the parent's context filled up and the model bailed with empty stdout (validated against `proctor-fixtures#21`). Now bash drives a per-item loop — each item gets its own focused `claude --print` call, with per-item retry. Aggregated into the canonical `test-results.json` after all items complete. Trade-off: more API round-trips, ~30s extra startup for a 7-item plan, but no more context-bloat bailout.
+
+## v0.1.17 — 2026-05-09
+
+### Fixed
+- **Per-stage retry on transient claude failures.** Both v0.1.15 and v0.1.16 hit the same recurring transient: a stage returns non-zero with empty stdout after ~1.5min; the next run succeeds. Adding a 2-attempt loop inside `run_stage()` with 5s backoff. Also catches "returns 0 but writes nothing" via empty-file check.
+
+## v0.1.16 — 2026-05-09
+
+### Fixed
+- **Screenshots push uses `git clone` + force-push.** v0.1.15 created the `proctor-screenshots` branch successfully but a subsequent run couldn't push back: `git fetch URL refspec` returned non-zero in the runner environment, the bash incorrectly fell through to "starting fresh", and the non-force push was rejected because the branch already existed. Replaced with `git clone --branch` (handles existing branch reliably) + `git push --force` (with retry).
+
+## v0.1.15 — 2026-05-09
+
+### Fixed
+- **Nested double-quotes in stage 5 prompt no longer break bash.** v0.1.14 failed with `syntax error near unexpected token '('` because the report-stage prompt contained the literal `"(in artifact)"` inside a double-quoted `run_stage` argument; bash closed the outer string at the inner `"`, then tried to interpret `(in artifact)` as a subshell. Reworded to avoid all nested quotes.
+
+## v0.1.14 — 2026-05-09
+
+### Added
+- **Inline screenshots via `proctor-screenshots` branch.** GitHub PR comments can't render images from Action artifacts directly. Between stages 4 and 5, the action now pushes any `<run-dir>/screenshots/*.png` to a long-lived `proctor-screenshots` branch in the consuming repo, indexed by run-id. The report skill embeds via `raw.githubusercontent.com` URLs.
+- **Screenshot section is unconditional.** Previous template gated rendering on `status != pass`, so passing chrome-devtools tests never showed their screenshots. Now shown for any item with `screenshot_ref`.
+
+## v0.1.13 — 2026-05-09
+
+### Changed
+- **Cache Claude Code install across runs.** `actions/cache@v4` around `~/.local/bin/claude` and adjacent share/config dirs. Install step skipped on cache hit. Saves ~10s/run.
+- **Document toolchain caching for consumers.** `INTEGRATION.md` "Speeding up CI runs" section shows the standard `setup-go@v5`, `pnpm/action-setup@v3`, `setup-python@v5 (cache: pip)` pattern.
+
+## v0.1.12 — 2026-05-09
+
+### Changed
+- **Rich per-item report sections.** Replaces the 5-column status table with `<details>`-collapsed sections per item: What it did / Evidence / Command / Output / Screenshot / Logs. Header now includes Action run + artifact links. Fail items default `<details open>`.
+- **Schema accepts optional `command`, `output_excerpt`, `logs_ref`, `screenshot_ref`.** Type-validated as strings if present.
+- **Executor now populates rich fields.** `pr-test-executor.md` documents required vs optional and the 4 KB cap on `output_excerpt`. `screenshot_ref` is REQUIRED for chrome-devtools items.
+
+## v0.1.11 — 2026-05-09
+
+### Added
+- **Planner uses PR body context.** Analyzer surfaces `pr_context` (title, body, deduplicated links to Slack/Jira/Linear/Notion/Confluence/Figma, requirement_hints extracted from the body). Planner explicitly weights items toward documented requirements, phrases assertions in the body's wording, and writes `Per <ticket-id>: ...` for off-PR docs.
+- **`pr_context` is optional in schema** — old ChangeMaps still validate.
+
+## v0.1.10 — 2026-05-09
+
+### Fixed
+- **Tolerant fix stage.** A brittle test triggered the fixer; the fixer chewed for 5+ min and returned non-zero, killing the whole pipeline before the report comment could post. Stage 4 (fix) is now non-fatal — failure logs a warning, writes `null` to `fix-pr-ref.json`, and continues to stage 5. Report renders "needs human review" when no fix PR was opened.
+
 ## v0.1.9 — 2026-05-09
 
 ### Fixed
