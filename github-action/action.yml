@@ -302,7 +302,7 @@ runs:
         - Action run URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID
         - Artifact URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID#artifacts
 
-        Render per the skill's procedure: header with Action + artifact links, then a per-item <details> section for EACH item with What it did / Evidence / Command / Output / Screenshot / Logs. ALWAYS include a Screenshot section for items that have screenshot_ref — when SCREENSHOT_URL_BASE is non-empty, embed the image inline as ![<id> screenshot](\$SCREENSHOT_URL_BASE<basename of screenshot_ref>); when empty, fall back to a "(in artifact)" reference. Fail items must default <details open>. Post the rendered comment via:
+        Render per the skill procedure: header with Action + artifact links, then a per-item <details> section for EACH item with What it did, Evidence, Command, Output, Screenshot, Logs. ALWAYS include a Screenshot subsection for items that have screenshot_ref — when SCREENSHOT_URL_BASE is non-empty, embed the image inline as a markdown image whose URL is SCREENSHOT_URL_BASE concatenated with the basename of screenshot_ref; when SCREENSHOT_URL_BASE is empty, fall back to a path-in-artifact reference. Fail items must default <details open>. Post the rendered comment via:
           gh pr comment $PR -R $REPO --body-file <path-to-rendered>
         Confirm posting succeeded by reading the comment back via 'gh pr view $PR -R $REPO --json comments'.
 
