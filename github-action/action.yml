@@ -185,14 +185,27 @@ runs:
         FAIL_COUNT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/test-results.json'))['summary']['fail'])")
         AUTO_FIX=$(python3 -c "import os, yaml; cfg = yaml.safe_load(open('.pr-test.yml')) if os.path.exists('.pr-test.yml') else {}; print('true' if (cfg or {}).get('auto_fix', True) else 'false')")
         if [[ "$FAIL_COUNT" -gt 0 && "$AUTO_FIX" == "true" ]]; then
-          run_stage fix "Apply the fixing-test-failures skill.
+          # Tolerant: if the fixer fails (timeout, can't produce a patch,
+          # or returns non-zero for any reason), don't abort the pipeline
+          # — we still want stage 5 to post a 'needs human review' report.
+          # The report skill reads fix-pr-ref.json; null means no fix PR.
+          if ! run_stage fix "Apply the fixing-test-failures skill.
 
         Inputs:
         - $RUN_DIR/test-results.json — has $FAIL_COUNT failed items
         - $RUN_DIR/change-map.json — hunks that the failed tests probed
         - PR head ref: $(jq -r .headRefName < "$RUN_DIR/pr.json")
 
-        Output: write FixPRRef JSON to $RUN_DIR/fix-pr-ref.json (or 'null'). Open the fix PR via gh and capture its number/url/branch in the JSON. Reply with only a short status line." || exit 1
+        Output: write FixPRRef JSON to $RUN_DIR/fix-pr-ref.json (or 'null'). Open the fix PR via gh and capture its number/url/branch in the JSON. Reply with only a short status line."; then
+            echo "::warning::Fix stage failed; downgrading to 'needs human review' and continuing to report"
+            echo "null" > "$RUN_DIR/fix-pr-ref.json"
+          fi
+          # Defensive: if the fixer returned 0 but didn't write a valid
+          # FixPRRef, also fall back to null so stage 5 can render.
+          if ! validate_json "$RUN_DIR/fix-pr-ref.json" validate_fix_pr_ref 2>/dev/null; then
+            echo "::warning::fix-pr-ref.json missing or invalid; treating as null"
+            echo "null" > "$RUN_DIR/fix-pr-ref.json"
+          fi
         else
           echo "[proctor:fix] skipped fail=$FAIL_COUNT auto_fix=$AUTO_FIX"
           echo "null" > "$RUN_DIR/fix-pr-ref.json"
