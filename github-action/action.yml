@@ -2,14 +2,27 @@ name: PRoctor
 description: AI-driven PR test runner — analyze, plan, execute, fix, report.
 inputs:
   anthropic-api-key:
-    description: ANTHROPIC_API_KEY for Claude Code.
-    required: true
+    description: ANTHROPIC_API_KEY for Claude Code. Either this OR claude-code-oauth-token must be provided.
+    required: false
+  claude-code-oauth-token:
+    description: CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`. Use this when authenticating with a Claude.ai subscription instead of an Anthropic API key. Either this OR anthropic-api-key must be provided.
+    required: false
   pr-number:
     description: PR number. Defaults to the event's PR number if available.
     required: false
 runs:
   using: composite
   steps:
+    - name: Verify Claude auth provided
+      shell: bash
+      run: |
+        if [[ -z "${{ inputs.anthropic-api-key }}" && -z "${{ inputs.claude-code-oauth-token }}" ]]; then
+          echo "ERR: PRoctor needs either 'anthropic-api-key' or 'claude-code-oauth-token' as an input. Neither was set." >&2
+          echo "  - For an Anthropic API key, get one at https://console.anthropic.com" >&2
+          echo "  - For a Claude.ai subscription, run 'claude setup-token' locally to generate an OAuth token." >&2
+          exit 1
+        fi
+
     - name: Checkout
       uses: actions/checkout@v4
       with:
@@ -55,6 +68,7 @@ runs:
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
         GH_TOKEN: ${{ github.token }}
         GITHUB_ACTIONS: "true"
       run: |
