@@ -416,8 +416,35 @@ runs:
           git -C "$ss_dir" add "$RUN_ID"
           git -C "$ss_dir" commit -q -m "screenshots: $RUN_ID"
 
-          # Force-with-lease handles parallel runs; the screenshots branch is
-          # opaque infra and history-rewrite collisions are acceptable.
+          # Retention: keep only the most recent N run subdirs. Older
+          # ones are removed and the deletion is committed. PRs that
+          # reference long-deleted screenshots will degrade to broken
+          # images, which is acceptable trade-off vs unbounded growth.
+          # Override via PROCTOR_SCREENSHOT_RETENTION (default: 30 runs).
+          RETAIN="${PROCTOR_SCREENSHOT_RETENTION:-30}"
+          # List subdirs (excluding the marker file and .git), newest first by name (run-ids are time-ordered),
+          # drop the first $RETAIN, delete the rest.
+          ls -1 "$ss_dir" 2>/dev/null \
+            | grep -v '^\.\(proctor-screenshots-marker\|git\)$' \
+            | grep -v '^.proctor-screenshots-marker$' \
+            | sort -r \
+            | tail -n +"$((RETAIN + 1))" \
+            > /tmp/proctor-ss-prune.txt || true
+          if [[ -s /tmp/proctor-ss-prune.txt ]]; then
+            removed=$(wc -l < /tmp/proctor-ss-prune.txt | tr -d ' ')
+            echo "[proctor:screenshots] retention: removing $removed old run-id subdirs (keep $RETAIN)"
+            while IFS= read -r olddir; do
+              [[ -z "$olddir" ]] && continue
+              git -C "$ss_dir" rm -rq "$olddir" 2>/dev/null || rm -rf "$ss_dir/$olddir"
+            done < /tmp/proctor-ss-prune.txt
+            if ! git -C "$ss_dir" diff --quiet --cached; then
+              git -C "$ss_dir" commit -q -m "screenshots: prune to last $RETAIN runs"
+            fi
+          fi
+
+          # Force push handles parallel-run rewrites; the screenshots
+          # branch is opaque infra and history-rewrite collisions are
+          # acceptable.
           push_ok=0
           for attempt in 1 2; do
             if git -C "$ss_dir" push --quiet --force "$ss_url" proctor-screenshots; then
