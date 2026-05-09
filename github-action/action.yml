@@ -64,7 +64,7 @@ runs:
         curl -fsSL https://claude.ai/install.sh | bash
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-    - name: Run PRoctor
+    - name: Run PRoctor (stage-by-stage)
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
@@ -74,82 +74,161 @@ runs:
         PR: ${{ steps.resolve.outputs.pr }}
         REPO: ${{ github.repository }}
       run: |
-        # claude --print does not process slash commands. Invoke the
-        # pipeline by prompt instead; the plugin is loaded via --plugin-dir.
-        # The single-quoted heredoc keeps backticks/${...} from being
-        # interpreted by bash; PR/REPO are spliced in via sed afterwards.
-        cat > /tmp/proctor-prompt.txt <<'PROMPT_EOF'
-        You are running the PRoctor pipeline against PR #__PR__ in repository __REPO__, headlessly inside a GitHub Action. The PRoctor plugin is loaded; its 5 skills and 2 subagents are available.
+        # Stage-by-stage orchestration: bash drives the pipeline; each
+        # claude invocation handles ONE stage with a focused prompt.
+        # Bash retries individual stages, validates JSON contracts via
+        # schema.py, and aggregates structured logs in run-id directory.
+        # This eliminates the multi-stage bailout vector we hit on
+        # v0.1.4–v0.1.7 (model produced stage 1 output then exited).
+        set -uo pipefail
+        PLUGIN_DIR="${{ github.action_path }}/../plugins/proctor"
+        PYTHONPATH="${{ github.action_path }}/.."
+        export PYTHONPATH
 
-        ABSOLUTE RULE — read carefully: this is a SINGLE non-interactive autonomous task. You are NOT in a chat. There is no human to respond to between stages. Your final stdout response MUST be the COMPLETE marker (or FAILED marker on hard error) AFTER all 5 stages have run. Returning a partial summary, an analyze-only result, or any other "I'll continue in the next turn" content WILL fail the entire job and waste tokens.
+        # Deterministic run-id (matches scripts/runlog.make_run_id format)
+        PR_HEAD_SHA="$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid')"
+        HASH="$(printf '%s' "${PR}|${PR_HEAD_SHA}|$(date -u +%Y%m%dT%H%M%SZ)" | shasum | cut -c1-8)"
+        RUN_ID="pr${PR}-${PR_HEAD_SHA:0:7}-${HASH}"
+        RUN_DIR=".proctor/runs/${RUN_ID}"
+        mkdir -p "$RUN_DIR"
+        echo "[proctor:run] start pr=$PR sha=$PR_HEAD_SHA run_id=$RUN_ID"
 
-        How to think about it: you have a list of 5 procedures to execute serially. After each one, the next runs immediately, in the same response. Only when stage 5 finishes do you emit the marker. Do not seek confirmation. Do not pause. Do not summarize partial progress. You have full permissions via --dangerously-skip-permissions; every gh / git / Bash / file-write call you need will succeed without asking.
+        # Pre-fetch PR data so the model doesn't have to (and to make
+        # the analyze stage purely about classification).
+        gh pr view "$PR" -R "$REPO" \
+           --json number,headRefOid,baseRefOid,url,headRefName,baseRefName,title,body,author \
+           > "$RUN_DIR/pr.json"
+        gh pr diff "$PR" -R "$REPO" > "$RUN_DIR/diff.patch"
 
-        Run-id: derive ONCE at the very start by calling python3 -c 'from plugins.proctor.scripts.runlog import make_run_id; print(make_run_id(pr_number=__PR__, head_sha="<sha>", started_at_iso="<iso>"))'. The result has format pr<num>-<7-char-sha>-<8-char-hash> with NO colons, slashes, or other special characters. Reuse this exact value for the whole pipeline. Persist every stage output to .proctor/runs/<run-id>/. Never invent your own run-id format — GitHub Action artifact paths reject colons, so a freeform ISO timestamp like 2026-05-09T05:43:42Z would break the upload step.
+        # Run user-defined setup commands from .pr-test.yml (installs,
+        # background servers, wait loops). Failures here are env-level
+        # and abort the pipeline before any stage runs.
+        if [[ -f .pr-test.yml ]]; then
+          python3 -c "import yaml; print('\n'.join(yaml.safe_load(open('.pr-test.yml')).get('setup') or []))" > /tmp/proctor-setup-cmds.txt
+          while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            echo "[proctor:setup] running: $cmd"
+            if ! bash -c "$cmd"; then
+              echo "::error::Setup command failed: $cmd"
+              echo "PROCTOR_PIPELINE_FAILED stage=setup reason=setup-command-failed" | tee -a /tmp/proctor-stdout.log
+              exit 1
+            fi
+          done < /tmp/proctor-setup-cmds.txt
+        fi
 
-        === Stage 1: analyze ===
-        Apply skill analyzing-pr-changes. Fetch PR data with: gh pr view __PR__ --json number,headRefOid,baseRefOid,url,headRefName,baseRefName,title,body,author -R __REPO__   AND   gh pr diff __PR__ -R __REPO__. Save the ChangeMap to change-map.json. Validate via plugins/proctor/scripts/schema.py:validate_change_map. Print one line on its own: [proctor:analyze] done hunks=N categories=[...]
-        Then immediately proceed to Stage 2. Do not wait. Do not narrate.
-
-        === Stage 2: plan ===
-        Apply skill planning-pr-tests to the ChangeMap. Save TestPlan to test-plan.json. Validate. Print: [proctor:plan] done items=N
-        Then immediately proceed to Stage 3.
-
-        === Stage 3: execute ===
-        Apply skill executing-pr-tests. Mode is CI; require_approval defaults false. Run setup commands from .pr-test.yml first (install deps, start servers, wait for readiness). For each test item, dispatch the pr-test-executor subagent via the Task tool with the item, base_url from .pr-test.yml, and a per_test_timeout_seconds value from .pr-test.yml. Save TestResults to test-results.json. Validate. Print: [proctor:execute] done pass=N fail=N skipped=N
-        Then immediately proceed to Stage 4.
-
-        === Stage 4: fix ===
-        Apply skill fixing-test-failures IFF TestResults has any failed items AND .pr-test.yml.auto_fix is true (default true). For zero failures, skip and write null to fix-pr-ref.json. Print: [proctor:fix] done <action>
-        Then immediately proceed to Stage 5.
-
-        === Stage 5: report ===
-        Apply skill reporting-pr-test-results. Render the markdown report. Post it as a PR comment using: gh pr comment __PR__ -R __REPO__ --body-file <rendered-report.md>. Confirm posting succeeded by reading the comment back via: gh pr view __PR__ -R __REPO__ --json comments. Print: [proctor:report] done comment_posted=true
-        Then proceed to Final.
-
-        === Final ===
-        Print this EXACT line as the very last line of your response, on its own:
-          PROCTOR_PIPELINE_COMPLETE pr=__PR__ run_id=<run-id>
-
-        Self-check before you stop responding: have all five [proctor:<stage>] done lines been printed in this response? If any are missing, you have not completed the task — go back and run the missing stages. Only after all five have been printed AND the comment has been posted, emit the COMPLETE marker.
-
-        On hard error: print 'PROCTOR_PIPELINE_FAILED stage=<name> reason=<short>' instead of COMPLETE; do NOT print COMPLETE in that case.
-        PROMPT_EOF
-        sed -i "s|__PR__|${PR}|g; s|__REPO__|${REPO}|g" /tmp/proctor-prompt.txt
-
-        # --dangerously-skip-permissions: in CI the workflow file is the
-        # trust boundary; the runner is ephemeral, credentials scoped to
-        # this PR. Without it, gh/git operations stall on approval prompts.
-        # Retry the run up to 2 times on early-bailout (no COMPLETE marker)
-        # — the model's compliance with multi-stage prompts is not 100%
-        # deterministic in --print mode.
-        run_once() {
-          claude --print --dangerously-skip-permissions \
-                 --plugin-dir "${{ github.action_path }}/../plugins/proctor" \
-                 "$(cat /tmp/proctor-prompt.txt)" | tee "$1"
+        run_stage() {
+          local stage="$1" prompt="$2"
+          local out="$RUN_DIR/$stage.stdout.log"
+          echo "::group::Stage: $stage"
+          echo "[proctor:$stage] start"
+          # Single attempt per stage — focused prompts rarely bail. If
+          # we hit flake later, add a retry here without affecting
+          # surrounding stages.
+          if ! claude --print --dangerously-skip-permissions \
+                      --plugin-dir "$PLUGIN_DIR" \
+                      "$prompt" 2>&1 | tee "$out"; then
+            echo "::error::Stage $stage: claude returned non-zero"
+            echo "PROCTOR_PIPELINE_FAILED stage=$stage reason=claude-error" \
+              | tee -a /tmp/proctor-stdout.log
+            echo "::endgroup::"
+            return 1
+          fi
+          echo "[proctor:$stage] done"
+          echo "::endgroup::"
         }
-        run_once /tmp/proctor-stdout.log
-        if ! grep -q "PROCTOR_PIPELINE_COMPLETE\|PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log; then
-          echo "::warning::First run did not reach a marker. Retrying once."
-          run_once /tmp/proctor-stdout.log
+
+        validate_json() {
+          local path="$1" validator="$2"
+          python3 -c "import json, sys; sys.path.insert(0, '$PYTHONPATH'); from plugins.proctor.scripts.schema import $validator as v; v(json.load(open('$path'))); print('$path validated')"
+        }
+
+        # ---- Stage 1: analyze ----
+        run_stage analyze "Apply the analyzing-pr-changes skill against PR #${PR} in ${REPO}.
+
+        Inputs (already fetched, just read them):
+        - $RUN_DIR/pr.json — PR metadata as JSON
+        - $RUN_DIR/diff.patch — unified diff
+
+        Output: write a ChangeMap JSON to $RUN_DIR/change-map.json matching the contract documented in the skill (pr, hunks, categories_present). Use only the categories: frontend, api, schema, infra, mobile, cli, docs (no e2e-flow — that's added by the planner). Use only risks: low, medium, high.
+
+        Do not output anything but a single short status line confirming the file is written. Do NOT include the full JSON in your reply." || exit 1
+        validate_json "$RUN_DIR/change-map.json" validate_change_map || exit 1
+
+        # ---- Stage 2: plan ----
+        run_stage plan "Apply the planning-pr-tests skill.
+
+        Inputs:
+        - $RUN_DIR/change-map.json
+        - .pr-test.yml at the repo root (read it for setup, base_url, test_focus, per_test_timeout_seconds, auto_fix)
+
+        Output: write a TestPlan JSON to $RUN_DIR/test-plan.json matching the contract. Honor the tool selection priority documented in the skill (lint-only first, then bash with existing tests, then curl, then chrome-devtools). Only plan curl / chrome-devtools items if .pr-test.yml has setup commands that bring up the relevant server.
+
+        Reply with only a short status line." || exit 1
+        validate_json "$RUN_DIR/test-plan.json" validate_test_plan || exit 1
+
+        # ---- Stage 3: execute ----
+        run_stage execute "Apply the executing-pr-tests skill.
+
+        Inputs:
+        - $RUN_DIR/test-plan.json — items to run
+        - $RUN_DIR/pr.json — PR metadata (for force-push detection: re-fetch headRefOid via 'gh pr view ${PR} --json headRefOid -R ${REPO}' and compare to pr.json's value; abort with aborted=force-push if changed)
+        - .pr-test.yml — base_url, per_test_timeout_seconds (default 60)
+
+        Setup commands have already been run by the workflow before this stage, so DO NOT re-run them.
+
+        For each test item, dispatch the pr-test-executor subagent via the Task tool. Pass the item JSON, base_url, and timeout. The subagent must return ONE result JSON per item.
+
+        Output: write TestResults JSON to $RUN_DIR/test-results.json with the items array and summary counters. Reply with only a short status line." || exit 1
+        validate_json "$RUN_DIR/test-results.json" validate_test_results || exit 1
+
+        # Decide whether stage 4 should run
+        FAIL_COUNT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/test-results.json'))['summary']['fail'])")
+        AUTO_FIX=$(python3 -c "import os, yaml; cfg = yaml.safe_load(open('.pr-test.yml')) if os.path.exists('.pr-test.yml') else {}; print('true' if (cfg or {}).get('auto_fix', True) else 'false')")
+        if [[ "$FAIL_COUNT" -gt 0 && "$AUTO_FIX" == "true" ]]; then
+          run_stage fix "Apply the fixing-test-failures skill.
+
+        Inputs:
+        - $RUN_DIR/test-results.json — has $FAIL_COUNT failed items
+        - $RUN_DIR/change-map.json — hunks that the failed tests probed
+        - PR head ref: $(jq -r .headRefName < "$RUN_DIR/pr.json")
+
+        Output: write FixPRRef JSON to $RUN_DIR/fix-pr-ref.json (or 'null'). Open the fix PR via gh and capture its number/url/branch in the JSON. Reply with only a short status line." || exit 1
+        else
+          echo "[proctor:fix] skipped fail=$FAIL_COUNT auto_fix=$AUTO_FIX"
+          echo "null" > "$RUN_DIR/fix-pr-ref.json"
         fi
-        if ! grep -q "PROCTOR_PIPELINE_COMPLETE\|PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log; then
-          echo "::warning::Second run did not reach a marker either. Final retry."
-          run_once /tmp/proctor-stdout.log
-        fi
+        validate_json "$RUN_DIR/fix-pr-ref.json" validate_fix_pr_ref || exit 1
+
+        # ---- Stage 5: report ----
+        run_stage report "Apply the reporting-pr-test-results skill.
+
+        Inputs:
+        - $RUN_DIR/test-results.json
+        - $RUN_DIR/fix-pr-ref.json (may be null)
+        - $RUN_DIR/change-map.json
+
+        Output: render the markdown report and post it as a PR comment via:
+          gh pr comment $PR -R $REPO --body-file <path-to-rendered>
+        Confirm posting succeeded by reading the comment back via 'gh pr view $PR -R $REPO --json comments'.
+
+        Save the rendered markdown to $RUN_DIR/report.md as well so the artifact has it.
+
+        Reply with only a short status line." || exit 1
+
+        # All stages done — emit the COMPLETE marker
+        echo "PROCTOR_PIPELINE_COMPLETE pr=$PR run_id=$RUN_ID" \
+          | tee -a /tmp/proctor-stdout.log
 
     - name: Verify pipeline completed
       shell: bash
       run: |
-        if grep -q "PROCTOR_PIPELINE_COMPLETE" /tmp/proctor-stdout.log; then
-          echo "Pipeline marker found — all 5 stages ran."
+        if grep -q "PROCTOR_PIPELINE_COMPLETE" /tmp/proctor-stdout.log 2>/dev/null; then
+          echo "Pipeline marker found — all stages ran."
           exit 0
         fi
         echo "::error::PRoctor pipeline did not reach the COMPLETE marker." >&2
-        if grep -q "PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log; then
+        if grep -q "PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log 2>/dev/null; then
           grep "PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log >&2
-        else
-          echo "::error::No FAILED marker either — model exited early without explicit failure." >&2
         fi
         exit 1
 
