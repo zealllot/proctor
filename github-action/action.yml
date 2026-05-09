@@ -259,18 +259,23 @@ runs:
         BASE_URL=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print(cfg.get('base_url','http://127.0.0.1:5173'))" 2>/dev/null || echo "http://127.0.0.1:5173")
         ITEM_TIMEOUT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print(cfg.get('per_test_timeout_seconds', 60))" 2>/dev/null || echo 60)
 
-        # Dispatch each item to a fresh claude invocation, in parallel
-        # (capped concurrency). Per-item retry handles transient claude
-        # failures without re-running successful items. Concurrency cap
-        # protects against API rate limits and chrome-devtools port
-        # collisions.
+        # Bucket items by tool. Lint-only items get batched into ONE claude
+        # call (single plugin load, single startup overhead) — 30-50% cost
+        # cut on grep-heavy PRs since input tokens drop dramatically. Runtime
+        # items (chrome-devtools, curl, bash) still dispatch per-item in
+        # parallel — they need their own environment per call.
         ITEM_COUNT=$(python3 -c "import json; print(len(json.load(open('$RUN_DIR/test-plan.json'))['items']))")
-        # Override via PROCTOR_EXECUTE_CONCURRENCY if a consumer wants
-        # different parallelism. 3 is conservative and validated.
         CONCURRENCY="${PROCTOR_EXECUTE_CONCURRENCY:-3}"
-        echo "[proctor:execute] dispatching $ITEM_COUNT items in parallel (concurrency=$CONCURRENCY), base_url=$BASE_URL, timeout=${ITEM_TIMEOUT}s"
-        # shellcheck disable=SC2046
-        ITEM_IDS=$(python3 -c "import json; [print(i['id']) for i in json.load(open('$RUN_DIR/test-plan.json'))['items']]")
+        LINT_IDS=()
+        RUNTIME_IDS=()
+        while IFS=$'\t' read -r id tool; do
+          if [[ "$tool" == "lint-only" ]]; then
+            LINT_IDS+=("$id")
+          else
+            RUNTIME_IDS+=("$id")
+          fi
+        done < <(python3 -c "import json; [print(f\"{i['id']}\t{i.get('tool','')}\") for i in json.load(open('$RUN_DIR/test-plan.json'))['items']]")
+        echo "[proctor:execute] $ITEM_COUNT items: ${#LINT_IDS[@]} lint-only (batched), ${#RUNTIME_IDS[@]} runtime (parallel @${CONCURRENCY}); base_url=$BASE_URL, timeout=${ITEM_TIMEOUT}s"
 
         run_item() {
           local ITEM_ID="$1"
@@ -311,9 +316,51 @@ runs:
           fi
         }
 
-        # Concurrency-limited parallel dispatch. bash 4.3+ provides 'wait -n'.
+        run_lint_batch() {
+          local ids=("$@")
+          (( ${#ids[@]} == 0 )) && return 0
+          local ids_csv; ids_csv=$(IFS=,; echo "${ids[*]}")
+          echo "::group::lint-only batch: $ids_csv"
+          local items_json
+          items_json=$(python3 -c "import json; ids=set('$ids_csv'.split(',')); print(json.dumps([i for i in json.load(open('$RUN_DIR/test-plan.json'))['items'] if i['id'] in ids], indent=2))")
+          local PROMPT="You are running ALL of the following lint-only test items. They are pure source-level checks (grep/awk/jq against the repo files at HEAD) — no server, no browser. Run them yourself in this single response, do not dispatch subagents (the per-item subagent overhead is wasteful for these).
+
+        For each item, write its result JSON to $RUN_DIR/results/<id>.json. Each result MUST include id, status (pass|fail|skipped), evidence (1-2 sentences citing actual observed values, including line numbers when applicable). It SHOULD include command (the literal grep/awk you ran), output_excerpt (the matched lines or a brief failure message). logs_ref/screenshot_ref are not required for lint-only items.
+
+        After all results are written, reply with a single short status line summarizing pass/fail counts. Do NOT include the JSON in your reply.
+
+        Items to run:
+        $items_json"
+          local attempt
+          for attempt in 1 2; do
+            if claude --print --output-format json --dangerously-skip-permissions \
+                       --plugin-dir "$PLUGIN_DIR" \
+                       "$PROMPT" > "$RUN_DIR/logs/lint-batch.exec.log" 2>&1; then
+              break
+            fi
+            echo "::warning::lint batch attempt $attempt failed; retrying once"
+            sleep 5
+          done
+          # Capture batch usage as a single 'stage=execute-lint-batch' line
+          python3 -c "import json,sys; d=json.load(open('$RUN_DIR/logs/lint-batch.exec.log')); u=d.get('usage') or {}; cost=d.get('total_cost_usd') or 0; sys.stdout.write(json.dumps({'stage':'execute','substage':'lint-batch','items':$(echo "${#ids[@]}"),'tokens_in':u.get('input_tokens',0)+u.get('cache_read_input_tokens',0),'tokens_out':u.get('output_tokens',0),'cost_usd':cost})+'\n')" >> "$RUN_DIR/usage.jsonl" 2>/dev/null || true
+          # Synthesize fail entries for any item the batch didn't write
+          for ITEM_ID in "${ids[@]}"; do
+            if [[ ! -s "$RUN_DIR/results/${ITEM_ID}.json" ]]; then
+              echo "::warning::lint item $ITEM_ID missing result; recording as fail/error"
+              cat > "$RUN_DIR/results/${ITEM_ID}.json" <<JSON
+        {"id":"$ITEM_ID","status":"fail","reason":"error","evidence":"Lint batch did not write a result for this item; see logs/lint-batch.exec.log."}
+        JSON
+            fi
+          done
+          echo "::endgroup::"
+        }
+
+        # 1. Run all lint-only items as one batched call (sequential to other stages)
+        run_lint_batch "${LINT_IDS[@]}"
+
+        # 2. Concurrency-limited parallel dispatch for runtime items
         running=0
-        for ITEM_ID in $ITEM_IDS; do
+        for ITEM_ID in "${RUNTIME_IDS[@]}"; do
           if (( running >= CONCURRENCY )); then
             wait -n
             running=$((running - 1))
@@ -465,21 +512,34 @@ runs:
 
         # ---- Aggregate cost from usage.jsonl ----
         # Sum tokens + cost across all stages and per-item executions so
-        # the report can show consumers what each PR run cost.
+        # the report can show consumers what each PR run cost. Also build
+        # a per-stage breakdown so they know where the budget went.
         if [[ -s "$RUN_DIR/usage.jsonl" ]]; then
           PROCTOR_USAGE_SUMMARY=$(python3 -c "
         import json
+        from collections import defaultdict
         tin = tout = 0
         cost = 0.0
+        by_stage = defaultdict(lambda: {'tin':0,'tout':0,'cost':0.0,'n':0})
         for ln in open('$RUN_DIR/usage.jsonl'):
             try:
                 d = json.loads(ln)
-                tin  += int(d.get('tokens_in')  or 0)
-                tout += int(d.get('tokens_out') or 0)
-                cost += float(d.get('cost_usd') or 0)
+                ti = int(d.get('tokens_in')  or 0)
+                to = int(d.get('tokens_out') or 0)
+                c  = float(d.get('cost_usd') or 0)
+                tin  += ti; tout += to; cost += c
+                stage = d.get('stage','unknown')
+                if d.get('substage') == 'lint-batch':
+                    stage = 'execute-lint-batch'
+                by_stage[stage]['tin']  += ti
+                by_stage[stage]['tout'] += to
+                by_stage[stage]['cost'] += c
+                by_stage[stage]['n']    += 1
             except Exception:
                 pass
-        print(f'tokens_in={tin} tokens_out={tout} cost_usd={cost:.4f}')
+        # Render as 'tokens_in=X tokens_out=Y cost_usd=Z|stage1=\$A stage2=\$B ...'
+        breakdown = ' '.join(f'{s}=\${by_stage[s][\"cost\"]:.3f}({by_stage[s][\"n\"]})' for s in sorted(by_stage.keys()))
+        print(f'tokens_in={tin} tokens_out={tout} cost_usd={cost:.4f}|{breakdown}')
           ")
           echo "[proctor:usage] $PROCTOR_USAGE_SUMMARY"
         else
