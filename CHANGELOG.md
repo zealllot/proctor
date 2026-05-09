@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.1 — 2026-05-09
+
+### Added
+- **`/proctor-init` setup wizard.** Interactive slash command that detects the consumer's stack, asks 5 short questions (stack confirmation, setup commands, auto-fix on/off, run mode, auth method), generates `.pr-test.yml` + `.github/workflows/proctor.yml` pinned to the current PRoctor tag, walks the user through the auth secret (without ever seeing the value), and offers to flip the repo's Actions PR-creation permission via API. Total integration time: ~2 minutes vs. ~15 minutes manual. README and INTEGRATION.md now lead with this path.
+
 ## v0.2.0 — 2026-05-09
 
 A batch of operational improvements based on lessons from running PRoctor across the fixture PRs.
