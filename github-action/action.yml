@@ -140,13 +140,27 @@ runs:
           local out="$RUN_DIR/$stage.stdout.log"
           echo "::group::Stage: $stage"
           echo "[proctor:$stage] start"
-          # Single attempt per stage — focused prompts rarely bail. If
-          # we hit flake later, add a retry here without affecting
-          # surrounding stages.
-          if ! claude --print --dangerously-skip-permissions \
-                      --plugin-dir "$PLUGIN_DIR" \
-                      "$prompt" 2>&1 | tee "$out"; then
-            echo "::error::Stage $stage: claude returned non-zero"
+          # Up to 2 attempts per stage. Empirically the execute stage
+          # occasionally returns non-zero with no stdout (transient API
+          # / rate-limit / model bailout); a fresh second invocation
+          # almost always succeeds. Retries are stage-local so a
+          # successful earlier stage isn't repeated.
+          local attempt rc
+          for attempt in 1 2; do
+            if claude --print --dangerously-skip-permissions \
+                       --plugin-dir "$PLUGIN_DIR" \
+                       "$prompt" 2>&1 | tee "$out"; then
+              break
+            fi
+            rc=$?
+            if [[ $attempt -lt 2 ]]; then
+              echo "::warning::Stage $stage attempt $attempt failed (exit $rc); retrying once"
+              # Small backoff in case it's a rate limit
+              sleep 5
+            fi
+          done
+          if ! grep -q . "$out" 2>/dev/null; then
+            echo "::error::Stage $stage: empty output after retries"
             echo "PROCTOR_PIPELINE_FAILED stage=$stage reason=claude-error" \
               | tee -a /tmp/proctor-stdout.log
             echo "::endgroup::"
