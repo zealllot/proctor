@@ -111,6 +111,34 @@ def test_test_results_logs_ref_optional():
     validate_test_results(valid)
 
 
+def test_test_results_rich_fields_accepted():
+    valid = {
+        "items": [
+            {
+                "id": "t-001", "status": "pass", "evidence": "Found Phone column",
+                "command": "curl http://x/admin/users",
+                "output_excerpt": "<th>Phone</th>",
+                "logs_ref": ".proctor/runs/x/logs/t-001.log",
+                "screenshot_ref": ".proctor/runs/x/screenshots/t-001.png",
+            },
+        ],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    validate_test_results(valid)
+
+
+def test_test_results_rejects_non_string_rich_field():
+    bad = {
+        "items": [
+            {"id": "t-001", "status": "pass", "evidence": "ok",
+             "command": 12345},
+        ],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
 def test_fix_pr_ref_can_be_null():
     validate_fix_pr_ref(None)
 

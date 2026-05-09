@@ -37,22 +37,47 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
 
 2. Write all logs to `<logs_dir>/<id>.log`.
 
-3. Return EXACTLY ONE JSON object:
+3. **For chrome-devtools items**: capture a screenshot at the assertion
+   point (after the page is rendered, before returning). Save it to
+   `<logs_dir>/screenshots/<id>.png` via the chrome-devtools MCP's
+   `take_screenshot` tool with `format: "png"`, `fullPage: true`. Set
+   `screenshot_ref` in your result to that exact path.
+
+4. Return EXACTLY ONE JSON object. Include as many of the optional
+   fields as you can — they're what the report uses to give the human
+   real signal:
 
    ```jsonc
    {
      "id": "t-001",
      "status": "pass",            // pass | fail | skipped
-     "evidence": "Found 'Sign in' button at /",
-     "logs_ref": ".proctor/runs/<run-id>/<id>.log",  // optional; omit if no log file was written
+     "evidence": "Button[name='Sign in', aria-label='Sign in to your account'] visible at base_url; clicking navigates to /login",
+     "command": "navigate http://127.0.0.1:5173 && evaluate document.querySelector('button[aria-label]').outerHTML",
+     "output_excerpt": "<button aria-label=\"Sign in to your account\" type=\"button\" class=\"px-4 py-2 ...\">Sign in</button>",
+     "logs_ref": ".proctor/runs/<run-id>/<id>.log",
+     "screenshot_ref": ".proctor/runs/<run-id>/screenshots/<id>.png",
      "reason": "timeout"          // only when status=fail; one of: assertion, timeout, error, missing
    }
    ```
 
-   `evidence` is the human-readable summary of what the test did and the
-   outcome. `logs_ref` is optional — include it when you wrote a log
-   file at `<logs_dir>/<id>.log`, omit it otherwise (e.g. for inline
-   lint-only checks where there's nothing to log).
+   Field guide (only `id`, `status`, `evidence` are required; the
+   rest are optional but strongly preferred when applicable):
+   - `evidence`: 1–2 sentences telling the human what was checked
+     and the actual observed value. Cite real numbers / strings /
+     line numbers. Don't say "test passed" — say WHY.
+   - `command`: the literal shell command, curl URL, or
+     chrome-devtools sequence executed. Lets the human reproduce
+     locally.
+   - `output_excerpt`: ≤ 4 KB of relevant output (truncate the
+     middle if longer). For lint-only items, the matched lines.
+     For curl, the response body. For chrome-devtools, the queried
+     DOM snippet.
+   - `logs_ref`: path inside `<logs_dir>/<id>.log` if you wrote
+     one. Skip if all signal already fits in `evidence` /
+     `output_excerpt`.
+   - `screenshot_ref`: REQUIRED for chrome-devtools items. Path
+     relative to the repo root (typically
+     `.proctor/runs/<run-id>/screenshots/<id>.png`).
 
 ## Constraints
 
