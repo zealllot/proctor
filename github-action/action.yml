@@ -58,11 +58,30 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
 
+    # Cache the Claude Code install so subsequent runs skip the
+    # ~10s curl-and-install step. Bump CACHE_VERSION below to force a
+    # re-download when Claude Code ships an update we want to pick up.
+    - name: Cache Claude Code install
+      id: cache-claude
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.local/bin/claude
+          ~/.local/share/anthropic-claude-code
+          ~/.local/share/claude
+        # GitHub evicts caches not accessed in 7 days, so a stable key is
+        # fine. Bump the trailing "v1" if you need to force re-install.
+        key: claude-code-${{ runner.os }}-${{ runner.arch }}-v1
+
     - name: Install Claude Code
+      if: steps.cache-claude.outputs.cache-hit != 'true'
       shell: bash
       run: |
         curl -fsSL https://claude.ai/install.sh | bash
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Put Claude Code on PATH
+      shell: bash
+      run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run PRoctor (stage-by-stage)
       shell: bash
