@@ -1,0 +1,37 @@
+# .pr-test.yml — PRoctor config for this repo. Place at repo root.
+# All fields optional. Defaults shown.
+
+# Commands run before any test executes. Use trailing & for processes
+# that need to stay up (server). PRoctor sends SIGTERM to the process
+# group on completion.
+setup:
+  - "pnpm install --frozen-lockfile"
+  - "pnpm dev &"
+
+# Entry URL for browser-based tests. The planner inserts this where it
+# writes "Navigate to base_url; ..." in chrome-devtools steps.
+base_url: "http://localhost:5173"
+
+# Hint to the planner. Test items in these categories get prioritized.
+# Other categories are still tested.
+test_focus: ["frontend", "api"]
+
+# CI behavior:
+#   false (default): plan posted as comment, execution proceeds.
+#   true:            plan posted; runner exits. Resume by posting
+#                    `/proctor run` (commenter must hold write access).
+require_approval: false
+
+# Whether to open a fix PR when items fail. Default true.
+auto_fix: true
+
+# Base branch for the fix PR. Default: original PR head.
+# Use ${PR_BRANCH} for the original PR's head ref.
+fix_pr_target_branch: "${PR_BRANCH}"
+
+# Hard timeout per test item (seconds). Default 300 (5 min).
+per_test_timeout_seconds: 300
+
+# Set true to actually boot iOS/Android simulators for `mobile` items.
+# Default false — only chrome-devtools mobile viewport + lint runs.
+mobile_emulator: false
