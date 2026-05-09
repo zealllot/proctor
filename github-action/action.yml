@@ -1,0 +1,70 @@
+name: PRoctor
+description: AI-driven PR test runner — analyze, plan, execute, fix, report.
+inputs:
+  anthropic-api-key:
+    description: ANTHROPIC_API_KEY for Claude Code.
+    required: true
+  pr-number:
+    description: PR number. Defaults to the event's PR number if available.
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Resolve PR number
+      id: resolve
+      shell: bash
+      run: |
+        if [[ -n "${{ inputs.pr-number }}" ]]; then
+          echo "pr=${{ inputs.pr-number }}" >> "$GITHUB_OUTPUT"
+        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+        elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+          echo "pr=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "no PR number" >&2; exit 1
+        fi
+
+    - name: Gate on issue_comment trigger
+      if: github.event_name == 'issue_comment'
+      shell: bash
+      run: |
+        if [[ "${{ github.event.comment.body }}" != *"/proctor run"* ]]; then
+          echo "Comment is not a PRoctor run trigger; skipping."
+          exit 78  # neutral exit (older runners) — newer ignore this
+        fi
+        # Require write access to the repo from the commenter
+        gh api -H "Accept: application/vnd.github+json" \
+          repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission \
+          --jq '.permission' | grep -E '^(admin|write|maintain)$' \
+          || { echo "commenter lacks write access"; exit 1; }
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Install Claude Code
+      shell: bash
+      run: |
+        curl -fsSL https://claude.ai/install.sh | bash
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run PRoctor
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_ACTIONS: "true"
+      run: |
+        claude --plugin-dir "${{ github.action_path }}/../plugins/proctor" \
+               /proctor "${{ steps.resolve.outputs.pr }}"
+
+    - name: Upload run artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: proctor-run-${{ steps.resolve.outputs.pr }}
+        path: .proctor/runs/
+        if-no-files-found: warn
