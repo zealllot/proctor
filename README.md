@@ -17,6 +17,17 @@ Given a GitHub PR, PRoctor:
 claude plugin add /path/to/proctor/plugins/proctor
 ```
 
+## Drop into your project (fastest)
+
+```bash
+cd /your/repo
+claude /proctor-init
+```
+
+5 questions, ~2 minutes. The wizard detects your stack, asks for setup commands / auto-fix / approval / auth method, writes `.pr-test.yml` + `.github/workflows/proctor.yml`, walks you through the auth secret, and offers to flip the Actions PR-creation setting via API.
+
+See [docs/INTEGRATION.md](docs/INTEGRATION.md) for the manual path and full reference (recipes for Node+Vite / Python+uvicorn / Go / multi-process, troubleshooting).
+
 ## Usage
 
 ```bash
@@ -27,10 +38,6 @@ claude /proctor https://github.com/org/repo/pull/123
 ## Configure
 
 Place `.pr-test.yml` at the repo being tested. See [`examples/.pr-test.yml`](examples/.pr-test.yml).
-
-## Drop into your project
-
-**[docs/INTEGRATION.md](docs/INTEGRATION.md)** is the complete consumer guide: install, auth (Anthropic API key or Claude.ai OAuth token), `.pr-test.yml` recipes for Node+Vite / Python+uvicorn / Go / multi-process, GitHub Action workflow file, troubleshooting.
 
 ## CI
 

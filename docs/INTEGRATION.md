@@ -2,6 +2,22 @@
 
 PRoctor reads a PR's diff, plans tests, runs them, optionally opens a fix PR, and posts a structured report comment. This guide walks you from zero to having it running on your repo's PRs.
 
+## Fastest path: the init wizard
+
+If you have Claude Code installed and the PRoctor plugin loaded, just run this in the repo you want to add PRoctor to:
+
+```bash
+claude plugin add /path/to/proctor/plugins/proctor   # one-time
+cd /your/repo
+claude /proctor-init
+```
+
+The wizard detects your stack (Node/Vite/Next.js, Go, Python, Rust, …), asks 5 short questions (which stack, setup commands, auto-fix on/off, run on every push vs. require approval, auth method), then writes `.pr-test.yml` + `.github/workflows/proctor.yml`, walks you through setting the auth secret, and offers to flip the Actions PR-creation setting via API. Total time: about 2 minutes.
+
+If the wizard asks you to set a secret, the wizard never sees the value — it tells you the exact `gh secret set` command to paste into your terminal.
+
+The rest of this document is the manual path, plus reference for everything the wizard sets up.
+
 ## Decide which form factor
 
 | Form | When |
