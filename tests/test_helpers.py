@@ -75,6 +75,16 @@ def test_test_results_summary_must_match_items():
         validate_test_results(bad)
 
 
+def test_test_results_logs_ref_optional():
+    valid = {
+        "items": [
+            {"id": "t-001", "status": "pass", "evidence": "ok"},
+        ],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    validate_test_results(valid)
+
+
 def test_fix_pr_ref_can_be_null():
     validate_fix_pr_ref(None)
 
