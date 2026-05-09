@@ -14,7 +14,16 @@ on:
     types: [created]
 ```
 
-## Minimal usage
+## Authentication
+
+Provide **one** of the following inputs:
+
+- `anthropic-api-key` — an Anthropic API key from <https://console.anthropic.com>.
+- `claude-code-oauth-token` — a long-lived OAuth token obtained by running `claude setup-token` locally. Use this when you have a Claude.ai subscription and want to consume your subscription quota in CI instead of paying per token through the API.
+
+The Action errors fast if neither is provided.
+
+## Minimal usage (API key)
 
 ```yaml
 jobs:
@@ -27,6 +36,21 @@ jobs:
       - uses: zealllot/proctor/github-action@v0
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+## Minimal usage (Claude subscription)
+
+```yaml
+jobs:
+  proctor:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: zealllot/proctor/github-action@v0
+        with:
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
 ## Approval mode
