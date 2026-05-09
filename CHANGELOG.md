@@ -2,6 +2,23 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.1.8 — 2026-05-09
+
+### Changed
+- **Stage-by-stage bash orchestration in the GitHub Action.** The previous monolithic single-prompt invocation was non-deterministic — even with 3 retries, ~15% of fixture-PR runs would bail after stage 1. The model in `--print` mode treats its first complete-looking response as terminal regardless of how strongly the prompt warns against it.
+  - Bash now derives `RUN_ID` deterministically (`pr<num>-<sha7>-<8hash>`).
+  - Bash pre-fetches PR data and runs `setup:` commands before any `claude` invocation.
+  - Each pipeline stage is a separate, focused `claude --print` call validated by `schema.py` before continuing.
+  - The COMPLETE marker is emitted by bash when all stages produced valid outputs.
+  - Failure semantics are sharper: each stage emits `PROCTOR_PIPELINE_FAILED stage=<name>` with a specific reason.
+
+## v0.1.7 — 2026-05-09
+
+### Fixed
+- **Artifact upload no longer rejects run-id directories with colons.** The model occasionally improvised a UTC ISO timestamp (e.g. `2026-05-09T05:43:42Z`) into the run-id, breaking GitHub's `actions/upload-artifact` (which rejects `:` in path components). Two reinforcements:
+  - Prompt explicitly tells the model to call `runlog.make_run_id` and includes the artifact-rejection rationale.
+  - New "Sanitize run-id paths" step renames invalid chars to `_` defensively before upload.
+
 ## v0.1.6 — 2026-05-09
 
 ### Fixed
