@@ -12,6 +12,7 @@ Input: `test-results.json`, `fix-pr-ref.json` (may be `null`), `change-map.json`
 - `GITHUB_RUN_ID` — the GitHub Actions workflow run id, used to build the Action run URL and the artifact link
 - `GITHUB_SERVER_URL` — usually `https://github.com`
 - `SCREENSHOT_URL_BASE` — when present, screenshots have been pushed to a public branch and the report should inline-embed them via this URL prefix (e.g. `https://raw.githubusercontent.com/<owner>/<repo>/proctor-screenshots/<run-id>/`). When absent, fall back to a "(in artifact)" reference.
+- `PROCTOR_USAGE_SUMMARY` — when present, a string like `tokens_in=45000 tokens_out=8000 cost_usd=0.1234` summarizing total claude API usage for this run. Render as a `**Cost:**` line in the header, formatting cost with a `$` sign and 4 decimals. Skip the line when empty.
 
 Output: a markdown comment body. The skill posts the comment via `scripts/post_comment.py`.
 
@@ -23,6 +24,7 @@ Output: a markdown comment body. The skill posts the comment via `scripts/post_c
 **Summary:** <pass_emoji> <pass>/<total> passed · <fail> failed · <skipped> skipped
 **Run:** [Action #<github-run-id>](<server>/<repo>/actions/runs/<github-run-id>) · [download artifacts](<server>/<repo>/actions/runs/<github-run-id>#artifacts)
 **Run id:** `<run-id>`
+**Cost:** $<cost_usd> · <tokens_in> in / <tokens_out> out tokens   ← only when PROCTOR_USAGE_SUMMARY is non-empty
 ```
 
 The `<server>/<repo>/actions/runs/<github-run-id>#artifacts` URL takes the user straight to the artifacts panel where they can download `proctor-run-<pr#>.zip` containing every JSON, log, and screenshot.

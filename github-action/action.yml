@@ -137,28 +137,37 @@ runs:
 
         run_stage() {
           local stage="$1" prompt="$2"
+          local raw="$RUN_DIR/$stage.raw.json"
           local out="$RUN_DIR/$stage.stdout.log"
           echo "::group::Stage: $stage"
           echo "[proctor:$stage] start"
-          # Up to 2 attempts per stage. Empirically the execute stage
-          # occasionally returns non-zero with no stdout (transient API
-          # / rate-limit / model bailout); a fresh second invocation
-          # almost always succeeds. Retries are stage-local so a
-          # successful earlier stage isn't repeated.
-          local attempt rc
+          # Up to 2 attempts per stage. Each attempt invokes claude with
+          # --output-format json so we get usage stats alongside the
+          # result. The model's text output (stripped from .result) is
+          # written to <stage>.stdout.log for the existing empty-output
+          # checks; per-stage usage is appended to usage.jsonl for the
+          # report stage to aggregate.
+          local attempt
           for attempt in 1 2; do
-            if claude --print --dangerously-skip-permissions \
+            if claude --print --output-format json --dangerously-skip-permissions \
                        --plugin-dir "$PLUGIN_DIR" \
-                       "$prompt" 2>&1 | tee "$out"; then
+                       "$prompt" > "$raw" 2>"$RUN_DIR/$stage.stderr.log"; then
               break
             fi
-            rc=$?
             if [[ $attempt -lt 2 ]]; then
-              echo "::warning::Stage $stage attempt $attempt failed (exit $rc); retrying once"
-              # Small backoff in case it's a rate limit
+              echo "::warning::Stage $stage attempt $attempt failed; retrying once"
               sleep 5
             fi
           done
+          # Extract the model's text response into <stage>.stdout.log
+          # for downstream consumers that grep it.
+          if [[ -s "$raw" ]]; then
+            python3 -c "import json; d=json.load(open('$raw')); print(d.get('result',''))" > "$out" 2>/dev/null || cp "$raw" "$out"
+            # Append usage line for the cost summary
+            python3 -c "import json,sys; d=json.load(open('$raw')); u=d.get('usage') or {}; cost=d.get('total_cost_usd') or 0; sys.stdout.write(json.dumps({'stage':'$stage','tokens_in':u.get('input_tokens',0)+u.get('cache_read_input_tokens',0),'tokens_out':u.get('output_tokens',0),'cost_usd':cost})+'\n')" >> "$RUN_DIR/usage.jsonl" 2>/dev/null || true
+          else
+            : > "$out"
+          fi
           if ! grep -q . "$out" 2>/dev/null; then
             echo "::error::Stage $stage: empty output after retries"
             echo "PROCTOR_PIPELINE_FAILED stage=$stage reason=claude-error" \
@@ -224,16 +233,24 @@ runs:
         BASE_URL=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print(cfg.get('base_url','http://127.0.0.1:5173'))" 2>/dev/null || echo "http://127.0.0.1:5173")
         ITEM_TIMEOUT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print(cfg.get('per_test_timeout_seconds', 60))" 2>/dev/null || echo 60)
 
-        # Dispatch each item to a fresh claude invocation. Per-item retry
-        # handles transient claude failures without re-running successful items.
+        # Dispatch each item to a fresh claude invocation, in parallel
+        # (capped concurrency). Per-item retry handles transient claude
+        # failures without re-running successful items. Concurrency cap
+        # protects against API rate limits and chrome-devtools port
+        # collisions.
         ITEM_COUNT=$(python3 -c "import json; print(len(json.load(open('$RUN_DIR/test-plan.json'))['items']))")
-        echo "[proctor:execute] dispatching $ITEM_COUNT items, base_url=$BASE_URL, timeout=${ITEM_TIMEOUT}s"
+        # Override via PROCTOR_EXECUTE_CONCURRENCY if a consumer wants
+        # different parallelism. 3 is conservative and validated.
+        CONCURRENCY="${PROCTOR_EXECUTE_CONCURRENCY:-3}"
+        echo "[proctor:execute] dispatching $ITEM_COUNT items in parallel (concurrency=$CONCURRENCY), base_url=$BASE_URL, timeout=${ITEM_TIMEOUT}s"
         # shellcheck disable=SC2046
         ITEM_IDS=$(python3 -c "import json; [print(i['id']) for i in json.load(open('$RUN_DIR/test-plan.json'))['items']]")
-        for ITEM_ID in $ITEM_IDS; do
+
+        run_item() {
+          local ITEM_ID="$1"
+          local ITEM_JSON
           ITEM_JSON=$(python3 -c "import json; print(json.dumps([i for i in json.load(open('$RUN_DIR/test-plan.json'))['items'] if i['id']=='$ITEM_ID'][0]))")
-          echo "::group::item $ITEM_ID"
-          ITEM_PROMPT="Run the pr-test-executor subagent against this single test item and write its result to $RUN_DIR/results/${ITEM_ID}.json (one JSON object). Return only a short status line.
+          local ITEM_PROMPT="Run the pr-test-executor subagent against this single test item and write its result to $RUN_DIR/results/${ITEM_ID}.json (one JSON object). Return only a short status line.
 
         Item:
         $ITEM_JSON
@@ -243,20 +260,22 @@ runs:
         - per_test_timeout_seconds: $ITEM_TIMEOUT
         - logs_dir: $RUN_DIR  (the executor's logs_ref should be $RUN_DIR/logs/${ITEM_ID}.log and screenshot_ref, when chrome-devtools is used, must be $RUN_DIR/screenshots/${ITEM_ID}.png)
 
-        The result JSON MUST include id, status (pass|fail|skipped), evidence (1-2 sentences citing actual observed values). It SHOULD include command, output_excerpt (4 KB max), logs_ref. For chrome-devtools items, screenshot_ref is REQUIRED — capture via take_screenshot before returning."
+        The result JSON MUST include id, status (pass|fail|skipped), evidence (1-2 sentences citing actual observed values). It SHOULD include command, output_excerpt (4 KB max), logs_ref. For chrome-devtools items, screenshot_ref is REQUIRED — capture via take_screenshot before returning. Also include screenshot_focus: a one-sentence description of WHICH region of the screenshot validates the evidence (or 'evidence not visible in screenshot — verified via DOM only' when the assertion is on document.title or other non-visible element)."
 
-          item_ok=0
+          local attempt
           for attempt in 1 2; do
-            if claude --print --dangerously-skip-permissions \
+            if claude --print --output-format json --dangerously-skip-permissions \
                        --plugin-dir "$PLUGIN_DIR" \
-                       "$ITEM_PROMPT" 2>&1 | tee "$RUN_DIR/logs/${ITEM_ID}.exec.log"; then
-              item_ok=1
+                       "$ITEM_PROMPT" > "$RUN_DIR/logs/${ITEM_ID}.exec.log" 2>&1; then
               break
             fi
             echo "::warning::item $ITEM_ID attempt $attempt failed; retrying once"
             sleep 5
           done
-
+          # Capture per-item usage from the JSON wrapper
+          if python3 -c "import json,sys; d=json.load(open('$RUN_DIR/logs/${ITEM_ID}.exec.log')); u=d.get('usage') or {}; cost=d.get('total_cost_usd') or 0; sys.stdout.write(json.dumps({'id':'$ITEM_ID','stage':'execute','tokens_in':u.get('input_tokens',0)+u.get('cache_read_input_tokens',0),'tokens_out':u.get('output_tokens',0),'cost_usd':cost})+'\n')" >> "$RUN_DIR/usage.jsonl" 2>/dev/null; then
+            :
+          fi
           # Synthesize a fail entry if the executor never wrote a result file
           if [[ ! -s "$RUN_DIR/results/${ITEM_ID}.json" ]]; then
             echo "::warning::item $ITEM_ID produced no result file — recording as fail/error"
@@ -264,8 +283,19 @@ runs:
         {"id":"$ITEM_ID","status":"fail","reason":"error","evidence":"Executor returned no result for this item after retries; see logs/${ITEM_ID}.exec.log."}
         JSON
           fi
-          echo "::endgroup::"
+        }
+
+        # Concurrency-limited parallel dispatch. bash 4.3+ provides 'wait -n'.
+        running=0
+        for ITEM_ID in $ITEM_IDS; do
+          if (( running >= CONCURRENCY )); then
+            wait -n
+            running=$((running - 1))
+          fi
+          ( run_item "$ITEM_ID" ) &
+          running=$((running + 1))
         done
+        wait
 
         # Aggregate per-item results into one TestResults file.
         python3 - <<PY
@@ -380,6 +410,30 @@ runs:
         fi
         export SCREENSHOT_URL_BASE
 
+        # ---- Aggregate cost from usage.jsonl ----
+        # Sum tokens + cost across all stages and per-item executions so
+        # the report can show consumers what each PR run cost.
+        if [[ -s "$RUN_DIR/usage.jsonl" ]]; then
+          PROCTOR_USAGE_SUMMARY=$(python3 -c "
+        import json
+        tin = tout = 0
+        cost = 0.0
+        for ln in open('$RUN_DIR/usage.jsonl'):
+            try:
+                d = json.loads(ln)
+                tin  += int(d.get('tokens_in')  or 0)
+                tout += int(d.get('tokens_out') or 0)
+                cost += float(d.get('cost_usd') or 0)
+            except Exception:
+                pass
+        print(f'tokens_in={tin} tokens_out={tout} cost_usd={cost:.4f}')
+          ")
+          echo "[proctor:usage] $PROCTOR_USAGE_SUMMARY"
+        else
+          PROCTOR_USAGE_SUMMARY=""
+        fi
+        export PROCTOR_USAGE_SUMMARY
+
         # ---- Stage 5: report ----
         # Pass through env so the report skill can build Action / artifact URLs
         export RUN_ID
@@ -396,6 +450,7 @@ runs:
         - PR=$PR, REPO=$REPO, RUN_ID=$RUN_ID
         - GITHUB_RUN_ID=$GITHUB_RUN_ID, GITHUB_SERVER_URL=$GITHUB_SERVER_URL
         - SCREENSHOT_URL_BASE=$SCREENSHOT_URL_BASE  (empty if no screenshots were captured; else a public raw URL prefix like https://github.com/owner/repo/raw/proctor-screenshots/<run-id>/)
+        - PROCTOR_USAGE_SUMMARY=$PROCTOR_USAGE_SUMMARY  (e.g. 'tokens_in=45000 tokens_out=8000 cost_usd=0.1234'; render in the header as a Cost line per the skill procedure)
         - Action run URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID
         - Artifact URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID#artifacts
 
