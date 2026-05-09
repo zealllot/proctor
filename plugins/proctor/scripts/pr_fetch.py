@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time as _time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -53,9 +54,6 @@ def fetch_diff(arg: PRArg) -> str:
     if arg.repo:
         cmd += ["-R", arg.repo]
     return _gh_with_retry(cmd)
-
-
-import time as _time
 
 
 def _gh_with_retry(cmd: list[str], *, attempts: int = 3) -> str:

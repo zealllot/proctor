@@ -1,4 +1,5 @@
 import json
+import subprocess
 import pytest
 from unittest import mock
 from plugins.proctor.scripts.schema import (
@@ -170,3 +171,60 @@ def test_post_long_comment_uses_gist(monkeypatch):
     cmds = [c for _, c in calls]
     assert any(c[:2] == ["gh", "gist"] for c in cmds)
     assert any(c[:3] == ["gh", "pr", "comment"] for c in cmds)
+
+
+def test_test_plan_rejects_dangling_depends_on():
+    bad = {
+        "items": [
+            {"id": "t-001", "category": "api", "what": "x", "how": "x",
+             "tool": "bash", "risk": "low", "depends_on": ["t-999"]},
+        ]
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_acquire_lock_dict_response_no_label():
+    with mock.patch.object(gh_lock.subprocess, "check_output") as co, \
+         mock.patch.object(gh_lock.subprocess, "check_call") as cc:
+        co.return_value = '{"labels": []}'
+        ok = gh_lock.acquire(pr_number=2, repo=None)
+        assert ok
+        cc.assert_called_once()
+
+
+def test_acquire_lock_dict_response_with_label():
+    with mock.patch.object(gh_lock.subprocess, "check_output") as co, \
+         mock.patch.object(gh_lock.subprocess, "check_call") as cc:
+        co.return_value = '{"labels": [{"name": "proctor:running"}]}'
+        ok = gh_lock.acquire(pr_number=2, repo=None)
+        assert not ok
+        cc.assert_not_called()
+
+
+def test_gh_with_retry_on_rate_limit_then_success(monkeypatch):
+    from plugins.proctor.scripts import pr_fetch
+    calls = {"n": 0}
+    def fake(cmd, **_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            err = subprocess.CalledProcessError(1, cmd)
+            err.stderr = "API rate limit exceeded\n"
+            raise err
+        return "ok\n"
+    monkeypatch.setattr(pr_fetch.subprocess, "check_output", fake)
+    monkeypatch.setattr(pr_fetch._time, "sleep", lambda *_: None)
+    out = pr_fetch._gh_with_retry(["gh", "pr", "view", "1"])
+    assert out == "ok\n"
+    assert calls["n"] == 2
+
+
+def test_gh_with_retry_re_raises_non_rate_limit(monkeypatch):
+    from plugins.proctor.scripts import pr_fetch
+    def fake(cmd, **_):
+        err = subprocess.CalledProcessError(1, cmd)
+        err.stderr = "fatal: not a git repo\n"
+        raise err
+    monkeypatch.setattr(pr_fetch.subprocess, "check_output", fake)
+    with pytest.raises(subprocess.CalledProcessError):
+        pr_fetch._gh_with_retry(["gh", "pr", "view", "1"])

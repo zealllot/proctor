@@ -80,6 +80,12 @@ def validate_test_plan(tp: dict) -> None:
             _require(dep != item["id"],
                      f"TestPlan.items[{i}] cannot depend on itself")
 
+    # Second pass: every depends_on entry must reference a known id.
+    for i, item in enumerate(tp["items"]):
+        for dep in item["depends_on"]:
+            _require(dep in seen_ids,
+                     f"TestPlan.items[{i}].depends_on references unknown id {dep!r}")
+
 
 def validate_test_results(tr: dict) -> None:
     _require(isinstance(tr, dict), "TestResults: must be a dict")
