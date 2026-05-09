@@ -88,10 +88,20 @@ CI mode, `require_approval: true`: post the plan as a comment headed
 `## PRoctor — awaiting approval`, release the lock, exit 0. The Action
 re-runs on the `/proctor run` comment trigger (see github-action/).
 
-### 7. Stage 3 — execute (later task)
+### 7. Stage 3 — execute
 
-Apply skill `executing-pr-tests`. (Stub for now: print "TODO execute"
-and exit 0.)
+Apply skill `executing-pr-tests`. Pass:
+
+- approved plan path
+- run-id
+- logs dir = `.proctor/runs/<run-id>/`
+- base_url + per_test_timeout_seconds from `.pr-test.yml`
+- PR head_sha (for force-push detection)
+
+Save output to `.proctor/runs/<run-id>/test-results.json`. Validate.
+
+If `aborted` field is set, post a PR comment "PRoctor: run aborted
+(<reason>)" and skip Stages 4 + 5.
 
 ### 8. Stage 4 — fix (later task)
 
