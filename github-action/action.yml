@@ -85,7 +85,7 @@ runs:
 
         How to think about it: you have a list of 5 procedures to execute serially. After each one, the next runs immediately, in the same response. Only when stage 5 finishes do you emit the marker. Do not seek confirmation. Do not pause. Do not summarize partial progress. You have full permissions via --dangerously-skip-permissions; every gh / git / Bash / file-write call you need will succeed without asking.
 
-        Run-id: derive ONCE at the very start using runlog.make_run_id (pr_number + head_sha + UTC ISO timestamp), then reuse for the whole pipeline. Persist every stage output to .proctor/runs/<run-id>/.
+        Run-id: derive ONCE at the very start by calling python3 -c 'from plugins.proctor.scripts.runlog import make_run_id; print(make_run_id(pr_number=__PR__, head_sha="<sha>", started_at_iso="<iso>"))'. The result has format pr<num>-<7-char-sha>-<8-char-hash> with NO colons, slashes, or other special characters. Reuse this exact value for the whole pipeline. Persist every stage output to .proctor/runs/<run-id>/. Never invent your own run-id format — GitHub Action artifact paths reject colons, so a freeform ISO timestamp like 2026-05-09T05:43:42Z would break the upload step.
 
         === Stage 1: analyze ===
         Apply skill analyzing-pr-changes. Fetch PR data with: gh pr view __PR__ --json number,headRefOid,baseRefOid,url,headRefName,baseRefName,title,body,author -R __REPO__   AND   gh pr diff __PR__ -R __REPO__. Save the ChangeMap to change-map.json. Validate via plugins/proctor/scripts/schema.py:validate_change_map. Print one line on its own: [proctor:analyze] done hunks=N categories=[...]
@@ -152,6 +152,28 @@ runs:
           echo "::error::No FAILED marker either — model exited early without explicit failure." >&2
         fi
         exit 1
+
+    - name: Sanitize run-id paths for artifact upload
+      if: always()
+      shell: bash
+      run: |
+        # GitHub artifacts reject : " < > | * ? \r \n in any path component.
+        # The model is supposed to call runlog.make_run_id (which never
+        # produces invalid chars), but if it improvises an ISO timestamp
+        # in the run-id we'd lose the artifact. Rename defensively here.
+        if [[ ! -d .proctor/runs ]]; then
+          echo "No .proctor/runs to sanitize."
+          exit 0
+        fi
+        cd .proctor/runs
+        for d in */; do
+          d="${d%/}"
+          clean="$(echo -n "$d" | tr ':"<>|*?\r\n' '_')"
+          if [[ "$d" != "$clean" ]]; then
+            echo "Sanitizing run-id: $d -> $clean"
+            mv -- "$d" "$clean"
+          fi
+        done
 
     - name: Upload run artifacts
       if: always()
