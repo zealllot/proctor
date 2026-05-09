@@ -10,7 +10,7 @@ from plugins.proctor.scripts.schema import (
 )
 from plugins.proctor.scripts.pr_fetch import parse_pr_arg, PRArg
 from plugins.proctor.scripts.runlog import make_run_id, log_line
-from plugins.proctor.scripts import gh_lock
+from plugins.proctor.scripts import gh_lock, post_comment
 
 
 def test_change_map_minimum_valid():
@@ -143,3 +143,30 @@ def test_release_lock_removes_label():
         args = cc.call_args[0][0]
         assert "--remove-label" in args
         assert "proctor:running" in args
+
+
+def test_post_short_comment_inline(monkeypatch):
+    calls = []
+    def fake(cmd, **_):
+        calls.append(cmd); return ""
+    monkeypatch.setattr(post_comment.subprocess, "check_output", fake)
+    post_comment.post(pr_number=123, repo=None, body="short body")
+    assert calls[0][:4] == ["gh", "pr", "comment", "123"]
+    # Body passed via --body-file (stdin/file)
+    assert any("--body-file" in a for a in calls[0]) or "--body" in calls[0]
+
+
+def test_post_long_comment_uses_gist(monkeypatch):
+    calls = []
+    def fake_co(cmd, **_):
+        calls.append(("co", cmd))
+        if cmd[:2] == ["gh", "gist"]:
+            return "https://gist.github.com/x/abc123\n"
+        return ""
+    monkeypatch.setattr(post_comment.subprocess, "check_output", fake_co)
+    long_body = "x" * 70_000
+    post_comment.post(pr_number=123, repo=None, body=long_body)
+    # Should have one gist create and one pr comment
+    cmds = [c for _, c in calls]
+    assert any(c[:2] == ["gh", "gist"] for c in cmds)
+    assert any(c[:3] == ["gh", "pr", "comment"] for c in cmds)
