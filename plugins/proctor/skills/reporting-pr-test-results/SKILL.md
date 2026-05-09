@@ -58,6 +58,7 @@ For EACH item, render a `<details>`-collapsed block. Pass items default closed; 
 {else}
 [`{item.screenshot_ref}` in artifact](<server>/<repo>/actions/runs/<github-run-id>#artifacts)
 {end-if}
+{if item.screenshot_focus}_What to look for:_ {item.screenshot_focus}{end-if}
 {end-if}
 
 {if item.logs_ref}**Full log:** `{item.logs_ref}` (in artifact)

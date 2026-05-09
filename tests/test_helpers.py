@@ -120,6 +120,7 @@ def test_test_results_rich_fields_accepted():
                 "output_excerpt": "<th>Phone</th>",
                 "logs_ref": ".proctor/runs/x/logs/t-001.log",
                 "screenshot_ref": ".proctor/runs/x/screenshots/t-001.png",
+                "screenshot_focus": "Phone column header visible above the data rows.",
             },
         ],
         "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
