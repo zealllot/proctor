@@ -94,7 +94,10 @@ def validate_test_results(tr: dict) -> None:
 
     counts = {"pass": 0, "fail": 0, "skipped": 0}
     for i, item in enumerate(tr["items"]):
-        _require_keys(item, {"id", "status", "evidence", "logs_ref"},
+        # logs_ref is optional: in headless CI runs the executor reports
+        # inline and may not produce a per-item log file. id/status/evidence
+        # are required for the report stage to render anything useful.
+        _require_keys(item, {"id", "status", "evidence"},
                       f"TestResults.items[{i}]")
         _require(item["status"] in VALID_STATUS,
                  f"TestResults.items[{i}].status {item['status']!r} invalid")

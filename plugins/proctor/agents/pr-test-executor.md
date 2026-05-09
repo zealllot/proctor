@@ -44,10 +44,15 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
      "id": "t-001",
      "status": "pass",            // pass | fail | skipped
      "evidence": "Found 'Sign in' button at /",
-     "logs_ref": ".proctor/runs/<run-id>/<id>.log",
+     "logs_ref": ".proctor/runs/<run-id>/<id>.log",  // optional; omit if no log file was written
      "reason": "timeout"          // only when status=fail; one of: assertion, timeout, error, missing
    }
    ```
+
+   `evidence` is the human-readable summary of what the test did and the
+   outcome. `logs_ref` is optional — include it when you wrote a log
+   file at `<logs_dir>/<id>.log`, omit it otherwise (e.g. for inline
+   lint-only checks where there's nothing to log).
 
 ## Constraints
 
