@@ -13,7 +13,28 @@ inputs:
 runs:
   using: composite
   steps:
+    # Anti-loop: PRoctor's auto-fix opens PRs named fix-<PR#>-<sha>.
+    # If a workflow on that fix PR also triggers PRoctor, we'd recurse
+    # (fix → analyzed → maybe fails → opens fix-of-fix → analyzed → ...).
+    # Stop early: fix-* branches and PRs authored by github-actions[bot]
+    # are PRoctor's own outputs, not subject matter for PRoctor itself.
+    - name: Anti-loop guard
+      id: antiloop
+      shell: bash
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "pull_request_target" ]]; then
+          BR="${{ github.event.pull_request.head.ref }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          if [[ "$BR" == fix-*-* ]] || [[ "$AUTHOR" == "github-actions[bot]" ]] || [[ "$AUTHOR" == proctor-* ]]; then
+            echo "::notice::Skipping PRoctor on fix PR (branch=$BR, author=$AUTHOR) to avoid loops."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+
     - name: Verify Claude auth provided
+      if: steps.antiloop.outputs.skip != 'true'
       shell: bash
       run: |
         if [[ -z "${{ inputs.anthropic-api-key }}" && -z "${{ inputs.claude-code-oauth-token }}" ]]; then
@@ -24,11 +45,13 @@ runs:
         fi
 
     - name: Checkout
+      if: steps.antiloop.outputs.skip != 'true'
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
     - name: Resolve PR number
+      if: steps.antiloop.outputs.skip != 'true'
       id: resolve
       shell: bash
       run: |
@@ -62,6 +85,7 @@ runs:
     # ~10s curl-and-install step. Bump CACHE_VERSION below to force a
     # re-download when Claude Code ships an update we want to pick up.
     - name: Cache Claude Code install
+      if: steps.antiloop.outputs.skip != 'true'
       id: cache-claude
       uses: actions/cache@v4
       with:
@@ -80,10 +104,12 @@ runs:
         curl -fsSL https://claude.ai/install.sh | bash
 
     - name: Put Claude Code on PATH
+      if: steps.antiloop.outputs.skip != 'true'
       shell: bash
       run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run PRoctor (stage-by-stage)
+      if: steps.antiloop.outputs.skip != 'true'
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
@@ -467,6 +493,7 @@ runs:
           | tee -a /tmp/proctor-stdout.log
 
     - name: Verify pipeline completed
+      if: steps.antiloop.outputs.skip != 'true'
       shell: bash
       run: |
         if grep -q "PROCTOR_PIPELINE_COMPLETE" /tmp/proctor-stdout.log 2>/dev/null; then
