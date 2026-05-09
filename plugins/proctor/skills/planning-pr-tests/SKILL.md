@@ -30,6 +30,24 @@ current one cannot answer the question.
    scoped to the changed paths (e.g. `pytest tests/api/`,
    `go test ./api/...`, `pnpm test --run -- src/components/Login`).
 
+   **BEFORE planning a `package.json test` run, READ the actual `test`
+   script body.** Many projects keep a stub like
+   `"test": "echo \\"Error: no test specified\\" && exit 1"` from
+   `npm init` and never replace it. Treat any of these as "no test
+   runner configured" and downgrade to tier 1 (lint-only) or 3
+   (curl/chrome-devtools):
+   - The script body contains `"no test specified"`, `"echo"` followed
+     by `exit 1`, or is exactly `"echo ..."`-only.
+   - There's no `vitest`, `jest`, `mocha`, `playwright`, `cypress`, or
+     similar in `dependencies` / `devDependencies`.
+   - There's no `tests/` or `__tests__/` directory anywhere with files
+     matching `*.test.*` / `*.spec.*`.
+
+   The same pattern applies for Python (`pytest` not in
+   `requirements.txt` or `pyproject.toml`), Go (`*_test.go` absent
+   under any package the diff touches), Rust (`#[test]` absent), etc.
+   Don't propose a runner that doesn't exist.
+
 3. **`bash` with `curl`** — API contract verification when the repo's
    `.pr-test.yml setup:` actually starts a server. The planner can
    know this by inspecting `.pr-test.yml`: if `setup:` is empty or
