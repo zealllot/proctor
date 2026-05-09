@@ -83,6 +83,13 @@ mark `risk: high` so the operator sees an environment was missing.
 5. If `.pr-test.yml` provides `test_focus`, weight more items toward
    those categories; do not omit other categories entirely.
 
+6. **Use `pr_context` from the ChangeMap to drive what each item actually verifies.** The PR description often contains the real acceptance criteria — they're rarely visible from the diff alone. For the items you generate:
+   - Read `pr_context.title`, `pr_context.body`, and `pr_context.requirement_hints`. Treat the body as the source of truth for "what this change is supposed to do".
+   - When the body says something concrete (e.g. "max 100 chars", "rate limit 60/min", "must show toast on save"), generate an item that verifies that exact thing — phrase the item's `what:` field in the body's wording, and write `how:` against the actual constraint, not against what the diff merely allows.
+   - When the body links to Slack / Jira / Linear / Notion / Confluence (`pr_context.links`), do NOT try to fetch them — just acknowledge the requirement is documented there. In `how:`, you can write `Per <ticket-id>: ...` so the report makes the link traceable. If the body doesn't quote the requirement and only links to it, fall back to whatever you can infer from the diff and mark `risk: medium` to flag that the off-PR doc was the load-bearing source of truth.
+   - When `requirement_hints` and the diff disagree, plan items for BOTH: one that verifies the body's stated behavior, one that verifies the diff's actual behavior. The mismatch is itself useful signal in the report.
+   - If `pr_context` is empty or absent, fall back to inferring tests from the diff alone — same as before.
+
 ## Output JSON shape
 
 ```jsonc

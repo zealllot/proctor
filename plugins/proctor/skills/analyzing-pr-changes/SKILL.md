@@ -16,7 +16,15 @@ on stdout with no surrounding prose, headings, or code fences.
 1. Extract identity from the PR JSON:
    - `pr.number`, `pr.head_sha` (= `headRefOid`), `pr.base_sha` (= `baseRefOid`), `pr.url`.
 
-2. Walk the diff. For every changed file, decide its category by these
+2. Extract `pr_context` from the PR JSON for the planner to use later:
+   - `title`: the PR title (from `title` in pr.json).
+   - `body`: the full PR description body (from `body` in pr.json), or the empty string if absent. Preserve markdown.
+   - `links`: deduplicated list of HTTP/HTTPS URLs found in the body. This explicitly INCLUDES Slack permalinks (`*.slack.com/archives/...`), Jira/Atlassian tickets (e.g. `*.atlassian.net/browse/PROJ-123` or `*.atlassian.net/wiki/...`), Linear / Notion / Confluence / Figma / Loom / GitHub URLs, and any other links the author dropped. The planner uses these as evidence that there's a documented requirement to verify against.
+   - `requirement_hints`: short list of bullet snippets extracted from the body that look like acceptance criteria (lines starting with `- [ ]`, headings like "## Requirements" / "## AC", numbered lists under "must" / "should"). At most 8 entries; empty list if nothing matches. Cap each entry at ~120 chars.
+
+   This step is purely textual — do not follow the URLs and do not fetch anything external. Just record them.
+
+3. Walk the diff. For every changed file, decide its category by these
    rules (apply in order; first match wins):
 
    | Pattern | Category |
@@ -30,16 +38,16 @@ on stdout with no surrounding prose, headings, or code fences.
    | path resembles a backend handler (`*_handler.go`, `*Controller.*`, route definition) | `api` |
    | anything else with code changes | `api` (default for backend code) |
 
-3. For each hunk, also assign:
+4. For each hunk, also assign:
    - `risk`: `low` (cosmetic, comments, isolated additions), `medium`
      (logic change but localized), `high` (touches auth, payments, data
      migrations, public API contracts, critical path).
    - `summary`: one sentence describing the change in plain English.
 
-4. Compute `categories_present` as the deduplicated set of hunk
+5. Compute `categories_present` as the deduplicated set of hunk
    categories.
 
-5. **Cross-cutting**: if both `frontend` and `api` appear among
+6. **Cross-cutting**: if both `frontend` and `api` appear among
    `categories_present`, the `e2e-flow` category will be added by the
    *next* stage (planner), not here. Do not invent it now.
 
@@ -48,6 +56,12 @@ on stdout with no surrounding prose, headings, or code fences.
 ```jsonc
 {
   "pr": { "number": 0, "head_sha": "...", "base_sha": "...", "url": "..." },
+  "pr_context": {
+    "title": "...",
+    "body": "...",
+    "links": ["https://acme.atlassian.net/browse/PROJ-42", "https://acme.slack.com/archives/C0/p123"],
+    "requirement_hints": ["display name max length 100", "rate limit endpoint at 60/min"]
+  },
   "hunks": [
     { "file": "...", "category": "frontend", "risk": "low", "summary": "..." }
   ],
