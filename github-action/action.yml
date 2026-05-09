@@ -81,41 +81,62 @@ runs:
         cat > /tmp/proctor-prompt.txt <<'PROMPT_EOF'
         You are running the PRoctor pipeline against PR #__PR__ in repository __REPO__, headlessly inside a GitHub Action. The PRoctor plugin is loaded; its 5 skills and 2 subagents are available.
 
-        CRITICAL: You MUST complete all 5 stages below before exiting. Do not stop after stage 1. Do not summarize partial progress and exit. Do not ask for confirmation between stages — you have full permissions via --dangerously-skip-permissions.
+        ABSOLUTE RULE — read carefully: this is a SINGLE non-interactive autonomous task. You are NOT in a chat. There is no human to respond to between stages. Your final stdout response MUST be the COMPLETE marker (or FAILED marker on hard error) AFTER all 5 stages have run. Returning a partial summary, an analyze-only result, or any other "I'll continue in the next turn" content WILL fail the entire job and waste tokens.
 
-        Run-id: derive once at the start using runlog.make_run_id (pr_number + head_sha + UTC ISO timestamp), then reuse for the whole pipeline. Persist every stage output to .proctor/runs/<run-id>/.
+        How to think about it: you have a list of 5 procedures to execute serially. After each one, the next runs immediately, in the same response. Only when stage 5 finishes do you emit the marker. Do not seek confirmation. Do not pause. Do not summarize partial progress. You have full permissions via --dangerously-skip-permissions; every gh / git / Bash / file-write call you need will succeed without asking.
+
+        Run-id: derive ONCE at the very start using runlog.make_run_id (pr_number + head_sha + UTC ISO timestamp), then reuse for the whole pipeline. Persist every stage output to .proctor/runs/<run-id>/.
 
         === Stage 1: analyze ===
         Apply skill analyzing-pr-changes. Fetch PR data with: gh pr view __PR__ --json number,headRefOid,baseRefOid,url,headRefName,baseRefName,title,body,author -R __REPO__   AND   gh pr diff __PR__ -R __REPO__. Save the ChangeMap to change-map.json. Validate via plugins/proctor/scripts/schema.py:validate_change_map. Print one line on its own: [proctor:analyze] done hunks=N categories=[...]
+        Then immediately proceed to Stage 2. Do not wait. Do not narrate.
 
         === Stage 2: plan ===
         Apply skill planning-pr-tests to the ChangeMap. Save TestPlan to test-plan.json. Validate. Print: [proctor:plan] done items=N
+        Then immediately proceed to Stage 3.
 
         === Stage 3: execute ===
-        Apply skill executing-pr-tests. Mode is CI; require_approval defaults false, so proceed without waiting. For each test item, dispatch the pr-test-executor subagent via the Task tool with the item, base_url from .pr-test.yml (default http://localhost:5173), and a 30 second per-item timeout. The fixture repo has no real server — items needing one MUST return status=skipped reason=no-server quickly. Save TestResults to test-results.json. Validate. Print: [proctor:execute] done pass=N fail=N skipped=N
+        Apply skill executing-pr-tests. Mode is CI; require_approval defaults false. Run setup commands from .pr-test.yml first (install deps, start servers, wait for readiness). For each test item, dispatch the pr-test-executor subagent via the Task tool with the item, base_url from .pr-test.yml, and a per_test_timeout_seconds value from .pr-test.yml. Save TestResults to test-results.json. Validate. Print: [proctor:execute] done pass=N fail=N skipped=N
+        Then immediately proceed to Stage 4.
 
         === Stage 4: fix ===
         Apply skill fixing-test-failures IFF TestResults has any failed items AND .pr-test.yml.auto_fix is true (default true). For zero failures, skip and write null to fix-pr-ref.json. Print: [proctor:fix] done <action>
+        Then immediately proceed to Stage 5.
 
         === Stage 5: report ===
         Apply skill reporting-pr-test-results. Render the markdown report. Post it as a PR comment using: gh pr comment __PR__ -R __REPO__ --body-file <rendered-report.md>. Confirm posting succeeded by reading the comment back via: gh pr view __PR__ -R __REPO__ --json comments. Print: [proctor:report] done comment_posted=true
+        Then proceed to Final.
 
         === Final ===
-        After Stage 5 only, print exactly one final line on its own:
+        Print this EXACT line as the very last line of your response, on its own:
           PROCTOR_PIPELINE_COMPLETE pr=__PR__ run_id=<run-id>
 
-        Do not exit until that line has been printed. If a stage hits an unrecoverable error, instead print:
-          PROCTOR_PIPELINE_FAILED stage=<name> reason=<short>
-        and exit; do NOT print COMPLETE in that case.
+        Self-check before you stop responding: have all five [proctor:<stage>] done lines been printed in this response? If any are missing, you have not completed the task — go back and run the missing stages. Only after all five have been printed AND the comment has been posted, emit the COMPLETE marker.
+
+        On hard error: print 'PROCTOR_PIPELINE_FAILED stage=<name> reason=<short>' instead of COMPLETE; do NOT print COMPLETE in that case.
         PROMPT_EOF
         sed -i "s|__PR__|${PR}|g; s|__REPO__|${REPO}|g" /tmp/proctor-prompt.txt
 
         # --dangerously-skip-permissions: in CI the workflow file is the
         # trust boundary; the runner is ephemeral, credentials scoped to
         # this PR. Without it, gh/git operations stall on approval prompts.
-        claude --print --dangerously-skip-permissions \
-               --plugin-dir "${{ github.action_path }}/../plugins/proctor" \
-               "$(cat /tmp/proctor-prompt.txt)" | tee /tmp/proctor-stdout.log
+        # Retry the run up to 2 times on early-bailout (no COMPLETE marker)
+        # — the model's compliance with multi-stage prompts is not 100%
+        # deterministic in --print mode.
+        run_once() {
+          claude --print --dangerously-skip-permissions \
+                 --plugin-dir "${{ github.action_path }}/../plugins/proctor" \
+                 "$(cat /tmp/proctor-prompt.txt)" | tee "$1"
+        }
+        run_once /tmp/proctor-stdout.log
+        if ! grep -q "PROCTOR_PIPELINE_COMPLETE\|PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log; then
+          echo "::warning::First run did not reach a marker. Retrying once."
+          run_once /tmp/proctor-stdout.log
+        fi
+        if ! grep -q "PROCTOR_PIPELINE_COMPLETE\|PROCTOR_PIPELINE_FAILED" /tmp/proctor-stdout.log; then
+          echo "::warning::Second run did not reach a marker either. Final retry."
+          run_once /tmp/proctor-stdout.log
+        fi
 
     - name: Verify pipeline completed
       shell: bash
