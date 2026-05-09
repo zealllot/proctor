@@ -242,6 +242,47 @@ runs:
         fi
         validate_json "$RUN_DIR/fix-pr-ref.json" validate_fix_pr_ref || exit 1
 
+        # ---- Push screenshots to a dedicated branch for inline embedding ----
+        # GitHub PR comments can't render images from Action artifacts, so we
+        # push any screenshot PNGs to an orphan branch named `proctor-screenshots`
+        # under the run-id directory and reference them by raw.githubusercontent
+        # URL from the report. The branch is opaque infra: each run adds a
+        # subdirectory; older runs accumulate but are never modified.
+        SCREENSHOT_URL_BASE=""
+        if [[ -d "$RUN_DIR/screenshots" ]] && ls "$RUN_DIR/screenshots"/*.png >/dev/null 2>&1; then
+          echo "[proctor:screenshots] pushing $(ls "$RUN_DIR/screenshots"/*.png | wc -l) PNG(s) to proctor-screenshots branch"
+          ss_dir="$(mktemp -d)"
+          # Configure git for the bot identity using GITHUB_TOKEN
+          git -C "$ss_dir" init -q -b proctor-screenshots
+          git -C "$ss_dir" config user.name "github-actions[bot]"
+          git -C "$ss_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Try to fetch the existing branch; if it doesn't exist, we'll start fresh
+          if git -C "$ss_dir" fetch --depth 1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+              proctor-screenshots:proctor-screenshots 2>/dev/null; then
+            git -C "$ss_dir" checkout -q proctor-screenshots
+          else
+            echo "(no existing proctor-screenshots branch — starting fresh)"
+            : > "$ss_dir/.proctor-screenshots-marker"
+            git -C "$ss_dir" add .proctor-screenshots-marker
+            git -C "$ss_dir" commit -q -m "init proctor-screenshots branch"
+          fi
+          mkdir -p "$ss_dir/$RUN_ID"
+          cp "$RUN_DIR"/screenshots/*.png "$ss_dir/$RUN_ID/"
+          git -C "$ss_dir" add "$RUN_ID"
+          git -C "$ss_dir" commit -q -m "screenshots: $RUN_ID"
+          if git -C "$ss_dir" push -q \
+              "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+              proctor-screenshots; then
+            SCREENSHOT_URL_BASE="${GITHUB_SERVER_URL}/${REPO}/raw/proctor-screenshots/${RUN_ID}/"
+            echo "[proctor:screenshots] published at $SCREENSHOT_URL_BASE"
+          else
+            echo "::warning::Failed to push screenshots branch; falling back to artifact-only references"
+          fi
+          rm -rf "$ss_dir"
+        fi
+        export SCREENSHOT_URL_BASE
+
         # ---- Stage 5: report ----
         # Pass through env so the report skill can build Action / artifact URLs
         export RUN_ID
@@ -257,10 +298,11 @@ runs:
         Environment values for cross-linking:
         - PR=$PR, REPO=$REPO, RUN_ID=$RUN_ID
         - GITHUB_RUN_ID=$GITHUB_RUN_ID, GITHUB_SERVER_URL=$GITHUB_SERVER_URL
+        - SCREENSHOT_URL_BASE=$SCREENSHOT_URL_BASE  (empty if no screenshots were captured; else a public raw URL prefix like https://github.com/owner/repo/raw/proctor-screenshots/<run-id>/)
         - Action run URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID
         - Artifact URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID#artifacts
 
-        Render per the skill's procedure: header with Action + artifact links, then a per-item <details> section for EACH item with What it did / Evidence / Command (if present) / Output (if present) / Screenshot ref (if present, link to artifact) / Logs ref (if present). Fail items must default <details open>. Post the rendered comment via:
+        Render per the skill's procedure: header with Action + artifact links, then a per-item <details> section for EACH item with What it did / Evidence / Command / Output / Screenshot / Logs. ALWAYS include a Screenshot section for items that have screenshot_ref — when SCREENSHOT_URL_BASE is non-empty, embed the image inline as ![<id> screenshot](\$SCREENSHOT_URL_BASE<basename of screenshot_ref>); when empty, fall back to a "(in artifact)" reference. Fail items must default <details open>. Post the rendered comment via:
           gh pr comment $PR -R $REPO --body-file <path-to-rendered>
         Confirm posting succeeded by reading the comment back via 'gh pr view $PR -R $REPO --json comments'.
 
