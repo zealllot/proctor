@@ -1,6 +1,20 @@
 # PRoctor
 
-> AI-driven PR test runner. Reads a PR's diff, plans tests, runs them, posts a structured report comment with screenshots — and opens a fix PR when something fails.
+[![release](https://img.shields.io/github/v/release/zealllot/proctor?label=release&sort=semver)](https://github.com/zealllot/proctor/releases/latest)
+[![license](https://img.shields.io/github/license/zealllot/proctor)](LICENSE)
+[![claude-code](https://img.shields.io/badge/Claude%20Code-plugin-orange)](https://claude.com/claude-code)
+[![tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)](tests/)
+
+> AI-driven PR test runner — a Claude Code plugin and GitHub Action. Reads a PR's diff, plans tests, runs them (lint, curl, headless chrome via chrome-devtools MCP), posts a structured report comment with screenshots, and opens a fix PR when something fails.
+
+**Latest:** [v0.2.12](https://github.com/zealllot/proctor/releases/latest) — first-class local mode, schema null-tolerance, Postgres-aware setup wizard. See [CHANGELOG.md](CHANGELOG.md) for v0.2.7 → v0.2.12.
+
+## Why this exists
+
+- **PR reviewers don't have time to manually exercise every change** — PRoctor turns "what could break" into a concrete checklist before review starts.
+- **Existing test suites cover what was thought of at the time** — PRoctor reads the diff and *generates new tests* aimed at this specific change (frontend, api, schema, infra, mobile, cli, e2e-flow, docs).
+- **Visual regressions slip through unit tests** — opt-in headless-chrome screenshots compare base ref vs head with pixel-diff (ImageMagick).
+- **Failures should arrive with a fix, not just a complaint** — when `auto_fix: true`, PRoctor opens a separate fix PR with the patch.
 
 ## Quick Start (60 seconds)
 
