@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.12 — 2026-05-10
+
+### Fixed
+- **Schema validator no longer crashes on explicit `null` optional fields.** `validate_test_results` checked `if opt_str in item:` before requiring the value to be a string — so when the executor emitted `"screenshot_ref": null` for non-chrome-devtools items (which is the natural shape), the validator failed `isinstance(None, str)` and aborted the entire pipeline at stage 3 with `TestResults.items[i].screenshot_ref must be a string if present`. Caught when v0.2.11's first real CI run on `qor_demo` PR #1 reached execute (3 pass / 3 fail) but couldn't proceed to fix or report. Changed the predicate to `if item.get(opt_str) is not None:` so explicit-null is treated identically to omitted. Added a regression test (`test_test_results_explicit_null_rich_fields_accepted`).
+
 ## v0.2.11 — 2026-05-10
 
 ### Changed (BREAKING for local CLI)
