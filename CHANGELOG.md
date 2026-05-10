@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.6 — 2026-05-10
+
+### Fixed
+- **`set -u` no longer crashes on unset optional vars after fix stage.** v0.2.5's pipeline scriptified the body but kept `set -uo pipefail`. Vars that are only set inside conditional feature blocks (`PROCTOR_VISUAL_DIFF_PIXELS`, `VISUAL_URL_BASE`, `PROCTOR_USAGE_SUMMARY`, etc.) crashed the bash on `unbound variable` whenever the conditional didn't fire. First seen on `qor_demo` PR #1 (visual_regression off). Initialized all optional vars at the top of the script with `: "${VAR:-}"` defaults.
+
 ## v0.2.5 — 2026-05-10
 
 ### Fixed
