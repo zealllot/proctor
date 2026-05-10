@@ -10,6 +10,18 @@
 # This eliminates the multi-stage bailout vector we hit on
 # v0.1.4–v0.1.7 (model produced stage 1 output then exited).
 set -uo pipefail
+# Defaults for vars that are only set inside conditional feature blocks
+# (visual_regression, etc.). Without these, the report stage's prompt
+# expansion under set -u crashes with 'unbound variable'.
+SCREENSHOT_URL_BASE="${SCREENSHOT_URL_BASE:-}"
+VISUAL_URL_BASE="${VISUAL_URL_BASE:-}"
+PROCTOR_USAGE_SUMMARY="${PROCTOR_USAGE_SUMMARY:-}"
+PROCTOR_VISUAL_DIFF_PIXELS="${PROCTOR_VISUAL_DIFF_PIXELS:-}"
+PROCTOR_RERUN_IDS="${PROCTOR_RERUN_IDS:-}"
+PROCTOR_MODE="${PROCTOR_MODE:-run}"
+GITHUB_WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-proctor.yml}"
+export SCREENSHOT_URL_BASE VISUAL_URL_BASE PROCTOR_USAGE_SUMMARY PROCTOR_VISUAL_DIFF_PIXELS
+
 PLUGIN_DIR="${GITHUB_ACTION_PATH}/../plugins/proctor"
 PYTHONPATH="${GITHUB_ACTION_PATH}/.."
 export PYTHONPATH
