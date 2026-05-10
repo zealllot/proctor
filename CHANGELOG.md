@@ -2,6 +2,13 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.5 — 2026-05-10
+
+### Fixed
+- **GitHub Actions 21000-char per-expression limit no longer breaks the action.** v0.2.4's accumulated Run step (~40K chars) hit the limit on first use; first-time consumers got "The template is not valid... Exceeded max expression length 21000". Extracted the entire pipeline body to `github-action/scripts/run-proctor.sh`. The `run:` block is now a one-liner that execs the script. All `${{ github.* }}` references were replaced with env-var equivalents passed in via the step's `env:` block (`GITHUB_ACTION_PATH`, `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_REF`).
+
+  No behavior change; only refactor for size.
+
 ## v0.2.4 — 2026-05-10
 
 ### Added
