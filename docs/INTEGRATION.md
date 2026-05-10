@@ -57,11 +57,16 @@ per_test_timeout_seconds: 60
 ```bash
 cd /your/repo
 gh auth status   # one-time: `gh auth login` if needed
-claude /proctor 123                                # PR number
-claude /proctor https://github.com/org/repo/pull/123
+claude /proctor:proctor 123                                # PR number in current repo
+claude /proctor:proctor https://github.com/org/repo/pull/123
+
+# Opt-in: also post the report and push a fix PR (off by default in local mode)
+claude /proctor:proctor 123 --post-comment --push-fix
 ```
 
-PRoctor will print the test plan, ask you to approve (uncheck items you don't want), then execute.
+The namespaced form (`/proctor:proctor`) is required — `/proctor` alone collides with the plugin name and Claude Code will reject it.
+
+PRoctor will print the test plan, ask you to approve (uncheck items you don't want), execute, **then render the report into your terminal**. If failures are auto-fixable it writes patches to `.proctor/runs/<run-id>/patches/<id>.patch` — apply with `git apply --3way <path>` after reviewing. Nothing is posted to GitHub or pushed without an explicit `--post-comment` / `--push-fix` flag.
 
 ## Path B — GitHub Action
 

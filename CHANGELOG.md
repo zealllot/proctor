@@ -2,6 +2,47 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.11 — 2026-05-10
+
+### Changed (BREAKING for local CLI)
+- **Local `/proctor:proctor <PR>` is now local-only by default.** Previously the local CLI mirrored CI behavior — it posted a report comment to the PR and pushed a fix PR using the developer's git credentials. That made every iteration of pre-review testing spam the PR with comments and auto-open fix PRs from personal accounts. New defaults:
+  - **No mutex acquisition** — the GitHub label lock is a CI-only coordination primitive; local runs skip it.
+  - **No PR comment** — the report renders to terminal and saves to `.proctor/runs/<run-id>/report.md`.
+  - **No fix push / fix PR** — patches are written as plain `.patch` files under `.proctor/runs/<run-id>/patches/<id>.patch` for the developer to review and `git apply --3way` themselves.
+  
+  CI behavior (post comment + push fix PR) is unchanged — `GITHUB_ACTIONS=true` keeps the old flow.
+
+### Added
+- **`--post-comment` and `--push-fix` opt-in flags.** For local runs that *do* want to post/push (e.g. running `/proctor` from your laptop because CI is down), pass these flags to restore the old behavior selectively.
+- **`PROCTOR_MODE` / `PROCTOR_POST_COMMENT` / `PROCTOR_PUSH_FIX` env vars** propagated to all stage skills, so the orchestrator's mode decision is visible end-to-end.
+
+### Fixed (caught by a real local CLI smoke run against `qor_demo` PR #1)
+- **Documentation now uses `/proctor:proctor 123` consistently.** The bare `/proctor 123` form fails in `claude --print` mode with `Unknown command: /proctor` because the command name collides with the plugin name; Claude Code can only resolve it via the namespaced form. README and `docs/INTEGRATION.md` updated.
+
+## v0.2.10 — 2026-05-10
+
+### Fixed (all four caught by an end-to-end smoke run of the wizard against a clean fixture; PR-side testing missed all of them)
+- **Workflow auth input name was wrong.** Wizard generated `claude_code_oauth_token` (underscores). The action's actual input name uses hyphens — `claude-code-oauth-token` — so the generated workflow would have been silently ignored on first PR run with `Unexpected input(s)` warnings. Updated the workflow template + added an inline note.
+- **Action version pin was hardcoded to v0.2.0.** The model read `@v0.2.0` from the markdown's example and copied it verbatim instead of pinning to the actual current tag. Wizard now resolves `CURRENT_TAG` at runtime via `gh release view --repo zealllot/proctor --json tagName --jq '.tagName'` (with `gh api repos/.../tags` fallback, then literal `main`).
+- **`/proctor rerun` trigger was missing from the workflow `if:` guard.** v0.2.3 added the rerun comment but the wizard's workflow template only checked `/proctor run`; consumers couldn't use rerun until they hand-edited the file.
+- **App port was guessed silently when not derivable from code.** The wizard hardcoded `:7000` for an empty `main.go` smoke fixture. Step 1 now greps Listen/Run calls per language and falls back to a new Q2.6 open-ended question if no port is found, so consumers don't end up with a `base_url` pointing at a port their app doesn't bind.
+
+## v0.2.9 — 2026-05-10
+
+### Fixed
+- **`/proctor-init` plugin now loads cleanly via `claude --plugin-dir`.** Local validation surfaced two bugs that PR-side testing missed: `plugin.json` used `owner` (rejected by the schema; the supported key is `author`), and `skills/fixing-test-failures/SKILL.md` had a YAML parse failure because the description's plain-scalar value contained `auto_fix: true` — the parser treated the inner `: ` as a mapping indicator and silently dropped the entire frontmatter at runtime. Quoted the description and renamed the manifest field. Validated with `claude plugins validate` and a real `claude --plugin-dir` smoke run that listed all 2 commands / 5 skills / 2 subagents.
+- **Route A (compose-provisioned Postgres) now parses the actual compose file.** Stock defaults (5432/postgres/postgres) silently failed when the user's compose mapped to a non-default host port or used custom credentials — exactly what `qor_demo` does (host port 9722, user `qor_demo`). The wizard now uses `yq` to extract the host side of the port mapping and the `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` env values from the matching service, then injects those into the workflow's `env:` block. Wait loop changed from `docker compose exec ... pg_isready` to `nc -z localhost <port>` so it works on any service name and doesn't depend on the container being internally healthy first.
+
+## v0.2.8 — 2026-05-10
+
+### Added
+- **`/proctor-init` now provisions Postgres in CI.** Three-signal detection — `docker-compose.yml` with a `postgres` image, DSN markers in `config/`/`database.yml`/`.env.example`, or a postgres driver import in source — flips the wizard into DB mode. A new conditional Q2.5 asks how to provision: reuse the existing `docker-compose.yml` (route A, default when compose is present), drop a GitHub Actions `services: postgres:` block into the workflow (route B, default otherwise), or skip and TODO it. The wizard captures `ENV_PREFIX` from any `configor.New(&configor.Config{ENVPrefix: "..."})` it finds, so the workflow's `env:` block (`<PREFIX>_HOST`, `<PREFIX>_PORT`, etc.) maps onto the consumer's existing config loader without code changes. If a `db/schema.sql` (or similar) is present, the wizard adds a `psql -f` setup step; otherwise it logs a TODO so the user remembers the DB is empty.
+
+## v0.2.7 — 2026-05-10
+
+### Changed
+- **`/proctor-init` now detects GOPATH-era Go projects.** A repo with `*.go` source but no `go.mod` (e.g. `qor_demo` and other pre-modules codebases) used to fall through Q1 detection because the wizard only looked at `go.mod`. The wizard now walks `find . -maxdepth 3 -name '*.go' -not -path './vendor/*'` when `go.mod` is missing and, if hits found, tags the stack as `"Go (GOPATH-era, no go.mod)"` and pre-fills Q2 with the symlink-into-`$GOPATH/src/<owner>/<repo>` setup commands the toolchain needs.
+
 ## v0.2.6 — 2026-05-10
 
 ### Fixed

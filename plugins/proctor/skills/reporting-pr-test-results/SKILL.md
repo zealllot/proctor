@@ -1,6 +1,6 @@
 ---
 name: reporting-pr-test-results
-description: Use as the final stage of /proctor to render TestResults + FixPRRef into a rich markdown PR comment and post it. Output is the markdown body actually posted. Each item gets its own section with evidence, command, output excerpt, logs, and screenshot refs (when present).
+description: "Final stage of /proctor. Renders TestResults + FixPRRef into a markdown report. In CI mode (PROCTOR_POST_COMMENT=1) posts the comment to the PR; in local mode saves the report to disk and prints the path so the developer can read it locally. Each item gets its own section with evidence, command, output excerpt, logs, and screenshot refs (when present)."
 ---
 
 # Reporting PR Test Results
@@ -97,6 +97,8 @@ If the item has no `command` / `output_excerpt` / `screenshot_ref`, omit those s
 
 ## Auto-fix section
 
+CI mode (FixPRRef has `number` / `url` fields):
+
 ```markdown
 ### Auto-fix
 
@@ -108,14 +110,36 @@ If the item has no `command` / `output_excerpt` / `screenshot_ref`, omit those s
 - ✨ All passed — nothing to fix.
 ```
 
+Local mode (FixPRRef has `mode: "local"` and `patches_dir`):
+
+```markdown
+### Auto-fix (local — patches not pushed)
+
+{ONE of, depending on covers/unfixed:}
+- 📝 Generated patches in `<patches_dir>` covering `<id1>`, `<id2>`. Apply with: `git apply --3way <patches_dir>/<id>.patch`
+- 📝 Generated patches in `<patches_dir>` covering `<id1>`. **Couldn't fix:** `<id2>` — needs human review.
+- ⛔ Failures couldn't be auto-fixed. Needs human review.
+- ⏸️ Auto-fix disabled (`.pr-test.yml` has `auto_fix: false`). See failures above.
+- ✨ All passed — nothing to fix.
+
+Re-run with `--push-fix` to also push these as a fix PR.
+```
+
 ## Procedure
 
 1. Render the markdown above using actual values from the inputs.
 2. For chrome-devtools items where the executor populated `screenshot_ref`, link to the artifact location (we don't have a public URL for inline rendering yet — see `docs/INTEGRATION.md` "Inline screenshots" if/when this becomes available).
 3. Compute a one-line summary (`<pass>/<total> passed`) for use as the `summary_for_gist` if the body exceeds GitHub's comment size limit.
-4. Save the rendered markdown to `.proctor/runs/<run-id>/report.md` so the artifact contains it.
-5. Call `post_comment.post(pr_number=..., repo=..., body=<rendered>, summary_for_gist=<one-line>)`.
-6. Emit a short status line on stdout: `[proctor:report] done comment_posted=true` — do NOT emit the full markdown to stdout (it shows up twice in CI logs that way and clutters the verify step).
+4. Save the rendered markdown to `.proctor/runs/<run-id>/report.md` (always — both modes need it).
+5. Branch on `PROCTOR_POST_COMMENT`:
+   - `1` → call `post_comment.post(pr_number=..., repo=..., body=<rendered>, summary_for_gist=<one-line>)`. Emit `[proctor:report] done comment_posted=true`.
+   - `0` → skip the post call. Print to stdout:
+     ```
+     [proctor:report] done comment_posted=false
+     Report saved to .proctor/runs/<run-id>/report.md
+     <pass>/<total> passed · <fail> failed · <skipped> skipped
+     ```
+     Then dump the full rendered markdown so the developer sees the full report inline. (The double-log concern from CI doesn't apply here — local invocations are interactive and the user explicitly wants to read the report.)
 
 ## Constraints
 

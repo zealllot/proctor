@@ -32,11 +32,14 @@ Reads PR body for context — Slack/Jira/Linear links and acceptance criteria be
 ## Local CLI (alternative to the wizard)
 
 ```bash
-claude /proctor 123                                # PR number in current repo
-claude /proctor https://github.com/org/repo/pull/123
+claude /proctor:proctor 123                                # PR number in current repo
+claude /proctor:proctor https://github.com/org/repo/pull/123
+
+# also post the report as a PR comment / push a fix PR (off by default in local mode):
+claude /proctor:proctor 123 --post-comment --push-fix
 ```
 
-PRoctor will print the test plan, ask you to approve (uncheck items you don't want), then execute.
+The namespaced form (`/proctor:proctor`, not `/proctor`) is required because `proctor` collides with the plugin name. PRoctor will print the test plan, ask you to approve (uncheck items you don't want), then execute. **Local mode renders the report to your terminal and writes any fix patches to `.proctor/runs/<run-id>/patches/` for you to review and apply yourself** — nothing posts to GitHub unless you pass `--post-comment` / `--push-fix`.
 
 ## Manual setup
 
@@ -56,7 +59,7 @@ Each stage is a Markdown SKILL.md with a JSON contract validated by `scripts/sch
 
 | Component | What |
 |---|---|
-| [`commands/proctor.md`](plugins/proctor/commands/proctor.md) | `/proctor <PR>` orchestrator |
+| [`commands/proctor.md`](plugins/proctor/commands/proctor.md) | `/proctor:proctor <PR>` orchestrator (CI + local) |
 | [`commands/proctor-init.md`](plugins/proctor/commands/proctor-init.md) | Setup wizard for consumers |
 | [`skills/analyzing-pr-changes`](plugins/proctor/skills/analyzing-pr-changes/SKILL.md) | Diff + PR body → ChangeMap (with `pr_context`) |
 | [`skills/planning-pr-tests`](plugins/proctor/skills/planning-pr-tests/SKILL.md) | ChangeMap → TestPlan (cheapest tool first; reads PR body for ACs) |

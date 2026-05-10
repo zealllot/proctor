@@ -1,15 +1,39 @@
 ---
 name: fixing-test-failures
-description: Use after executing-pr-tests when there are failures and `auto_fix: true`. Dispatches the pr-test-fixer subagent for each failure, applies returned patches on a fix branch, opens a fix PR, returns FixPRRef. Fourth stage of the PRoctor pipeline. Output is a single FixPRRef JSON object (or null if nothing to fix).
+description: "Use after executing-pr-tests when there are failures and `auto_fix: true`. Dispatches the pr-test-fixer subagent for each failure. In CI mode (PROCTOR_PUSH_FIX=1) applies patches on a fix branch and opens a fix PR; in local mode writes patches to disk for the developer to review and apply manually. Returns a FixPRRef. Fourth stage of the PRoctor pipeline. Output is a single FixPRRef JSON object (or null if nothing to fix)."
 ---
 
 # Fixing Test Failures
 
-Input: `test-results.json`, `change-map.json`, `.pr-test.yml`, env (run-id, repo, PR head ref).
+Input: `test-results.json`, `change-map.json`, `.pr-test.yml`, env (run-id, repo, PR head ref, `PROCTOR_PUSH_FIX`).
 
 Output: one `FixPRRef` JSON object, or `null` if there's nothing to fix or no patch was producible.
 
-## Procedure
+## Mode
+
+`PROCTOR_PUSH_FIX=1` → **CI mode**: full worktree + commit + push + PR creation flow (steps 2–7 below).
+
+`PROCTOR_PUSH_FIX=0` → **local mode**: dispatch fixers, save each patch as `.proctor/runs/<run-id>/patches/<id>.patch`, return a FixPRRef with `mode: "local"`. Skip the worktree, skip git apply, skip push, skip `gh pr create`. **Never mutate the developer's working tree** — they apply manually after review:
+
+```bash
+git apply --3way .proctor/runs/<run-id>/patches/t-002.patch
+```
+
+The local-mode FixPRRef shape:
+
+```jsonc
+{
+  "mode": "local",
+  "patches_dir": ".proctor/runs/<run-id>/patches/",
+  "covers": ["t-002"],
+  "unfixed": ["t-005"],
+  "rationales": { "t-002": "first line of rationale" }
+}
+```
+
+The reporting stage uses these fields to render the right Auto-fix section.
+
+## Procedure (CI mode)
 
 1. Filter `test-results.json` to items with `status: "fail"`. If empty
    → return `null`.
@@ -75,6 +99,17 @@ Output: one `FixPRRef` JSON object, or `null` if there's nothing to fix or no pa
 
 7. **Cleanup**: `git worktree remove ../proctor-fix-<run-id>` whether
    or not we opened a PR.
+
+## Procedure (local mode)
+
+1. Filter `test-results.json` to fail items. If empty → return `null`.
+2. Create `.proctor/runs/<run-id>/patches/`.
+3. For each failure:
+   - Dispatch `pr-test-fixer` with the failure + plan item + ChangeMap hunks. Pass `worktree_path = current repo root` — the fixer reads but does not write.
+   - Receive `{id, patch, rationale}`.
+   - If `patch` is null → `unfixed.append(id)`; continue.
+   - Else write `patch` (raw text) to `.proctor/runs/<run-id>/patches/<id>.patch`. Save the rationale under `rationales[id]`. Append `id` to `covers[]`.
+4. Return the local-mode FixPRRef shape shown above. **Do not run any git command, do not call `gh`.**
 
 ## Retry policy
 

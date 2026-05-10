@@ -10,19 +10,29 @@ Run the PRoctor test pipeline against a GitHub PR.
 
 ## Inputs
 
-- `$ARGUMENTS` — a PR number (e.g. `123`) or full PR URL.
+- `$ARGUMENTS` — a PR number (e.g. `123`) or full PR URL, optionally followed by flags.
+- Flags (only meaningful in local mode; ignored in CI):
+  - `--post-comment` — also post the report as a PR comment (default off in local mode).
+  - `--push-fix` — also push the fix branch and open a fix PR (default off in local mode).
 - Optional `.pr-test.yml` at the current repo root.
 
 ## Mode detection
 
-- If env var `GITHUB_ACTIONS=true` is set → CI mode.
-- Otherwise → local mode.
+Set these env vars in step 0 and propagate to all stage skills:
+
+```
+PROCTOR_MODE          = "ci" if GITHUB_ACTIONS=true, else "local"
+PROCTOR_POST_COMMENT  = "1" if MODE=ci OR --post-comment, else "0"
+PROCTOR_PUSH_FIX      = "1" if MODE=ci OR --push-fix,     else "0"
+```
+
+The defaults are deliberately asymmetric: **CI posts and pushes by default; local does neither**. Local invocations are for the developer testing their own PR before review — they don't want each iteration spamming the PR with comments or auto-opening fix PRs from their personal account.
 
 ### Dry-run
 
 If env `PROCTOR_DRY_RUN=1` is set:
 
-- Skip the fix-PR `git push` and `gh pr create`. Print what *would* be pushed and the would-be PR title/body to stdout. The reporting stage prints the rendered markdown to stdout instead of posting.
+- Forces `PROCTOR_POST_COMMENT=0` and `PROCTOR_PUSH_FIX=0` regardless of mode/flags. Print what *would* be posted/pushed instead.
 - The mutex label is still acquired and released (locking is not output).
 
 ## Flow
@@ -56,7 +66,11 @@ print(json.dumps({'pr': pr, 'diff': diff}))
 Persist to `.proctor/runs/<run-id>/{pr.json,diff.patch}` (run-id from
 `runlog.make_run_id`).
 
-### 3. Acquire mutex
+### 3. Acquire mutex (CI mode only)
+
+Skip this entire step when `PROCTOR_MODE=local`. The mutex is a coordination point between concurrent CI runs on the same PR; a developer running PRoctor locally on their own machine doesn't conflict with anything. (Two devs running `/proctor:proctor 123` simultaneously is a corner case nobody hits — they'd both produce their own local artifacts and notice each other.)
+
+CI mode:
 
 ```bash
 python3 -c "
@@ -124,9 +138,9 @@ Apply skill `reporting-pr-test-results`. Pass test-results, fix-pr-ref,
 change-map, run-id, PR number. The skill posts the comment itself; the
 command just needs to surface success/failure to the user.
 
-### 10. Release mutex (always, including on failure)
+### 10. Release mutex (CI mode only, always — including on failure)
 
-Bash trap from step 3 fires `python3 -c "...gh_lock.release(...)"`.
+Bash trap from step 3 fires `python3 -c "...gh_lock.release(...)"`. Skip when `PROCTOR_MODE=local` (no lock was acquired).
 
 ## Logging
 
