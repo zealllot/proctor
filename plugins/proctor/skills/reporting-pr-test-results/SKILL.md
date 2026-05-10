@@ -12,6 +12,8 @@ Input: `test-results.json`, `fix-pr-ref.json` (may be `null`), `change-map.json`
 - `GITHUB_RUN_ID` — the GitHub Actions workflow run id, used to build the Action run URL and the artifact link
 - `GITHUB_SERVER_URL` — usually `https://github.com`
 - `SCREENSHOT_URL_BASE` — when present, screenshots have been pushed to a public branch and the report should inline-embed them via this URL prefix (e.g. `https://raw.githubusercontent.com/<owner>/<repo>/proctor-screenshots/<run-id>/`). When absent, fall back to a "(in artifact)" reference.
+- `VISUAL_URL_BASE` — when non-empty, a public raw-URL prefix for `baseline.png` / `head.png` / `diff.png`. Render a "Visual regression" section right after the header table (see template below).
+- `PROCTOR_VISUAL_DIFF_PIXELS` — number of differing pixels at 5% fuzz. `0` means no visible change. Echo this in the visual section as a one-line summary.
 - `PROCTOR_USAGE_SUMMARY` — when present, a string like `tokens_in=45000 tokens_out=8000 cost_usd=0.1234|analyze=$0.020(1) plan=$0.030(1) execute=$0.080(5) execute-lint-batch=$0.012(1) report=$0.014(1)` summarizing total claude API usage for this run, plus a per-stage breakdown (after the `|`). Each per-stage entry is `<stage>=$<cost>(<calls>)`. Render two lines in the header:
   - **Cost:** $<total> · <tokens_in> in / <tokens_out> out tokens
   - **Where:** <stage>=$<cost> · <stage>=$<cost> · ... (sorted by cost desc when possible; top 5 only if there are more)
@@ -31,6 +33,24 @@ Output: a markdown comment body. The skill posts the comment via `scripts/post_c
 ```
 
 The `<server>/<repo>/actions/runs/<github-run-id>#artifacts` URL takes the user straight to the artifacts panel where they can download `proctor-run-<pr#>.zip` containing every JSON, log, and screenshot.
+
+## Visual regression section (only when `VISUAL_URL_BASE` is non-empty)
+
+Render this immediately after the header, before the per-item sections:
+
+```markdown
+### Visual regression — `<base_url>`
+
+`<diff_pixels>` differing pixels at 5% fuzz (0 = no visible change).
+
+| Baseline (base ref) | Diff (red = changed) | Head (this PR) |
+|---|---|---|
+| ![baseline](VISUAL_URL_BASE/baseline.png) | ![diff](VISUAL_URL_BASE/diff.png) | ![head](VISUAL_URL_BASE/head.png) |
+
+The base URL above is the `base_url` from `.pr-test.yml`. Captured by chromium headless at 1280×800. Pages with animations or randomized content may always show diff pixels — tune `.pr-test.yml.teardown` if your stack needs custom server cleanup between captures.
+```
+
+When `VISUAL_URL_BASE` is empty, omit the entire section — don't render an empty header.
 
 ## Per-item section
 

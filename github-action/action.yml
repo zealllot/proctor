@@ -236,6 +236,86 @@ runs:
            > "$RUN_DIR/pr.json"
         gh pr diff "$PR" -R "$REPO" > "$RUN_DIR/diff.patch"
 
+        # ---- Visual regression baseline capture (optional) ----
+        # When .pr-test.yml has 'visual_regression: true', check out the
+        # PR base ref into a worktree, run setup there, screenshot the
+        # base_url main page → baseline.png, then tear down and proceed
+        # with the normal pipeline on PR head. After the head pipeline,
+        # capture head.png and `compare` produces diff.png. All three
+        # render in the report.
+        VISUAL_REG=false
+        if [[ -f .pr-test.yml ]]; then
+          VISUAL_REG=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print('true' if cfg.get('visual_regression', False) else 'false')" 2>/dev/null || echo false)
+        fi
+        if [[ "$VISUAL_REG" == "true" && "$PROCTOR_MODE" != "rerun" ]]; then
+          echo "::group::Visual regression: capture baseline at PR base ref"
+          mkdir -p "$RUN_DIR/visual"
+          BASE_REF=$(jq -r '.baseRefName' "$RUN_DIR/pr.json")
+          BASE_SHA=$(jq -r '.baseRefOid' "$RUN_DIR/pr.json")
+          BASE_URL=$(python3 -c "import yaml; cfg=yaml.safe_load(open('.pr-test.yml')) or {}; print(cfg.get('base_url','http://127.0.0.1:5173'))" 2>/dev/null || echo "http://127.0.0.1:5173")
+          # Default teardown — kill common dev-server names and wait. Override
+          # via .pr-test.yml 'teardown:' if your stack needs different cleanup.
+          TEARDOWN_CMDS=$(python3 -c "
+        import yaml
+        cfg = yaml.safe_load(open('.pr-test.yml')) or {}
+        td = cfg.get('teardown') or [
+          \"pkill -f 'pnpm dev' || true\",
+          \"pkill -f '/tmp/' || true\",
+          \"pkill -f 'go run' || true\",
+          \"pkill -f 'vite' || true\",
+          \"sleep 3\",
+        ]
+        print('\n'.join(td))
+        ")
+          # Worktree the base ref next to repo
+          BASELINE_WT="$(mktemp -d)/baseline-wt"
+          if git worktree add --detach "$BASELINE_WT" "$BASE_SHA" 2>&1 | tee /tmp/proctor-baseline-wt.log; then
+            pushd "$BASELINE_WT" > /dev/null
+            # Run setup in baseline worktree (inherit PR head's .pr-test.yml
+            # — the base ref might not have one if the PR added it)
+            cp -f "${GITHUB_WORKSPACE}/.pr-test.yml" .pr-test.yml 2>/dev/null || true
+            BASELINE_OK=true
+            while IFS= read -r cmd; do
+              [[ -z "$cmd" ]] && continue
+              echo "[proctor:baseline-setup] $cmd"
+              if ! bash -c "$cmd"; then
+                echo "::warning::Baseline setup command failed: $cmd — skipping baseline capture"
+                BASELINE_OK=false
+                break
+              fi
+            done < /tmp/proctor-setup-cmds.txt
+            if [[ "$BASELINE_OK" == "true" ]]; then
+              echo "[proctor:baseline] capturing $BASE_URL"
+              # Use chromium-browser if available; runners typically have it
+              # via Playwright / setup-chrome / preinstalled
+              CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser || command -v chrome || echo '')"
+              if [[ -n "$CHROME_BIN" ]]; then
+                "$CHROME_BIN" --headless --disable-gpu --no-sandbox \
+                              --hide-scrollbars --window-size=1280,800 \
+                              --screenshot="$RUN_DIR/visual/baseline.png" \
+                              "$BASE_URL" > /dev/null 2>&1 || true
+                if [[ -s "$RUN_DIR/visual/baseline.png" ]]; then
+                  echo "[proctor:baseline] captured $(wc -c < "$RUN_DIR/visual/baseline.png") bytes"
+                else
+                  echo "::warning::Baseline screenshot empty; visual regression will be skipped"
+                  rm -f "$RUN_DIR/visual/baseline.png"
+                fi
+              else
+                echo "::warning::No chromium-browser on runner; visual regression skipped"
+              fi
+            fi
+            popd > /dev/null
+            git worktree remove --force "$BASELINE_WT" 2>/dev/null || true
+          fi
+          # Teardown baseline servers regardless
+          while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            echo "[proctor:baseline-teardown] $cmd"
+            bash -c "$cmd" 2>&1 | head -5 || true
+          done <<< "$TEARDOWN_CMDS"
+          echo "::endgroup::"
+        fi
+
         # Run user-defined setup commands from .pr-test.yml (installs,
         # background servers, wait loops). Failures here are env-level
         # and abort the pipeline before any stage runs.
@@ -495,6 +575,30 @@ runs:
         echo "::endgroup::"
         validate_json "$RUN_DIR/test-results.json" validate_test_results || exit 1
 
+        # ---- Visual regression: capture head + diff against baseline ----
+        if [[ "$VISUAL_REG" == "true" && -s "$RUN_DIR/visual/baseline.png" ]]; then
+          echo "::group::Visual regression: head capture + diff"
+          CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser || command -v chrome || echo '')"
+          if [[ -n "$CHROME_BIN" ]]; then
+            "$CHROME_BIN" --headless --disable-gpu --no-sandbox \
+                          --hide-scrollbars --window-size=1280,800 \
+                          --screenshot="$RUN_DIR/visual/head.png" \
+                          "$BASE_URL" > /dev/null 2>&1 || true
+          fi
+          if [[ -s "$RUN_DIR/visual/head.png" ]] && command -v compare >/dev/null 2>&1; then
+            # ImageMagick `compare` returns non-zero when images differ — that's fine.
+            # -metric AE = absolute pixel error count, -fuzz 5% tolerates anti-aliasing.
+            DIFF_PIXELS=$(compare -metric AE -fuzz 5% \
+              "$RUN_DIR/visual/baseline.png" "$RUN_DIR/visual/head.png" \
+              "$RUN_DIR/visual/diff.png" 2>&1 | tail -1 | tr -d '[:alpha:]@ ' || echo "?")
+            echo "[proctor:visual-reg] diff_pixels=$DIFF_PIXELS"
+            export PROCTOR_VISUAL_DIFF_PIXELS="$DIFF_PIXELS"
+          else
+            echo "::warning::No 'compare' (ImageMagick) available or head.png missing; skipping diff"
+          fi
+          echo "::endgroup::"
+        fi
+
         # Decide whether stage 4 should run
         FAIL_COUNT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/test-results.json'))['summary']['fail'])")
         AUTO_FIX=$(python3 -c "import os, yaml; cfg = yaml.safe_load(open('.pr-test.yml')) if os.path.exists('.pr-test.yml') else {}; print('true' if (cfg or {}).get('auto_fix', True) else 'false')")
@@ -533,9 +637,13 @@ runs:
         # URL from the report. The branch is opaque infra: each run adds a
         # subdirectory; older runs accumulate but are never modified.
         SCREENSHOT_URL_BASE=""
-        if [[ -d "$RUN_DIR/screenshots" ]] && ls "$RUN_DIR/screenshots"/*.png >/dev/null 2>&1; then
-          ss_count=$(ls "$RUN_DIR/screenshots"/*.png | wc -l | tr -d ' ')
-          echo "[proctor:screenshots] pushing $ss_count PNG(s) to proctor-screenshots branch"
+        VISUAL_URL_BASE=""
+        # Push if either per-item screenshots OR visual regression artifacts exist
+        if (ls "$RUN_DIR/screenshots"/*.png >/dev/null 2>&1) || \
+           [[ -s "$RUN_DIR/visual/baseline.png" ]]; then
+          ss_count=$(ls "$RUN_DIR/screenshots"/*.png 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          vis_count=$(ls "$RUN_DIR/visual"/*.png 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          echo "[proctor:screenshots] pushing $ss_count item PNG(s) + $vis_count visual PNG(s) to proctor-screenshots branch"
           ss_dir="$(mktemp -d)"
           ss_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           # Try clone first (handles existing branch + isolated history).
@@ -559,7 +667,15 @@ runs:
           git -C "$ss_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           mkdir -p "$ss_dir/$RUN_ID"
-          cp "$RUN_DIR"/screenshots/*.png "$ss_dir/$RUN_ID/"
+          # Per-item screenshots (chrome-devtools tests)
+          if ls "$RUN_DIR/screenshots"/*.png >/dev/null 2>&1; then
+            cp "$RUN_DIR"/screenshots/*.png "$ss_dir/$RUN_ID/"
+          fi
+          # Visual regression triplet (baseline / head / diff) under a subdir
+          if [[ -d "$RUN_DIR/visual" ]] && ls "$RUN_DIR/visual"/*.png >/dev/null 2>&1; then
+            mkdir -p "$ss_dir/$RUN_ID/visual"
+            cp "$RUN_DIR"/visual/*.png "$ss_dir/$RUN_ID/visual/"
+          fi
           git -C "$ss_dir" add "$RUN_ID"
           git -C "$ss_dir" commit -q -m "screenshots: $RUN_ID"
 
@@ -602,13 +718,14 @@ runs:
           done
           if [[ "$push_ok" -eq 1 ]]; then
             SCREENSHOT_URL_BASE="${GITHUB_SERVER_URL}/${REPO}/raw/proctor-screenshots/${RUN_ID}/"
+            VISUAL_URL_BASE="${GITHUB_SERVER_URL}/${REPO}/raw/proctor-screenshots/${RUN_ID}/visual/"
             echo "[proctor:screenshots] published at $SCREENSHOT_URL_BASE"
           else
             echo "::warning::Failed to push screenshots branch after retries; falling back to artifact-only references"
           fi
           rm -rf "$ss_dir"
         fi
-        export SCREENSHOT_URL_BASE
+        export SCREENSHOT_URL_BASE VISUAL_URL_BASE
 
         # ---- Aggregate cost from usage.jsonl ----
         # Sum tokens + cost across all stages and per-item executions so
@@ -663,6 +780,8 @@ runs:
         - PR=$PR, REPO=$REPO, RUN_ID=$RUN_ID
         - GITHUB_RUN_ID=$GITHUB_RUN_ID, GITHUB_SERVER_URL=$GITHUB_SERVER_URL
         - SCREENSHOT_URL_BASE=$SCREENSHOT_URL_BASE  (empty if no screenshots were captured; else a public raw URL prefix like https://github.com/owner/repo/raw/proctor-screenshots/<run-id>/)
+        - VISUAL_URL_BASE=$VISUAL_URL_BASE  (empty unless visual regression captured; when non-empty the directory contains baseline.png + head.png + diff.png — render a 'Visual regression' section in the report)
+        - PROCTOR_VISUAL_DIFF_PIXELS=$PROCTOR_VISUAL_DIFF_PIXELS  (number of differing pixels at 5% fuzz; 0 means no visible change)
         - PROCTOR_USAGE_SUMMARY=$PROCTOR_USAGE_SUMMARY  (e.g. 'tokens_in=45000 tokens_out=8000 cost_usd=0.1234'; render in the header as a Cost line per the skill procedure)
         - Action run URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID
         - Artifact URL: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID#artifacts

@@ -139,7 +139,24 @@ Set `require_approval: true` in `.pr-test.yml`. PRoctor will post the test plan 
 
 After a failed run, comment `/proctor rerun t-004 t-007` on the PR (must hold write access). PRoctor downloads the previous run's artifact, replays plan + previously-passed item results, and re-executes ONLY the listed items. The new report comment shows the merged outcome. With no IDs (`/proctor rerun`), all items re-execute.
 
-### 7. Skip directives in PR body (optional)
+### 7. Visual regression diff (optional)
+
+Add to `.pr-test.yml`:
+
+```yaml
+visual_regression: true   # default false
+```
+
+When enabled, before the main pipeline runs, the action checks out the PR base ref into a worktree, runs `setup:` there, captures a full-page screenshot of `base_url` → `baseline.png`, tears down (default kills `pnpm dev` / `go run` / `vite` patterns; override with `teardown:` list in `.pr-test.yml`), then proceeds with the PR head. After the head pipeline, it captures `head.png`, runs `compare -metric AE -fuzz 5%` (ImageMagick), and saves `diff.png`.
+
+The report comment grows a "Visual regression" section: 3-image grid of baseline/diff/head, with the differing-pixel count.
+
+Costs to know:
+- ~30–90 sec extra per run for the second `setup:` pass
+- Requires ImageMagick (preinstalled on `ubuntu-latest`) and Chrome (`google-chrome` or `chromium`)
+- Pages with animations or randomized data may always show diff pixels — tune the `teardown:` list or pin random seeds
+
+### 8. Skip directives in PR body (optional)
 
 Drop HTML comments anywhere in the PR body to skip noise:
 
