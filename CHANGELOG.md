@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.4 — 2026-05-10
+
+### Added
+- **Visual regression diff (opt-in via `.pr-test.yml: visual_regression: true`).** Before the main pipeline runs, the action worktrees the PR base ref, runs `setup:` there, captures a full-page screenshot of `base_url` → `baseline.png`, tears down (configurable `teardown:` list, defaults kill common dev-server patterns), then proceeds with the PR head. After the head pipeline, captures `head.png` and runs `compare -metric AE -fuzz 5%` (ImageMagick) → `diff.png`. The report comment grows a "Visual regression" section: 3-image grid (baseline / diff / head) with differing-pixel count. Adds ~30–90 sec per run.
+
 ## v0.2.3 — 2026-05-10
 
 ### Added
