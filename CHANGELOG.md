@@ -2,6 +2,15 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.14 — 2026-05-11
+
+### Fixed
+- **`/proctor rerun` was checking out the wrong tree.** issue_comment-triggered runs use the workflow file from the default branch (correctly), but `actions/checkout@v4` with no `ref:` also defaults to the default branch — so rerun was analyzing master's code, not the PR head. Caught when `/proctor rerun` on `qor_demo` PR #3 (v0.2.13 pin) flagged the version pin as "still v0.2.12" — that was master's state, not the PR's.
+
+  This had been broken since v0.2.3 introduced rerun; nobody noticed because the rerun trigger itself was also broken (workflow had to live on default branch — fixed in wizard caveat at v0.2.13) so live rerun was never exercised. Both bugs surfaced in the same validation session.
+
+  Fix: move the Resolve PR number step before Checkout, capture the PR's `headRefOid` via `gh pr view`, and pass that as `ref:` to `actions/checkout@v4`. Now every event type checks out the PR head consistently.
+
 ## v0.2.13 — 2026-05-11
 
 ### Fixed

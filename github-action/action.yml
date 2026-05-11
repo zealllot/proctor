@@ -44,26 +44,40 @@ runs:
           exit 1
         fi
 
+    # Resolve PR number BEFORE checkout so we can checkout the PR head
+    # for issue_comment events. Without this, issue_comment runs check
+    # out the default branch (master) by actions/checkout's default,
+    # and PRoctor analyzes the wrong tree — caught when /proctor rerun
+    # on PR #3 looked at master's v0.2.12 instead of PR #3's v0.2.13.
+    - name: Resolve PR number
+      if: steps.antiloop.outputs.skip != 'true'
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [[ -n "${{ inputs.pr-number }}" ]]; then
+          PR="${{ inputs.pr-number }}"
+        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          PR="${{ github.event.pull_request.number }}"
+        elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+          PR="${{ github.event.issue.number }}"
+        else
+          echo "no PR number" >&2; exit 1
+        fi
+        echo "pr=$PR" >> "$GITHUB_OUTPUT"
+        # Always resolve the PR's head SHA so the Checkout step below
+        # gets the right tree regardless of trigger type.
+        HEAD_SHA=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid')
+        echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+        echo "::notice::Resolved PR #$PR @ $HEAD_SHA"
+
     - name: Checkout
       if: steps.antiloop.outputs.skip != 'true'
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-
-    - name: Resolve PR number
-      if: steps.antiloop.outputs.skip != 'true'
-      id: resolve
-      shell: bash
-      run: |
-        if [[ -n "${{ inputs.pr-number }}" ]]; then
-          echo "pr=${{ inputs.pr-number }}" >> "$GITHUB_OUTPUT"
-        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-        elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
-          echo "pr=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-        else
-          echo "no PR number" >&2; exit 1
-        fi
+        ref: ${{ steps.resolve.outputs.head_sha }}
 
     - name: Gate on issue_comment trigger
       id: comment-gate
