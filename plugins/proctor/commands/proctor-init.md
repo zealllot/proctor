@@ -345,6 +345,13 @@ Next:
   2. git commit -m "ci: add PRoctor"
   3. Open a small PR — PRoctor will analyze it within ~10 minutes and post a report comment.
 
+⚠ For `/proctor run` and `/proctor rerun` comment triggers to work:
+    The workflow file must exist on the DEFAULT BRANCH (main/master).
+    GitHub reads issue_comment workflows from the default branch only —
+    if proctor.yml only lives on your feature branch, comment triggers
+    silently do nothing. Merge the workflow to default before relying
+    on comment-driven flows.
+
 Docs:  https://github.com/zealllot/proctor/blob/main/docs/INTEGRATION.md
 Stuck? Skim the Troubleshooting section there before re-running.
 ```

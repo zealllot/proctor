@@ -2,6 +2,11 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.2.13 — 2026-05-11
+
+### Fixed
+- **`/proctor-init` summary now warns about default-branch requirement for comment triggers.** Caught while validating `/proctor rerun` against `qor_demo` PR #1: the comment was posted, the workflow file existed on the PR branch, but no workflow run fired. Root cause is a GitHub-side rule — `issue_comment` events use the workflow file from the **default branch only**, so a wizard-generated `proctor.yml` that only lives on the feature branch silently does nothing for `/proctor run` / `/proctor rerun`. The wizard's final summary now flags this explicitly so consumers know to merge the workflow to main/master before relying on comment-driven flows.
+
 ## v0.2.12 — 2026-05-10
 
 ### Fixed
