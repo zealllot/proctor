@@ -954,7 +954,8 @@ def test_plan_smells_all_negative_no_happy_save_flagged():
          "error_type": "validation"},
     ]}
     warnings = plan_check(plan)
-    assert any("plan-coverage" in w and "0 chrome-devtools items doing a happy-path" in w
+    assert any("plan-coverage" in w
+               and "0 chrome-devtools items whose what:" in w
                for w in warnings)
 
 
@@ -981,6 +982,29 @@ def test_plan_smells_happy_save_present_no_coverage_warning():
     ]}
     warnings = plan_check(plan)
     assert not any("plan-coverage" in w for w in warnings)
+
+
+def test_plan_smells_reload_sibling_with_past_tense_write_verb_not_self_flagged():
+    """v0.3.36 regression: a reload sibling's what: routinely contains
+    past-tense write verbs as NOUNS (`re-open saved record`, `assert
+    created record visible`). After v0.3.36 added past-tense forms to
+    _WRITE_PHRASES for the coverage check, these reload siblings were
+    falsely flagged as themselves needing their own round-trip
+    sibling. The fix: skip items that have RELOAD phrase + data_from
+    set."""
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: save Image reward",
+         "how": "...", "risk": "high", "depends_on": [],
+         "produces": ["created_id"]},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "Re-open saved Image reward — all fields round-trip correctly",
+         "how": "...", "risk": "high",
+         "depends_on": ["t-1"], "data_from": ["t-1"]},
+    ]}
+    warnings = plan_check(plan)
+    # No "missing round-trip" warning on t-2 (it IS the round-trip).
+    assert not any("t-2" in w and "round-trip" in w for w in warnings)
 
 
 def test_plan_smells_single_negative_not_flagged_for_coverage():

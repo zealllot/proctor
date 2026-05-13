@@ -2,6 +2,28 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.36 — 2026-05-13
+
+### plan_smells vocabulary expansion + reload-sibling self-flag fix
+
+Acceptance-test subagent against v0.3.35 confirmed end-to-end correctness (clean plan, schema OK, both happy + round-trip + split negatives, "backend-dep-deferred" rationalization blocked). Subagent surfaced one usability paper-cut worth fixing now:
+
+- The "all-negative plan" coverage check keys off `_WRITE_PHRASES` regex. The subagent naturally reached for `persist` to describe a happy save, which wasn't in the regex; the check then (incorrectly) reported "0 happy save items" and triggered an unnecessary regen iteration. The lint self-healed via the regen loop, but the warning text + vocabulary mismatch is friction worth removing.
+
+**Vocabulary expansion** (`scripts/plan_smells.py`):
+- Added past-tense forms (`saved`, `created`, `updated`, `submitted`, `edited`, `published`, `uploaded`) and three common synonyms (`persist`, `insert`, `store`, all tenses) to `_WRITE_PHRASES`.
+- Warning text improved: instead of "0 items doing a happy-path save/create", it now enumerates the recognized verbs AND suggests rephrasing if the user has happy items using a synonym not in the list. Removes the "but I DID write happy items" confusion.
+
+**Reload-sibling self-flag fix** (`scripts/plan_smells.py`):
+- The past-tense additions exposed a latent bug: a reload sibling's `what:` legitimately contains past-tense write verbs as nouns (`Re-open saved record`, `Assert created record visible in list`). After v0.3.36 the regex matched those, and the round-trip check then flagged the reload sibling as itself needing its own reload sibling — an infinite-recursion-of-test-items absurdity.
+- Fix: in the round-trip check, skip items that have `_RE_RELOAD` phrase in their own `what:` AND have `data_from` set (i.e. they're explicitly downstream of another item — they ARE the reload, not the source).
+
+**SKILL.md vocabulary hint** (`planning-pr-tests/SKILL.md`):
+- Added a line to the "Coverage balance" section listing the recognized write verbs so the planner uses one of them first time and skips the regen cycle.
+
+### Tests
+- 162 → 163 (+1): regression test for "reload sibling with past-tense write verb is NOT self-flagged" — the failure mode the past-tense addition would have introduced if not for the data_from + reload-phrase exemption.
+
 ## v0.3.35 — 2026-05-13
 
 ### Lint gate moved INTO the planning skill, new all-negative check, parse_pr_arg URL tolerance

@@ -119,6 +119,8 @@ For every new behavior the PR introduces (every distinct user-facing path the di
 3. THEN add negative items for validators / edge cases / error states. Aim for ≤ 1 negative item per validator branch, not 1 per typo / one per invalid value.
 4. If you find yourself writing 4 chrome-devtools items and all 4 are "submit X with bad input, expect error" — STOP. Replace one or two with the corresponding "submit X with good input, expect success" variant.
 
+**Vocabulary the lint recognizes** (v0.3.36+): the `plan_smells.py` "all-negative plan" check looks for these write-action verbs in each item's `what:` — `save`, `create`, `update`, `submit`, `edit`, `publish`, `upload`, `persist`, `insert`, `store` (present or past tense). Phrase happy-path items using one of these so the lint correctly counts them. Synonyms like "preserves", "stores away", "records into" won't match and the lint will (incorrectly) flag the plan as all-negative.
+
 Worked example (replace `<Resource>` / `<RequiredField>` / `<TypedField>` with your PR's specifics — this shape applies to ANY new-form / new-field PR, regardless of domain):
 
 ```

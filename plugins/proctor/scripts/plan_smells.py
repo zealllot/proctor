@@ -72,14 +72,23 @@ _RE_NEG = re.compile("|".join(_NEGATIVE_PHRASES), re.IGNORECASE)
 
 # Write-action verbs in `what:`. Distinct from happy phrases — a
 # "passes test suite" item is happy but not a write.
+#
+# v0.3.36 expansion: a faithful careful planner reached for "persist"
+# / "submitted" / "uploaded" past-tense variants and tripped the
+# coverage warning (which is built on this same list). Added the
+# common synonyms so the lint matches what real careful prose looks
+# like instead of forcing a vocabulary the planner has to memorize.
 _WRITE_PHRASES = [
-    r"\bsave\b", r"\bsaving\b", r"\bsaves\b",
-    r"\bcreate\b", r"\bcreating\b", r"\bcreates\b",
-    r"\bupdate\b", r"\bupdating\b", r"\bupdates\b",
-    r"\bsubmit\b", r"\bsubmitting\b", r"\bsubmits\b",
-    r"\bedit\b", r"\bediting\b", r"\bedits\b",
-    r"\bpublish\b", r"\bpublishing\b", r"\bpublishes\b",
-    r"\bupload\b", r"\buploading\b", r"\buploads\b",
+    r"\bsave\b", r"\bsaving\b", r"\bsaves\b", r"\bsaved\b",
+    r"\bcreate\b", r"\bcreating\b", r"\bcreates\b", r"\bcreated\b",
+    r"\bupdate\b", r"\bupdating\b", r"\bupdates\b", r"\bupdated\b",
+    r"\bsubmit\b", r"\bsubmitting\b", r"\bsubmits\b", r"\bsubmitted\b",
+    r"\bedit\b", r"\bediting\b", r"\bedits\b", r"\bedited\b",
+    r"\bpublish\b", r"\bpublishing\b", r"\bpublishes\b", r"\bpublished\b",
+    r"\bupload\b", r"\buploading\b", r"\buploads\b", r"\buploaded\b",
+    r"\bpersist\b", r"\bpersisting\b", r"\bpersists\b", r"\bpersisted\b",
+    r"\binsert\b", r"\binserting\b", r"\binserts\b", r"\binserted\b",
+    r"\bstore\b", r"\bstoring\b", r"\bstores\b", r"\bstored\b",
 ]
 _RE_WRITE = re.compile("|".join(_WRITE_PHRASES), re.IGNORECASE)
 
@@ -157,6 +166,16 @@ def check(plan: dict) -> list[str]:
             continue
         if not _RE_WRITE.search(what):
             continue
+        # v0.3.36: skip items that are themselves reload siblings —
+        # phrasings like "re-open saved Image" / "assert created
+        # record visible in list" / "verify updated field round-trips"
+        # contain past-tense write verbs (saved/created/updated) only
+        # as nouns referring to the upstream write. They shouldn't
+        # need their OWN reload sibling. Detect: what: contains a
+        # reload phrase AND the item has data_from set (i.e. it's
+        # explicitly downstream of another item).
+        if _RE_RELOAD.search(what) and (it.get("data_from") or []):
+            continue
 
         siblings = referenced_by.get(it["id"], [])
         has_reload_sibling = any(
@@ -194,14 +213,19 @@ def check(plan: dict) -> list[str]:
     if negative_count >= 2 and happy_write_count == 0:
         coverage_warnings.append(
             f"plan-coverage: {negative_count} negative items but 0 "
-            f"chrome-devtools items doing a happy-path save/create. "
-            f"PRs that add new fields/forms need AT LEAST ONE happy "
-            f"item that fills the form with valid input and asserts "
-            f"the record persisted. If backend dependencies block "
-            f"the full save flow, plan the item anyway with "
-            f"tool=\"skip\" and reason=\"backend-dep-not-deployed\" "
-            f"so the gap is visible in the report, not silently "
-            f"absent from the plan."
+            f"chrome-devtools items whose what: contains a recognized "
+            f"happy-path write verb (save/create/update/submit/edit/"
+            f"publish/upload/persist/insert/store, present or past "
+            f"tense). PRs that add new fields/forms need AT LEAST ONE "
+            f"happy item that fills the form with valid input and "
+            f"asserts the record persisted. If you DO have happy "
+            f"items but used a different verb, rephrase using one of "
+            f"the recognized verbs so this lint and the report's "
+            f"happy-vs-negative grouping count them correctly. If "
+            f"backend dependencies block the full save flow, plan "
+            f"the item anyway with tool=\"skip\" and reason="
+            f"\"backend-dep-not-deployed\" so the gap is visible in "
+            f"the report, not silently absent from the plan."
         )
 
     combined_warnings.sort()
