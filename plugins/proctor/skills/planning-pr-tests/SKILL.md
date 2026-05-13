@@ -108,6 +108,40 @@ mark `risk: high` so the operator sees an environment was missing.
    - When `requirement_hints` and the diff disagree, plan items for BOTH: one that verifies the body's stated behavior, one that verifies the diff's actual behavior. The mismatch is itself useful signal in the report.
    - If `pr_context` is empty or absent, fall back to inferring tests from the diff alone — same as before.
 
+## Coverage balance (read this BEFORE writing the items array)
+
+**The most important test for any new feature is "the feature works." Negative / validator-rejects-bad-input tests are useful but secondary — if they pass while the happy path fails, you've verified the cage is locked while the building burns down.**
+
+For every new behavior the PR introduces (every distinct user-facing path the diff enables), the plan MUST include at least one happy-path item BEFORE adding negative items. Mechanically:
+
+1. Read `pr_context.body` and identify the user-stories / checklist items. Most PR bodies have phrases like "feature X works", "user can do Y and Z saves correctly", "save & publish works" — these are happy paths.
+2. For each happy-path phrase, draft an item that constructs the FULL successful flow: fill the form with valid data → submit → assert success (200/302, success toast, persisted record visible in list / detail page).
+3. THEN add negative items for validators / edge cases / error states. Aim for ≤ 1 negative item per validator branch, not 1 per typo / one per invalid value.
+4. If you find yourself writing 4 chrome-devtools items and all 4 are "submit X with bad input, expect error" — STOP. Replace one or two with the corresponding "submit X with good input, expect success" variant.
+
+Concrete example for a PR titled "add Digital Reward type=Image / type=Game":
+
+```
+✗ All-negative plan (what the AI naturally drafts):
+  t-006  Form renders with new fields
+  t-007  Validator: missing type → error
+  t-008  Validator: Image + empty asset → error
+  t-009  Validator: Game + empty URL → error
+  t-010  Validator: Game + invalid URL → error
+
+✓ Balanced plan (what to actually write):
+  t-006  Form renders with new fields
+  t-007  HAPPY: Save Image reward with valid asset → 200, appears in list, published
+  t-008  HAPPY: Save Game reward with valid URL → 200, appears in list, published
+  t-009  NEGATIVE: missing type → error (single validator-coverage check)
+  t-010  NEGATIVE: Game + invalid URL → error (chosen because URL parse is the most likely
+         place to silently relax)
+```
+
+Two happy + two negatives gives the reviewer signal that the feature actually works AND that the most important guard rails fire. Five negatives gives signal that bad input gets rejected but says nothing about whether the feature itself ships.
+
+When the PR body explicitly lists more negative cases than happy ones (rare, but happens for security-hardening PRs), respect that — but always include at least one happy-path item per new code path.
+
 ## Role-aware planning (when `.pr-test.yml` has `auth.accounts`)
 
 If the consumer's `.pr-test.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.

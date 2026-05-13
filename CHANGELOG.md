@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.21 — 2026-05-13
+
+### Planning: happy-path tests are required, not optional
+- **User feedback**: PRoctor planned 4 chrome-devtools items for the Digital Reward type=Image/Game PR — all 4 were validator-rejects-bad-input tests. Zero happy-path tests verifying the feature actually saves and publishes a valid Image / Game reward. "You only tested failure cases."
+- **Why it happened**: the planner gravitated toward concrete, deterministic assertions. Negative cases ("expect 422 with this error string") are easier to write than happy cases ("submit form → success toast → record visible in list → render correctly"). Without explicit guidance to balance, the AI's distribution skewed all-negative.
+- **Fix** (`planning-pr-tests/SKILL.md`, new "Coverage balance" section):
+  - For every new behavior in the PR, at least one happy-path item is REQUIRED.
+  - Negative items are useful but secondary, capped at ~1 per validator-branch.
+  - Concrete worked example showing the all-negative plan vs the balanced 2-happy-2-negative plan.
+  - Strong rule: "if you find yourself writing 4 chrome-devtools items and all 4 are submit-with-bad-input, STOP — replace one or two with the corresponding submit-with-good-input variant."
+
+### Why this matters
+A test plan that passes its 4 negative items + nothing else has verified the cage is locked but nothing about whether the building works. Reviewers need both signals.
+
 ## v0.3.20 — 2026-05-13
 
 ### Orchestrator: cement "no stopping between stages" with concrete sub-steps
