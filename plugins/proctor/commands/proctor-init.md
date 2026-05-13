@@ -668,6 +668,59 @@ Free-text input. Pre-fill examples: `https://cms.<your-app>.theplant-dev.com`. V
 
 Save as `BASE_URL`.
 
+### Step 7f — Confirm setup commands + env source (v0.3.41+)
+
+**Why this step exists**: previous wizard versions auto-generated `setup:` commands from stack detection and silently baked them into `.pr-test.local.yml`. When detection was slightly wrong (the env-source file path, the build command, the right docker-compose path), the dev server would start in a misconfigured state and produce mysterious failures during `/proctor:proctor` runs (e.g. gRPC handshake errors talking to a backend with mismatched keys). The fix: show the proposed commands and ASK before writing.
+
+This step has TWO sub-questions, both AskUserQuestion.
+
+**7f.1 — Env-source file**
+
+Search the repo for the file the dev source-imports before running the server. Candidates, in priority order:
+
+```bash
+ls -1 dev_env .envrc .env .env.local set-env.sh setup-env.sh 2>/dev/null
+```
+
+Render the proposed source command in chat:
+
+```markdown
+I'll source environment variables from `<top candidate>` before starting the server.
+This file typically contains DB_HOST / DB_PORT / API keys / similar.
+```
+
+Then AskUserQuestion:
+
+> "Which env-source file should the setup commands load before starting the server?"
+
+Options (multi-select disabled — pick exactly one):
+- `<top candidate>` — Recommended (auto-detected)
+- `<each other candidate found>`
+- "None — server doesn't need pre-sourced env vars"
+- "Other" — free-text; user types a path
+
+Store as `ENV_SOURCE_FILE` (may be empty string for "none").
+
+**7f.2 — Setup commands preview**
+
+Compose the proposed setup block using the snippets from Step 8b's "stack-aware setup commands" reference (docker compose if `COMPOSE_HIT`; sourcing `ENV_SOURCE_FILE`; pidfile kill; build + start by stack; wait-loop on the app port).
+
+Render the FULL block in chat as a markdown YAML code-fenced block. Then AskUserQuestion:
+
+> "Use these setup commands? They'll be written into your `.pr-test.local.yml` (gitignored — only you have it)."
+
+Options:
+- "Use as-is — these look right" (Recommended)
+- "Customize — I'll write my own"
+- "Skip — leave `setup:` empty, I'll add commands later"
+
+Branch:
+- **Use as-is** → store the rendered commands as `SETUP_COMMANDS` (list of strings, one per line excluding YAML's `  - `).
+- **Customize** → set `SETUP_COMMANDS = "<USER-FILLS-IN>"` marker. Step 8b / 8c-pre will write a `setup:` block with one TODO comment and stop there; the seed script writes `.pr-test.local.yml` with the TODO comment in place of commands. Tell the user explicitly in the wizard summary: "Edit `.pr-test.local.yml` to fill in your setup commands before running `/proctor:proctor`."
+- **Skip** → set `SETUP_COMMANDS = []`. Same warning in the summary.
+
+The confirmed `SETUP_COMMANDS` is what 8b and 8c-pre USE — they don't regenerate from detection at write time. Step 7f is the single source of truth for "what setup commands go into the dev's local yaml".
+
 ## 8. Apply changes (Sections 7 produces; this section commits to disk)
 
 This section is reached at the end of `MODE=fresh` (existing-env path) OR `MODE=migrate` OR `MODE=bump-only`. It's the single file-mutation point. **Show the user a diff preview** before each Write — they can refuse any single change.
@@ -714,10 +767,7 @@ instead of copying this example file manually**. The script handles
 generating TOTP seeds, seeding the local DB, AND writing `.pr-test.local.yml`
 for them. This example file is the FALLBACK (no seed script, custom flow).
 
-The example file should include a stack-aware `setup:` block so the developer
-gets auto-server-lifecycle out of the box. Inputs you have from earlier
-detection: `STACK_SUMMARY` (Go / Node / Postgres / etc.), `APP_PORT`,
-`COMPOSE_HIT` (docker-compose path if any), `IMPORT_PATH` (Go projects).
+The example file should include a `setup:` block so the developer gets auto-server-lifecycle out of the box. **Use the `SETUP_COMMANDS` confirmed in Step 7f** — do NOT regenerate from detection here. Step 7f is the single source of truth (user already saw + approved the commands). The snippet reference below remains for documentation purposes and for what Step 7f shows the user; this step just consumes the result.
 
 Generate `.pr-test.local.yml.example` like this:
 
@@ -733,7 +783,13 @@ Generate `.pr-test.local.yml.example` like this:
 base_url: http://localhost:<APP_PORT>
 
 setup:
-  # < inject stack-aware commands here, see below >
+  # < inject SETUP_COMMANDS from Step 7f here; if the user picked
+  #   "Customize" or "Skip" at 7f.2, emit a single TODO line:
+  #   - # TODO: fill in your setup commands (e.g. docker compose up, server start)
+  # >
+
+  # Reference (what Step 7f offered the user — the wizard built this from
+  # stack detection then showed it in chat for confirmation):
 
 teardown:
   # Default: leave the server running so you can keep iterating in your
@@ -1113,7 +1169,13 @@ done
   echo "# fresh one with your current code, waits for the login page to"
   echo "# respond, then logs in. You don't need to manually 'go run'."
   echo "setup:"
-<for each line in STACK_AWARE_SETUP_COMMANDS (see below):>
+<v0.3.41+: emit the `SETUP_COMMANDS` list that Step 7f confirmed.
+If SETUP_COMMANDS is empty (user picked "Customize" or "Skip"), emit
+ONE TODO line so the YAML stays valid + the dev knows to fill in:
+  echo "  # TODO: fill in your setup commands (e.g. docker compose up, server start)"
+  echo "  # The wizard skipped auto-generation per your choice at Step 7f.2."
+Otherwise emit one `  - <cmd>` per entry:>
+<for each line in SETUP_COMMANDS:>
   echo "  - $LINE"
 </for>
   echo

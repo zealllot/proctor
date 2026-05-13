@@ -2,6 +2,34 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.41 — 2026-05-14
+
+### Wizard: confirm setup commands + env source before writing yaml
+
+User feedback after a real run where setup auto-generation got the env-source file path wrong, causing the local dev server to start with mismatched config and produce a `chacha20poly1305: bad key length` gRPC handshake error.
+
+The fix: `/proctor:proctor-init` now ASKS before baking setup commands into `.pr-test.local.yml`.
+
+**New Step 7f — Confirm setup commands + env source** (`commands/proctor-init.md`):
+
+- **7f.1**: search for candidate env-source files (`dev_env`, `.envrc`, `.env`, `.env.local`, `set-env.sh`, etc.) and AskUserQuestion which one the setup should `source` before starting the server. Options: top auto-detected candidate (Recommended), each other found candidate, "None — server doesn't need pre-sourced env vars", "Other" (free-text path). Stored as `ENV_SOURCE_FILE`.
+
+- **7f.2**: render the FULL proposed `setup:` block in chat as a markdown YAML fence. AskUserQuestion with three options:
+  1. **Use as-is — these look right** (Recommended) — store the commands as `SETUP_COMMANDS` (list of strings).
+  2. **Customize — I'll write my own** — set `SETUP_COMMANDS` to the "user will fill in" marker. Step 8b / 8c-pre will emit a `setup:` block containing a single TODO line, and the wizard summary will say "edit `.pr-test.local.yml` before running `/proctor:proctor`".
+  3. **Skip — leave `setup:` empty** — `SETUP_COMMANDS = []`. Same TODO + summary warning.
+
+`SETUP_COMMANDS` is now the single source of truth. Steps 8b (`.pr-test.local.yml.example`) and 8c-pre (seed-script's yaml emission) USE the confirmed value — they no longer regenerate from detection at write time.
+
+### Why this matters
+
+The wizard's stack detection is heuristic-good but not always right. `dev_env` vs `.envrc` vs neither is repo-specific. The right docker-compose path (root `docker-compose.yml` vs `infra/compose.yml` vs `.docker/compose.dev.yml`) is also repo-specific. Silent auto-generation made failures opaque ("PRoctor's running my server, why isn't it talking to my backend?") because the dev never saw what commands were running. Now the dev confirms upfront and edits if wrong.
+
+The "Customize" / "Skip" options exist for the case where the dev's setup is sufficiently unusual that the wizard's snippets can't capture it. Better to leave a TODO than bake something wrong.
+
+### Tests
+- 170 unchanged (wizard prose only; no schema or helper script logic changed).
+
 ## v0.3.40 — 2026-05-14
 
 ### Generalized "unexpected response → read source first" + test-data convention
