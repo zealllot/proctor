@@ -149,7 +149,28 @@ Four sub-steps. **Do all four in this turn. Do not stop between them.**
 
 **6c.** Emit one summary line below the table: `Estimated: ~<N> min, ~$<cost>`. Best-effort estimate (rough: lint-only ≈ 5s/$0.001, bash ≈ 30s/$0.005, chrome-devtools ≈ 60s/$0.05 per item).
 
-**6c-lint.** (v0.3.30+) Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py < .proctor/runs/<run-id>/test-plan.json` and emit the result in chat. If non-empty, render as a `### Plan smells (advisory)` section directly below 6c. Each warning is a bullet starting with `⚠`. If the script emits nothing, skip the section entirely (don't render an empty header). The reviewer uses these to decide between "Run", "Drop items", or "Cancel — let me edit the plan first": typical actionable smells include items that combine happy + negative phrasing (split them) and write items without a sibling round-trip-load item (add the sibling).
+**6c-lint.** (v0.3.30+, HARD GATE in v0.3.32+) Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict < .proctor/runs/<run-id>/test-plan.json` capturing stdout AND exit code.
+
+- **Exit 0** (no warnings) → proceed to 6d.
+- **Exit 1** (warnings fired) → DO NOT proceed to 6d. The plan has structural defects the planner has demonstrated it can't reliably self-correct from prose rules alone. Hard-gate behavior:
+  1. Read `.proctor/runs/<run-id>/regen-count.txt` (treat missing file as 0). If the count is < 2, regenerate:
+     a. Write the warnings to `.proctor/runs/<run-id>/plan-smells.txt`.
+     b. Increment regen-count and write it back.
+     c. Print one chat line: `[proctor:plan] hard-gate triggered (attempt <N+1>/3); regenerating plan with smells feedback.` Then re-invoke the `planning-pr-tests` skill with the existing change-map.json AND the smells warnings as feedback — explicitly instructing the planner to:
+        - Split every item whose `what:` combines happy and negative phrasing into separate items per assertion class (one happy, N separate negatives).
+        - For every chrome-devtools save/create/update action, add a sibling item linked by `data_from: [<save_id>]` whose `what:` describes re-opening the saved record (use `re-open`, `round-trip`, `reload`, `appears in list`, or `detail page` so the lint recognizes it).
+        - Preserve the existing journeys structure; do not start from scratch.
+     d. Overwrite `.proctor/runs/<run-id>/test-plan.json` with the regenerated plan.
+     e. Re-validate via `schema.py`.
+     f. Loop back to 6c-lint (run plan_smells again).
+  2. If regen-count has already reached 2 (= 3rd attempt was the regenerated version that still failed), STOP regenerating. Fall through to advisory mode for this run only:
+     - Emit a `### Plan smells (still present after 2 regeneration attempts)` section with the warnings as bullets starting with `⚠`.
+     - Print one chat line: `[proctor:plan] hard-gate exhausted regen attempts; surfacing warnings to the human reviewer.`
+     - Proceed to 6d so the user can choose "Cancel — let me edit the plan first" and intervene manually.
+
+If the script emits nothing (exit 0), skip rendering any "Plan smells" section. The reviewer never sees a 6c-lint output in the happy path — the gate is invisible when it isn't needed.
+
+**Why hard-gate**: the planner has historically shipped plans with happy+negative combined into one item and no round-trip sibling for save actions, even when SKILL.md says MANDATORY in three places. The lint catches these mechanically. Forcing a regeneration with explicit feedback is cheaper than asking the human to spot the defect in a 9-row table and pick "Cancel — let me edit the plan first".
 
 **6d.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
 

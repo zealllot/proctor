@@ -2,6 +2,34 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.32 — 2026-05-13
+
+### plan_smells from advisory → hard gate with bounded regeneration
+
+A subagent dispatched against PR #1115 confirmed: a faithful planner reading the current SKILL.md produces a clean plan (split items, round-trip siblings, plan_smells empty). The user's live planner kept shipping the SAME defects across THREE attempts — combined happy+negative items, no round-trip siblings — even with the MANDATORY sections in SKILL.md and the advisory plan_smells output at the approval gate.
+
+The diagnosis: **planner adherence, not rule clarity**. The advisory lint emits warnings, but nothing in the orchestrator forces a regeneration; the planner gets to ignore its own audit. This release closes the loop.
+
+**CLI flag** (`plugins/proctor/scripts/plan_smells.py`):
+- New `--strict` flag: exit code 1 when any warnings fire (default stays exit 0 for backward compat with anything that relied on advisory mode).
+- Stdout unchanged in both modes (one warning per line).
+
+**Orchestrator hard gate** (`plugins/proctor/commands/proctor.md` Step 6c-lint):
+- Run `plan_smells.py --strict`.
+- Exit 0 → proceed to AskUserQuestion. The gate is invisible when not triggered.
+- Exit 1 → DO NOT show the approval gate. Read `.proctor/runs/<run-id>/regen-count.txt` (missing = 0):
+  1. If < 2: write warnings to `plan-smells.txt`, increment regen-count, print `[proctor:plan] hard-gate triggered (attempt N+1/3); regenerating plan with smells feedback`. Re-invoke the `planning-pr-tests` skill with the change-map.json AND the warnings as explicit feedback — instructing the planner to split combined items and add round-trip siblings linked by `data_from`. Re-validate. Loop back.
+  2. If >= 2 (third attempt failed): fall through to advisory mode for THIS run only — render the warnings, log `[proctor:plan] hard-gate exhausted regen attempts`, and let the human pick "Cancel — let me edit the plan first" at the approval gate.
+- Cap at 2 regenerations to avoid infinite loops on planner pathologies.
+
+### Why hard gate
+- The user manually tested PRoctor 3 times against the same PR; each plan had the same combined-happy-negative defect. Three runs × human-in-the-loop time spent reading the table and noticing the defect is wasted effort.
+- Mechanical regeneration with the warnings as explicit feedback is far cheaper than asking the human to spot the defect in a 9-row table.
+- The 2-regen cap means worst-case cost is 3× the planner skill invocation; the fallback to advisory mode means the human still gets the final say if the planner truly can't comply.
+
+### Tests
+- 147 → 150 (+3): --strict exits 1 on warnings, --strict exits 0 on clean, default mode preserves exit 0 even with warnings.
+
 ## v0.3.31 — 2026-05-13
 
 ### De-hardcode SKILL examples — placeholders + rotated domains

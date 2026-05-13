@@ -179,12 +179,36 @@ def check(plan: dict) -> list[str]:
 
 def _main() -> int:
     """CLI form: read plan JSON from stdin, emit one warning per line.
-    Exit code 0 in both clean and warn cases — these are advisory."""
+
+    Default exit code is 0 in both clean and warn cases (advisory mode
+    — the orchestrator decides what to do with the output).
+
+    With ``--strict`` (v0.3.32+), exit code is 1 when ANY warnings
+    fired. This lets the orchestrator's hard-gate retry loop branch
+    cleanly on exit code without parsing stdout:
+
+        if ! python3 plan_smells.py --strict < plan.json; then
+            # regenerate plan with warnings as feedback
+        fi
+    """
+    import argparse
     import json
     import sys
+
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 if any warnings fired (default is exit 0 always).",
+    )
+    args = p.parse_args()
+
     plan = json.load(sys.stdin)
-    for w in check(plan):
+    warnings = check(plan)
+    for w in warnings:
         sys.stdout.write(w + "\n")
+    if args.strict and warnings:
+        return 1
     return 0
 
 

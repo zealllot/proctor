@@ -849,6 +849,65 @@ def test_plan_smells_bash_write_not_flagged():
     assert plan_check(plan) == []
 
 
+# --- v0.3.32: plan_smells --strict flag for orchestrator hard-gate -------
+
+def test_plan_smells_cli_strict_exits_1_when_warnings(tmp_path):
+    import subprocess
+    bad_plan = tmp_path / "plan.json"
+    bad_plan.write_text(
+        '{"items":[{"id":"t-1","category":"api","tool":"chrome-devtools",'
+        '"what":"save record with missing field rejected; with field, saves",'
+        '"how":"...","risk":"high","depends_on":[]}]}'
+    )
+    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    result = subprocess.run(
+        ["python3", script, "--strict"],
+        stdin=open(bad_plan), capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert "combines happy and negative" in result.stdout
+
+
+def test_plan_smells_cli_strict_exits_0_when_clean(tmp_path):
+    import subprocess
+    clean_plan = tmp_path / "plan.json"
+    clean_plan.write_text(
+        '{"items":[{"id":"t-1","category":"api","tool":"chrome-devtools",'
+        '"what":"HAPPY: save record","how":"...","risk":"high",'
+        '"depends_on":[],"produces":["created_id"]},'
+        '{"id":"t-2","category":"api","tool":"chrome-devtools",'
+        '"what":"Re-open saved record: all fields round-trip",'
+        '"how":"...","risk":"high","depends_on":["t-1"],"data_from":["t-1"]}]}'
+    )
+    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    result = subprocess.run(
+        ["python3", script, "--strict"],
+        stdin=open(clean_plan), capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_plan_smells_cli_default_advisory_exits_0_even_with_warnings(tmp_path):
+    """Without --strict, exit code is 0 even when warnings fired —
+    preserves v0.3.30 advisory behavior for any tooling that relied
+    on it."""
+    import subprocess
+    bad_plan = tmp_path / "plan.json"
+    bad_plan.write_text(
+        '{"items":[{"id":"t-1","category":"api","tool":"chrome-devtools",'
+        '"what":"save with bad input rejected; valid input saves",'
+        '"how":"...","risk":"high","depends_on":[]}]}'
+    )
+    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    result = subprocess.run(
+        ["python3", script],  # no --strict
+        stdin=open(bad_plan), capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "combines happy and negative" in result.stdout
+
+
 def test_plan_smells_warnings_sorted_for_stability():
     plan = {"items": [
         {"id": "t-005", "category": "api", "tool": "chrome-devtools",
