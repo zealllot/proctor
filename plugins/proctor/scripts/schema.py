@@ -225,14 +225,32 @@ def validate_pr_test_config(cfg: dict) -> None:
     for i, a in enumerate(accs):
         label = f".pr-test.yml.auth.accounts[{i}]"
         _require(isinstance(a, dict), f"{label}: must be a mapping")
-        _require_keys(a, {"name", "email_env", "password_env", "totp_seed_env"}, label)
-        for k in ("name", "email_env", "password_env", "totp_seed_env"):
-            _require(isinstance(a[k], str) and a[k].strip(),
-                     f"{label}.{k}: must be a non-empty string")
+        _require_keys(a, {"name"}, label)
+        _require(isinstance(a["name"], str) and a["name"].strip(),
+                 f"{label}.name: must be a non-empty string")
         _require(a["name"] not in seen_names,
                  f"{label}.name {a['name']!r} duplicates an earlier account; "
                  "names must be unique")
         seen_names.add(a["name"])
+        # Each credential field accepts EITHER an inline value OR a *_env
+        # pointer (env var name). Exactly one form per field is required —
+        # mixing both is an error so the consumer doesn't accidentally
+        # think the env var is being used when the inline value wins.
+        for field in ("email", "password", "totp_seed"):
+            inline = a.get(field)
+            env_key = a.get(f"{field}_env")
+            _require(
+                (inline is not None) ^ (env_key is not None),
+                f"{label}: must set exactly one of {field!r} or {field}_env, "
+                f"not both / not neither (got "
+                f"{field}={inline!r}, {field}_env={env_key!r})"
+            )
+            if inline is not None:
+                _require(isinstance(inline, str) and inline.strip(),
+                         f"{label}.{field}: inline value must be a non-empty string")
+            else:
+                _require(isinstance(env_key, str) and env_key.strip(),
+                         f"{label}.{field}_env: must be a non-empty string")
 
 
 def validate_test_plan_account_refs(plan: dict, cfg: dict) -> None:

@@ -364,6 +364,25 @@ _VALID_AUTH = {
 }
 
 
+def _auth_inline(**override):
+    """Helper for tests: returns an auth block with inline credentials for
+    the dev account. v0.3.6+ schema allows either *_env (env-driven) or
+    inline string values, but not both, per credential field."""
+    base = {
+        "type": "form_with_totp",
+        "login_url": "/auth/login",
+        "selectors": {"email": "i[e]", "password": "i[p]", "totp": "i[t]", "submit": "b"},
+        "accounts": [{
+            "name": "dev",
+            "email": "proctor-dev@local.test",
+            "password": "letmein-12345",
+            "totp_seed": "JBSWY3DPEHPK3PXP",
+            **override,
+        }],
+    }
+    return base
+
+
 def test_pr_test_config_legacy_no_auth_ok():
     validate_pr_test_config({})
     validate_pr_test_config({"setup": ["echo hi"], "base_url": "http://x"})
@@ -473,3 +492,45 @@ def test_totp_changes_with_time_step():
     # 30-second step: t=0 and t=29 share a code; t=30 differs.
     assert totp.code(seed, 0) == totp.code(seed, 29)
     assert totp.code(seed, 0) != totp.code(seed, 30)
+
+
+# --- v0.3.6: inline auth credentials (alternative to *_env) ---------------
+
+def test_inline_credentials_accepted():
+    validate_pr_test_config({"auth": _auth_inline()})
+
+
+def test_inline_and_env_mixed_rejected():
+    # Same field with BOTH inline and *_env → ambiguous, reject.
+    bad = _auth_inline()
+    bad["accounts"][0]["email_env"] = "ALSO_AN_ENV"  # plus the inline `email`
+    with pytest.raises(SchemaError):
+        validate_pr_test_config({"auth": bad})
+
+
+def test_neither_inline_nor_env_rejected():
+    # Missing both forms → required field missing.
+    bad = _auth_inline()
+    del bad["accounts"][0]["email"]  # leaves no email + no email_env
+    with pytest.raises(SchemaError):
+        validate_pr_test_config({"auth": bad})
+
+
+def test_inline_credentials_empty_string_rejected():
+    bad = _auth_inline(email="")
+    with pytest.raises(SchemaError):
+        validate_pr_test_config({"auth": bad})
+
+
+def test_mixed_accounts_different_forms_ok():
+    # One account uses inline, another uses *_env — both should validate.
+    cfg = {"auth": {
+        "type": "form_with_totp",
+        "login_url": "/auth/login",
+        "selectors": {"email": "i[e]", "password": "i[p]", "totp": "i[t]", "submit": "b"},
+        "accounts": [
+            {"name": "dev", "email": "d@x", "password": "p", "totp_seed": "JBSWY3DPEHPK3PXP"},
+            {"name": "editor", "email_env": "E_E", "password_env": "E_P", "totp_seed_env": "E_T"},
+        ],
+    }}
+    validate_pr_test_config(cfg)

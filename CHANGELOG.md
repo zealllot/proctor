@@ -2,6 +2,26 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.6 — 2026-05-13
+
+### Added: inline auth credentials + local-seed helper script
+Local dev shouldn't have to (a) manually create N AI-tester accounts in their local DB or (b) source env vars for credentials they already wrote down somewhere. v0.3.6 generates a seed script that does both.
+
+- **Schema: `auth.accounts[].{email,password,totp_seed}` accept inline values**, as an alternative to `*_env` (env var name). Exactly one of inline-or-env required per field, never both. CI keeps using `*_env` (secrets), local config can use inline. Schema rejects mixed configs to avoid "I thought my env var was being used" surprises.
+- **Wizard Step 8c-pre: generates `hack/proctor-seed-local.sh`** (or `scripts/` / top-level fallback). The script:
+  1. Generates a fresh 32-char base32 TOTP seed per role.
+  2. Upserts each role's user into the local DB. The actual SQL/code is project-specific — emitted as a clearly-marked TODO block with a Postgres + qor/auth template inline.
+  3. Writes `.pr-test.local.yml` with **inline** credentials (no env-var indirection for local-only test accounts).
+  4. Idempotent — re-running rotates seeds and refreshes the config.
+- **`.pr-test.local.yml` stays gitignored** (already since v0.3.0). The seed script's output is explicitly DO NOT COMMIT.
+- **Wizard summary** updated to surface the seed-script step alongside the existing CI secret-setup walkthrough.
+
+### Tests
+- 5 new tests (51 → previously 46): inline credentials accepted, mixed inline+env rejected, missing-both rejected, empty inline rejected, accounts can use different forms in the same auth block.
+
+### Why
+Mode B (browser handoff) was retired in v0.3.0+. The user pointed out: that leaves a gap — local dev still needs admin accounts to log into their localhost server, and asking the dev to do that manually is exactly the friction PRoctor was supposed to remove. Auto-seeding closes that gap.
+
 ## v0.3.5 — 2026-05-13
 
 ### Wizard role-discovery: Pass A is authoritative, Pass B annotates only
