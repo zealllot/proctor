@@ -447,42 +447,101 @@ Options:
 - **Use defaults (Recommended)** — store as-is.
 - **Edit** — open follow-up free-text input for each of the 5 fields with the default pre-filled.
 
-### Step 7c — Number of admin roles (Q-EnvC)
+### Step 7c — Discover admin roles from the codebase
 
-> "How many admin roles do you want PRoctor to test under?"
-- **1**
-- **2-3** (Recommended)
-- **4+** — wizard will loop 7d until the user types `done`
+**Don't ask the user to count their roles — detect them.** Run a few greps for common role-enumeration patterns. Bias toward false positives (show everything found); the user will deselect what they don't care to test.
 
-In `MODE=migrate`, if the existing `.pr-test.yml` already has an `auth.accounts:` list, **skip this question entirely** and just confirm: "Existing `auth.accounts:` has N entries. Keep them?" → yes → skip 7d; no → go to 7c proper.
+```bash
+# Go: const Role_developer = "developer" / type Role string / Role_admin
+grep -rhoE '\bRole[_A-Z][A-Z][a-zA-Z_]+' \
+  --include='*.go' . 2>/dev/null | sort -u
 
-### Step 7d — Per-account credentials (loop)
+# Go: enum-style with values  Role_editor = 2
+grep -rhoE '\bRole_[A-Za-z]+\s*=' \
+  --include='*.go' . 2>/dev/null | sed 's|\s*=$||' | sort -u
 
-For each account, ask ONE AskUserQuestion combining 4 free-text fields with pre-fills based on index:
+# TypeScript / JS: enum Role { Editor, Viewer } or const ROLES = [...]
+grep -rhE '\b(enum\s+Role|type\s+Role\s*=|ROLES\s*=)' \
+  --include='*.ts' --include='*.tsx' --include='*.js' . 2>/dev/null | head -10
 
-```
-i=1  name: developer    role_label: "Developer (full admin)"
-                        email_env: AI_TESTER_DEV_EMAIL
-                        password_env: AI_TESTER_DEV_PASSWORD
-                        totp_seed_env: AI_TESTER_DEV_TOTP_SEED
+# Python: class Role(Enum): ADMIN = "admin"
+grep -rhE '\bclass\s+Role\b|^\s*[A-Z_]+\s*=\s*"[a-z_]+"' \
+  --include='*.py' . 2>/dev/null | head -20
 
-i=2  name: editor       role_label: "Editor (content only)"
-                        email_env: AI_TESTER_EDITOR_EMAIL
-                        password_env: AI_TESTER_EDITOR_PASSWORD
-                        totp_seed_env: AI_TESTER_EDITOR_TOTP_SEED
+# Ruby: role :admin / has_role :editor
+grep -rhE 'has_role\s+:|enum\s+role\s*:' \
+  --include='*.rb' . 2>/dev/null | head -20
 
-i=3  name: viewer       role_label: "Read-only"
-                        email_env: AI_TESTER_VIEWER_EMAIL
-                        password_env: AI_TESTER_VIEWER_PASSWORD
-                        totp_seed_env: AI_TESTER_VIEWER_TOTP_SEED
-
-i≥4  name: <empty>      role_label: <empty>
-                        email_env: AI_TESTER_ACCT<i>_EMAIL
-                        password_env: AI_TESTER_ACCT<i>_PASSWORD
-                        totp_seed_env: AI_TESTER_ACCT<i>_TOTP_SEED
+# Database / config: roles seeded in migrations or seeds
+grep -rhE '"(developer|admin|editor|viewer|reader|writer|operator|manager)"\s*[,)\]]' \
+  --include='*.sql' --include='*.yml' --include='*.json' . 2>/dev/null | head -20
 ```
 
-Save the user's actual answers as `ACCOUNTS[i] = {name, role_label, email_env, password_env, totp_seed_env}`.
+Aggregate everything into `DETECTED_ROLES` (deduplicated, lowercased). Strip the `Role_` prefix when present. Examples after dedupe:
+- `developer`, `editor`, `viewer`, `admin`
+- (or just `admin` for a simple app, or empty if nothing matched)
+
+Present the result via AskUserQuestion (multi-select):
+
+> "I found these candidate admin roles in the codebase. Which ones should PRoctor test under? (Each picked role becomes one auth account in `.pr-test.yml`.)"
+>
+> Options: `<each DETECTED_ROLES entry>` + "Add a role not in this list" + "Just one generic admin account"
+
+**Branching from this answer:**
+
+- Picked ≥1 from the detected list → use those as the account names. Skip "Add a role not in this list" unless user explicitly clicked it.
+- Picked "Add a role not in this list" → open a free-text follow-up: "Type the role name (will become `auth.accounts[].name`)". Loop until user types `done`.
+- Picked "Just one generic admin account" → single account, name = `admin`.
+- Nothing detected at all → present a different question: "What admin roles do you want to test? Type each name, one at a time. Type `done` when finished."
+
+Save the final list as `ROLE_NAMES = [name, name, name]`.
+
+`MODE=migrate` special case: if the existing `.pr-test.yml` already has `auth.accounts:` declared, **skip the detection grep entirely** and confirm:
+
+> "Existing `.pr-test.yml` declares N accounts: `<names>`. Keep them, or rediscover from the codebase?"
+- Keep → reuse the existing list, skip Step 7d (accounts already fully configured).
+- Rediscover → fall through to the grep-driven flow above.
+
+### Step 7d — Per-account credentials
+
+For each entry in `ROLE_NAMES` (from Step 7c), ask ONE AskUserQuestion combining `role_label` + 3 env var names. `name:` comes from `ROLE_NAMES[i]` directly — no need to re-ask.
+
+Pre-fill env var names by uppercasing the role name and following the `AI_TESTER_<ROLE>_<KIND>` convention:
+
+```
+For each role_name in ROLE_NAMES:
+    role_upper = role_name.upper()
+    pre_fill_email_env    = f"AI_TESTER_{role_upper}_EMAIL"
+    pre_fill_password_env = f"AI_TESTER_{role_upper}_PASSWORD"
+    pre_fill_totp_seed_env = f"AI_TESTER_{role_upper}_TOTP_SEED"
+```
+
+Examples:
+- `developer` → `AI_TESTER_DEVELOPER_EMAIL` / `_PASSWORD` / `_TOTP_SEED`
+- `editor`    → `AI_TESTER_EDITOR_EMAIL` / ...
+- `viewer`    → `AI_TESTER_VIEWER_EMAIL` / ...
+- `cms_manager` → `AI_TESTER_CMS_MANAGER_EMAIL` / ... (preserves snake_case)
+
+Pre-fill `role_label` as a generic placeholder; the user almost always edits this:
+
+```
+role_name = "developer" → role_label suggestion: "Developer (full admin)"
+                          (or just "developer" if you can't guess scope)
+```
+
+Ask:
+
+> "Account `<role_name>`: confirm `role_label` (a one-line description of what this role can do — shows up in PRoctor's planner context) and the env var names that will hold its credentials."
+>
+> Pre-filled fields: role_label, email_env, password_env, totp_seed_env. User edits any if defaults don't fit.
+
+Save each as `ACCOUNTS[i] = {name: ROLE_NAMES[i], role_label, email_env, password_env, totp_seed_env}`.
+
+**Bulk-confirm shortcut**: if `ROLE_NAMES` has ≥3 entries, before looping ask:
+
+> "I'll generate `AI_TESTER_<ROLE>_<KIND>` env var names for all <N> roles. Want to confirm each one individually, or accept the convention in bulk?"
+- **Accept bulk (Recommended)** — skip the per-role question, fill in `role_label` as a generic `<role_name> account` and use the pre-filled env vars.
+- **Confirm each** — loop with the question above per role.
 
 ### Step 7e — Base URL (Q-EnvE)
 

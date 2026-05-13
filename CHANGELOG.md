@@ -2,6 +2,24 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.2 — 2026-05-13
+
+### Wizard: discover admin roles from the codebase
+- **Step 7c rewritten — no more "how many roles?" guess game.** Old flow asked the user to pick `1` / `2-3` / `4+` and then synthesized generic `AI_TESTER_ACCT<N>` env var names for anything past 3. That ignored the consumer's actual role taxonomy. New flow:
+  1. Grep the codebase for common role-enumeration patterns (Go `Role_xxx`, TS enum/const, Python `class Role(Enum)`, Ruby `has_role :`, SQL/YAML seeds). Aggregate candidates into `DETECTED_ROLES`.
+  2. Present a multi-select via AskUserQuestion: "I found these roles in your codebase — which should PRoctor test under?". Add an explicit "Add a role not in this list" option for the cases grep misses.
+  3. If nothing's detected at all, fall back to a free-text loop ("type role name, `done` when finished").
+  4. `MODE=migrate`: if existing `.pr-test.yml` already declares `auth.accounts`, default to keeping them; offer a "rediscover" path for consumers who restructured roles since their previous `/proctor-init` run.
+- **Step 7d adapts to whatever Step 7c produced.** Env var names follow `AI_TESTER_<ROLE>_<KIND>` derived from the actual role names, preserving snake_case (e.g. `AI_TESTER_CMS_MANAGER_EMAIL`). A bulk-confirm shortcut lets users accept the entire convention without N rounds of "press enter to accept".
+
+### Why this matters
+Wizard previously assumed every consumer has the `developer / editor / viewer` trio and asked the count question as if the role list itself were unknown. Real admins have very different role taxonomies (mcd-website's `roles_manager/roles_models` has its own set; other consumers will have theirs). Grepping first means the consumer doesn't have to retype what's already in their code.
+
+### Not changed
+- Schema and TOTP helpers unchanged from v0.3.0.
+- All other wizard steps (Section 7a/b/e, Section 8 file generation) unchanged.
+- 46 tests still pass.
+
 ## v0.3.1 — 2026-05-13
 
 ### Wizard polished for existing-consumer migrations
