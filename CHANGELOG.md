@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.1 — 2026-05-13
+
+### Wizard polished for existing-consumer migrations
+- **New Step 0.5: detect existing PRoctor config.** Wizard reads `.pr-test.yml` and `.github/workflows/proctor.yml` before doing anything. Classifies the repo as `fresh` (no PRoctor yet), `migrate` (v0.2.x consumer, no `auth:` block), or `bump-only` (v0.3 consumer already on a slightly older pin). Each mode runs only the steps that matter — `bump-only` just patches the action pin and exits.
+- **Workflow YAML is PATCHED, not regenerated.** Migration no longer overwrites `.github/workflows/proctor.yml`. Two surgical edits only: bump `zealllot/proctor/github-action@<old>` to `@<CURRENT_TAG>`, and insert/extend the `env:` block before `with:` to pass through every `AI_TESTER_*` secret. The user's `name:`, `on:`, `if:` guards, `services:`, custom steps, etc. are preserved untouched.
+- **Section 7 rewritten in imperative voice.** Each sub-step is "Ask X via AskUserQuestion; if user picks A, do B. Save Y to memory." instead of the previous spec-style prose. Cuts a class of "the AI is reading this as documentation, not instructions" failure modes.
+- **Migrate mode keeps existing settings.** `require_approval`, `auto_fix`, `mobile_emulator`, `per_test_timeout_seconds`, and any unknown keys from the existing `.pr-test.yml` are preserved (unknown keys land in a `# Preserved from previous .pr-test.yml:` block at the bottom of the new file). User is never asked to re-confirm settings they already chose.
+- **`CURRENT_TAG` resolution unified.** Defined once in Step 0 by calling `gh release view --repo zealllot/proctor`. All later sections reference the same value. Eliminates the old failure where the wizard hardcoded a stale `@v0.2.0` because the AI copied the example markdown verbatim.
+- **Hard refusal on prod URLs.** Step 7e (base URL question) refuses URLs matching `prod.`, `.qorcommerce.com`, or `www.<consumer-real-domain>` patterns. Not a warning — re-asks until the user provides a non-prod URL.
+
+### Not changed
+- No code changes in `plugins/proctor/scripts/` — schema and TOTP helpers from v0.3.0 are intact.
+- All 46 tests still pass.
+
 ## v0.3.0 — 2026-05-13
 
 ### Added (major: existing-env mode + multi-role testing)

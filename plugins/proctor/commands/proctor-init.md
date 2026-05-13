@@ -20,7 +20,53 @@ gh auth status >/dev/null 2>&1          # must succeed; otherwise tell user to r
 gh repo view --json nameWithOwner --jq '.nameWithOwner'   # capture as REPO_FULL_NAME
 ```
 
-If `.pr-test.yml` or `.github/workflows/proctor.yml` already exists, ask whether to OVERWRITE. If user says no, stop.
+Also resolve **once** the current PRoctor tag (used everywhere we pin `zealllot/proctor/github-action@<TAG>`):
+
+```bash
+CURRENT_TAG=$(gh release view --repo zealllot/proctor --json tagName --jq '.tagName' 2>/dev/null \
+  || gh api repos/zealllot/proctor/tags --jq '.[0].name' 2>/dev/null \
+  || echo "main")
+```
+
+## 0.5. Existing config detection
+
+Before anything else, check what PRoctor state is already in this repo:
+
+```bash
+EXISTING_PR_TEST_YML=$(test -f .pr-test.yml && echo yes)
+EXISTING_WORKFLOW=$(test -f .github/workflows/proctor.yml && echo yes)
+# Detect current pin (if any) — used to classify "v0.2 era" vs "v0.3 era"
+CURRENT_PIN=$(grep -oE 'zealllot/proctor/github-action@v[0-9]+\.[0-9]+\.[0-9]+' \
+                .github/workflows/proctor.yml 2>/dev/null | head -1 | sed 's|.*@||')
+HAS_AUTH_BLOCK=$(grep -qE '^auth:' .pr-test.yml 2>/dev/null && echo yes)
+```
+
+Branch on what's there:
+
+- **Neither file exists** → fresh install. Set `MODE=fresh`. Continue to Step 1.
+- **Workflow exists but action pin is current and `auth:` block already present** → already on v0.3. Tell the user "PRoctor is already integrated and up to date" and stop unless they want to re-run for some other reason.
+- **Files exist but no `auth:` block** (typical v0.2.x consumer) → set `MODE=migrate`. Ask:
+
+  > "Detected existing PRoctor integration pinned at <CURRENT_PIN>. v0.3.0 introduces:
+  > - Auth + multi-account testing against an already-running server (no CI bring-up needed for runtime tests).
+  > - Per-developer `.pr-test.local.yml` overrides.
+  >
+  > How would you like to proceed?"
+  > - **Migrate to v0.3 existing-env mode (Recommended)** — keep `require_approval` / `auto_fix` / etc., drop `setup:`, add `auth:` block. Bump workflow pin to `<CURRENT_TAG>`, add secret pass-through.
+  > - **Keep v0.2 setup-based config, just bump the version pin** — minimal change. Skip everything else.
+  > - **Start fresh** — discard existing config and re-run the wizard from scratch.
+
+- **Files exist with `auth:` block already, but pin is older than `<CURRENT_TAG>`** → `MODE=bump-only`. Patch the workflow to the latest pin and stop.
+
+`MODE` decides what runs next:
+
+| MODE | Skip Step 1–6 | Run Section 7 | Apply via |
+|---|---|---|---|
+| `fresh` | — | — | Step 1 onward (full flow, asks Q0 for path) |
+| `migrate` | yes | yes (skip Q-EnvC count if existing config already lists accounts) | Section 7 + Section 8 patcher |
+| `bump-only` | yes | — | Section 8 patcher (workflow version only) |
+
+For `migrate` and `bump-only`, **do NOT call out to Sections 1–6**; they're CI-bring-up flow only.
 
 ## 1. Detect stack
 
@@ -370,167 +416,240 @@ If any step was skipped (auth not set, perms not flipped), call those out as "TO
 
 ## 7. Existing-env path: auth config
 
-This section is only reached when Q0 = "Existing running server". The wizard captures auth + accounts then generates a much smaller set of files.
+Entered when Q0 = "Existing running server" (`MODE=fresh`) OR when migrating from v0.2 (`MODE=migrate`). Captures auth + accounts then hands off to Section 8 for file generation / patching.
 
-### Q-EnvA — Login mechanism
+In `MODE=migrate`, read the existing `.pr-test.yml` first and use its values as DEFAULTS so the user can press-enter to keep what they have. Specifically, parse out: `require_approval`, `auto_fix`, `base_url` (if present), and `mobile_emulator`. Treat these as locked answers — don't re-ask.
 
-> "How does an admin log into your app?"
-- **Form: email + password + TOTP (2FA)** (Recommended for any prod admin) — `auth.type: form_with_totp`
-- **No 2FA, just email + password** — choose this only for internal demos / sandboxes. (Same `form_with_totp` template, the wizard later marks the TOTP selectors as TODO.)
-- **Something else** — skip auth generation; user adds the block manually later.
+### Step 7a — Login mechanism (Q-EnvA)
 
-Continue only when `form_with_totp` is chosen.
+Ask, one short question via AskUserQuestion:
 
-### Q-EnvB — Login form selectors
+> "How does an admin log into the app you want PRoctor to test?"
+- **Form: email + password + TOTP (2FA)** (Recommended) — sets `auth.type: form_with_totp`. Continue to 7b.
+- **Form: email + password, no 2FA** — also `form_with_totp` schema-wise; mark the `totp` selector + `totp_seed_env` as TODO in the generated file, document for the user that the schema requires them but the runtime can treat 2FA as no-op when the seed is empty. Continue to 7b.
+- **Something else** (SSO, magic link, OAuth) — skip the auth block. Tell the user PRoctor v0.3.0 doesn't generate other auth types yet; they can run without `auth:` (legacy mode) or hand-edit the file. Stop after generating the no-auth `.pr-test.yml`.
 
-Tell the user: open the login page in devtools, copy the `name=` attribute from these inputs. Pre-fill with the qor/auth conventional names — most consumers built on qor will not need to edit.
+### Step 7b — Login form selectors (Q-EnvB)
 
-> "Confirm the login form selectors. Defaults assume qor/auth conventions."
-Options pre-filled as:
+Pre-fill with qor/auth conventions (matches most ThePlant projects). Ask:
+
+> "Confirm the login form selectors. Defaults assume qor/auth conventions — Open `<base_url>/auth/login` in DevTools and check if you need to edit."
+
+| field | default |
+|---|---|
+| `login_url` | `/auth/login` |
+| `email` | `input[name="login"]` |
+| `password` | `input[name="password"]` |
+| `totp` | `input[name="passcode"]` |
+| `submit` | `button[type="submit"]` |
+
+Options:
+- **Use defaults (Recommended)** — store as-is.
+- **Edit** — open follow-up free-text input for each of the 5 fields with the default pre-filled.
+
+### Step 7c — Number of admin roles (Q-EnvC)
+
+> "How many admin roles do you want PRoctor to test under?"
+- **1**
+- **2-3** (Recommended)
+- **4+** — wizard will loop 7d until the user types `done`
+
+In `MODE=migrate`, if the existing `.pr-test.yml` already has an `auth.accounts:` list, **skip this question entirely** and just confirm: "Existing `auth.accounts:` has N entries. Keep them?" → yes → skip 7d; no → go to 7c proper.
+
+### Step 7d — Per-account credentials (loop)
+
+For each account, ask ONE AskUserQuestion combining 4 free-text fields with pre-fills based on index:
+
 ```
-email:    input[name="login"]
-password: input[name="password"]
-totp:     input[name="passcode"]
-submit:   button[type="submit"]
-login_url: /auth/login
-```
-- **Use defaults (Recommended)** — write as-is.
-- **Edit** — open follow-up text inputs for each.
+i=1  name: developer    role_label: "Developer (full admin)"
+                        email_env: AI_TESTER_DEV_EMAIL
+                        password_env: AI_TESTER_DEV_PASSWORD
+                        totp_seed_env: AI_TESTER_DEV_TOTP_SEED
 
-### Q-EnvC — How many admin roles to test?
+i=2  name: editor       role_label: "Editor (content only)"
+                        email_env: AI_TESTER_EDITOR_EMAIL
+                        password_env: AI_TESTER_EDITOR_PASSWORD
+                        totp_seed_env: AI_TESTER_EDITOR_TOTP_SEED
 
-> "How many distinct admin roles should the tests cover?"
-- **One** — single account, easy start.
-- **2-3** (Recommended) — usually developer + editor + viewer-ish split.
-- **4+** — uncommon; if you say this, the wizard loops the per-account questions until you stop.
+i=3  name: viewer       role_label: "Read-only"
+                        email_env: AI_TESTER_VIEWER_EMAIL
+                        password_env: AI_TESTER_VIEWER_PASSWORD
+                        totp_seed_env: AI_TESTER_VIEWER_TOTP_SEED
 
-### Q-EnvD — Per account (looped N times based on Q-EnvC)
-
-For each account, ask in one combined question (4 free-text fields):
-
-> "Account #N: give it a short identifier (`name`), a one-line `role_label`, and the env var names that will hold its credentials."
-Pre-fill suggestions, by index:
-
-```
-#1  name: developer    role_label: "Developer (full admin)"
-    email_env: AI_TESTER_DEV_EMAIL
-    password_env: AI_TESTER_DEV_PASSWORD
-    totp_seed_env: AI_TESTER_DEV_TOTP_SEED
-
-#2  name: editor       role_label: "Editor (content only)"
-    email_env: AI_TESTER_EDITOR_EMAIL
-    password_env: AI_TESTER_EDITOR_PASSWORD
-    totp_seed_env: AI_TESTER_EDITOR_TOTP_SEED
-
-#3  name: viewer       role_label: "Read-only"
-    email_env: AI_TESTER_VIEWER_EMAIL
-    password_env: AI_TESTER_VIEWER_PASSWORD
-    totp_seed_env: AI_TESTER_VIEWER_TOTP_SEED
+i≥4  name: <empty>      role_label: <empty>
+                        email_env: AI_TESTER_ACCT<i>_EMAIL
+                        password_env: AI_TESTER_ACCT<i>_PASSWORD
+                        totp_seed_env: AI_TESTER_ACCT<i>_TOTP_SEED
 ```
 
-### Q-EnvE — Base URL
+Save the user's actual answers as `ACCOUNTS[i] = {name, role_label, email_env, password_env, totp_seed_env}`.
 
-> "What URL is the deployed test env at? (used in CI / by default; dev's local URL goes in `.pr-test.local.yml`)"
-Free-text input. Validate that it starts with `https?://` and does NOT match any prod pattern (`prod.`, `.qorcommerce.com`, etc. — list pulled from common ThePlant patterns; emit a warning that the wizard can't be 100% certain).
+### Step 7e — Base URL (Q-EnvE)
 
-### Generate files (existing-env path)
+In `MODE=migrate`: if the existing `.pr-test.yml` already has `base_url`, ask to confirm (default = existing).
 
-#### `.pr-test.yml`
+In `MODE=fresh`: ask via AskUserQuestion:
+
+> "What URL is the deployed test environment at?"
+Free-text input. Pre-fill examples: `https://cms.<your-app>.theplant-dev.com`. Validate:
+
+- Must start with `https?://` (case-insensitive).
+- If the URL contains any of `prod.`, `.qorcommerce.com`, `www.<consumer-real-domain>.<tld>`, REFUSE and re-ask. Hard refusal — not a warning.
+- Emit a notice that the wizard cannot be 100% certain whether a URL is prod and the user is responsible for not pointing PRoctor at production.
+
+Save as `BASE_URL`.
+
+## 8. Apply changes (Sections 7 produces; this section commits to disk)
+
+This section is reached at the end of `MODE=fresh` (existing-env path) OR `MODE=migrate` OR `MODE=bump-only`. It's the single file-mutation point. **Show the user a diff preview** before each Write — they can refuse any single change.
+
+### 8a — Write `.pr-test.yml`
+
+For `MODE=fresh` or `MODE=migrate`: generate the YAML from Section 7's captured answers. Template:
 
 ```yaml
-# Generated by /proctor-init (existing-env path).
-# Defaults target the deployed test env; dev's localhost goes in .pr-test.local.yml.
+# Managed by /proctor-init. Re-run the wizard to regenerate.
+# Per-developer overrides go in .pr-test.local.yml (gitignored).
 
-base_url: <Q-EnvE answer>
+base_url: <BASE_URL>
 
 auth:
   type: form_with_totp
-  login_url: <Q-EnvB.login_url>
+  login_url: <selectors.login_url>
   selectors:
-    email: <Q-EnvB.email>
-    password: <Q-EnvB.password>
-    totp: <Q-EnvB.totp>
-    submit: <Q-EnvB.submit>
+    email: <selectors.email>
+    password: <selectors.password>
+    totp: <selectors.totp>
+    submit: <selectors.submit>
   accounts:
-    - name: <Q-EnvD #1.name>
-      role_label: <Q-EnvD #1.role_label>
-      email_env: <Q-EnvD #1.email_env>
-      password_env: <Q-EnvD #1.password_env>
-      totp_seed_env: <Q-EnvD #1.totp_seed_env>
-    # ... repeat for accounts 2..N
+    - name: <ACCOUNTS[1].name>
+      role_label: "<ACCOUNTS[1].role_label>"
+      email_env: <ACCOUNTS[1].email_env>
+      password_env: <ACCOUNTS[1].password_env>
+      totp_seed_env: <ACCOUNTS[1].totp_seed_env>
+    # ... repeat for ACCOUNTS[2..N]
 
-require_approval: <Q4 answer>
-auto_fix: <Q3 answer>
+require_approval: <migrate: from existing | fresh: from Q4>
+auto_fix: <migrate: from existing | fresh: from Q3>
 fix_pr_target_branch: "${PR_BRANCH}"
-per_test_timeout_seconds: 60
-mobile_emulator: false
+per_test_timeout_seconds: <migrate: from existing or 60 | fresh: 60>
+mobile_emulator: <migrate: from existing or false | fresh: false>
 ```
 
-#### `.pr-test.local.yml.example`
+For `MODE=migrate`, DROP the existing `setup:` block (no longer needed in existing-env mode) and emit a `setup_removed` note to mention in the summary. Don't silently drop other keys we don't understand — preserve them at the end of the file with a `# Preserved from previous .pr-test.yml:` comment.
+
+### 8b — Write `.pr-test.local.yml.example`
 
 ```yaml
-# Copy to .pr-test.local.yml and edit for your local dev env.
-# This file is gitignored; each developer keeps their own.
-base_url: http://localhost:<APP_PORT>
-# Optionally override the auth.accounts.*_env names if your local
-# dev env reads different env vars; the array REPLACES the base (not merge).
+# Per-developer overrides. Copy this to .pr-test.local.yml and edit.
+# This file is gitignored.
+#
+# Most devs just need to override base_url to point at their local server:
+base_url: http://localhost:<APP_PORT or "PORT_HERE">
+
+# To override credentials for a fully different local-only account set,
+# replace auth.accounts wholesale (the array REPLACES the base on merge —
+# partial entries would silently fall back to test env creds):
+#
+# auth:
+#   accounts:
+#     - name: developer
+#       role_label: "Local dev (full admin)"
+#       email_env: LOCAL_DEV_EMAIL
+#       password_env: LOCAL_DEV_PASSWORD
+#       totp_seed_env: LOCAL_DEV_TOTP_SEED
 ```
 
-#### `.gitignore` append
+### 8c — Update `.gitignore`
 
-Add these lines if missing:
+Read `.gitignore`. For each of these lines, append it ONLY if not already present:
 
 ```
 .pr-test.local.yml
 .proctor/
 ```
 
-#### `.github/workflows/proctor.yml`
+### 8d — Patch `.github/workflows/proctor.yml` (DO NOT overwrite)
 
-Standard PRoctor workflow but pass through ALL the `*_env` secret names captured from Q-EnvD. The wizard's template (existing — keep the existing skeleton from Section 3) gets one extra step that lists them as `env:`:
+This is the **most delicate** step. Different MODES touch this file differently:
 
-```yaml
-      - uses: zealllot/proctor/github-action@<CURRENT_TAG>
-        env:
-          # One line per env_env from auth.accounts — wizard generates these:
-          AI_TESTER_DEV_EMAIL: ${{ secrets.AI_TESTER_DEV_EMAIL }}
-          AI_TESTER_DEV_PASSWORD: ${{ secrets.AI_TESTER_DEV_PASSWORD }}
-          AI_TESTER_DEV_TOTP_SEED: ${{ secrets.AI_TESTER_DEV_TOTP_SEED }}
-          # ... and so on for editor / viewer / etc.
-        with:
-          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-```
+**`MODE=fresh` (existing-env path)**: there is no existing workflow file — generate the full skeleton from Section 3's template, but using the existing-env auth env pass-through (see below). Action pin = `<CURRENT_TAG>`.
 
-### Secret setup walkthrough (existing-env path)
+**`MODE=migrate`**: existing workflow file is present and was hand-written or generated by an older wizard. **Patch in place** — don't regenerate. Two surgical edits:
 
-For EACH account from Q-EnvD, walk the user through setting THREE secrets on the repo:
+1. **Bump the action pin**: find the line matching `^\s*-\s*uses:\s*zealllot/proctor/github-action@v[0-9]+\.[0-9]+\.[0-9]+` and replace the version with `<CURRENT_TAG>`. If there are multiple matches, edit all of them.
 
-```sh
-read -rsp "Paste <name> account email: " V && echo \
-  && gh secret set <email_env> -R "$REPO_FULL_NAME" --body "$V" && unset V
-read -rsp "Paste <name> account password: " V && echo \
-  && gh secret set <password_env> -R "$REPO_FULL_NAME" --body "$V" && unset V
-read -rsp "Paste <name> account TOTP base32 seed: " V && echo \
-  && gh secret set <totp_seed_env> -R "$REPO_FULL_NAME" --body "$V" && unset V
-```
+2. **Insert `env:` pass-through block**: find the same `uses:` line. If the next non-blank YAML key at the same indentation is already `env:`, scan its body for missing entries; insert only the ones not present. If the next key is `with:` (not `env:`), insert a fresh `env:` block immediately before it at the same indentation, listing every account's three env vars:
 
-Remind: **TOTP seed is the base32 string under the QR code at 2FA setup**, not the 6-digit code. The wizard cannot fetch it — the user grabs it from their authenticator app's "show key" / "export" feature.
+   ```yaml
+         env:
+           AI_TESTER_DEV_EMAIL: ${{ secrets.AI_TESTER_DEV_EMAIL }}
+           AI_TESTER_DEV_PASSWORD: ${{ secrets.AI_TESTER_DEV_PASSWORD }}
+           AI_TESTER_DEV_TOTP_SEED: ${{ secrets.AI_TESTER_DEV_TOTP_SEED }}
+           # ... one triple per ACCOUNTS[i]
+   ```
 
-### Summary line for existing-env path
+   The set of env var names comes from `ACCOUNTS[*].{email_env, password_env, totp_seed_env}` — emit them in the order accounts were declared so the list is stable across re-runs.
 
-Replace the "Open a small PR" line in Section 6's summary with:
+Do NOT touch: `name:`, `on:`, `concurrency:`, `permissions:`, `if:`, any other `runs-on`, `services:` block (if present), or any user-added step.
+
+**`MODE=bump-only`**: do only step 1 (bump action pin), nothing else.
+
+### 8e — Auth secrets walkthrough
+
+For every distinct env var name across `ACCOUNTS[*]`, do NOT ask the user for the value. Print the command they should run, in this exact format (preserves the value-never-touches-Claude property):
 
 ```
-Next:
-  1. git add .pr-test.yml .pr-test.local.yml.example .gitignore .github/workflows/proctor.yml
-  2. git commit -m "ci: add PRoctor (existing-env path)"
-  3. Copy .pr-test.local.yml.example to .pr-test.local.yml; edit base_url to your local URL.
-  4. Open a small PR — PRoctor will analyze it; comment `/proctor run` to trigger.
+For account "developer", set its 3 secrets:
 
-⚠ The workflow uses comment-trigger by default. For /proctor run /proctor rerun
-   comment triggers to fire on PRs, proctor.yml MUST be on the default branch
-   (GitHub reads issue_comment workflows from default branch only).
+  read -rsp "Paste developer email: " V && echo \
+    && gh secret set AI_TESTER_DEV_EMAIL -R <REPO_FULL_NAME> --body "$V" && unset V
+
+  read -rsp "Paste developer password: " V && echo \
+    && gh secret set AI_TESTER_DEV_PASSWORD -R <REPO_FULL_NAME> --body "$V" && unset V
+
+  read -rsp "Paste developer TOTP base32 seed: " V && echo \
+    && gh secret set AI_TESTER_DEV_TOTP_SEED -R <REPO_FULL_NAME> --body "$V" && unset V
+
+⚠ TOTP seed = the long base32 string under the QR code at 2FA setup,
+   NOT the 6-digit code (which expires every 30 seconds).
 ```
+
+Repeat for each account.
+
+If `<CLAUDE_CODE_OAUTH_TOKEN>` isn't already set as a repo secret, also walk through that one (same pattern, the value comes from `claude setup-token`).
+
+### 8f — Default-branch caveat reminder
+
+Print, regardless of mode:
+
+```
+⚠ For /proctor run and /proctor rerun comment triggers to fire:
+  proctor.yml MUST exist on the DEFAULT BRANCH (main/master).
+  GitHub reads issue_comment workflows from the default branch only.
+
+  If this is a fresh install: merge this PR to master before any
+  /proctor run comments will be received.
+```
+
+### 8g — Summary
+
+```
+Done. Files changed:
+  ✓ .pr-test.yml                           (created / updated)
+  ✓ .pr-test.local.yml.example             (created — copy to .pr-test.local.yml)
+  ✓ .gitignore                             (.proctor/ and .pr-test.local.yml ignored)
+  ✓ .github/workflows/proctor.yml          (action pinned to <CURRENT_TAG>, secrets pass-through added)
+
+Next steps:
+  1. Commit the above and open a PR (or merge if you've batched it on master).
+  2. Run the secrets-set commands above for each account.
+  3. (If migration) The old setup: block was dropped — see PRESERVED comment block
+     at the bottom of .pr-test.yml for anything else that wasn't recognized.
+  4. Test it: `/proctor run` on any PR.
+```
+
+If any step was skipped (auth not generated, perms not flipped, secrets not set), call those out as "TODO" lines so the user remembers.
 
 ## Style guide
 
