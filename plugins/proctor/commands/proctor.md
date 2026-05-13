@@ -10,15 +10,25 @@ Run the PRoctor test pipeline against a GitHub PR.
 
 ## ⚠ Critical: this command runs the WHOLE pipeline non-stop
 
-Stages 1–9 below are a single sequence, NOT a checklist with pause points. Once started, run all of them straight through, only stopping for:
+Stages 1–9 below are a single sequence, NOT a checklist with pause points.
 
-- A hard error that requires the developer's decision (auth misconfigured, force-push aborted, setup failed)
-- The approval gate at Stage 6 in local mode (presents the plan via AskUserQuestion; user picks items)
-- The flag-gated CI-mode early exit at Stage 6 (`require_approval: true` + `mode=ci` → exit 0, await comment)
+**Your turn ends ONLY when** one of these has happened:
+- The reporting skill completed (= terminal success)
+- A hard error aborted the run (auth misconfigured, force-push detected, setup-failed)
+- The local-mode approval gate's AskUserQuestion is currently displayed and awaiting a user response
+- The CI-mode early-exit ran (`require_approval: true` + `mode=ci` → `[proctor] awaiting approval`, exit 0)
 
-**Do NOT** stop between Stages 1 and 2 to "show the ChangeMap" — that's an artifact, not a checkpoint. **Do NOT** stop between Stages 2 and 3 to "wait for confirmation" — Stage 6 is the only confirmation point. **Do NOT** stop after Stage 5 because tests passed; Stage 6 (fix) and Stage 7 (report) always run regardless.
+**If you wrote a JSON file and validated it but your turn is still going** — you have not finished. The next concrete tool call (AskUserQuestion, dispatching the next skill, etc.) is still owed. Writing the file is half the work; what comes AFTER the file is the other half. Do not stop between them.
 
-If you find yourself emitting a partial result (e.g. just the ChangeMap JSON) and not invoking the next stage's skill — that's a bug in your execution, not a feature. Resume immediately.
+**Specifically, after Stage 1 finishes (change-map.json written + validated)** → invoke skill `planning-pr-tests` for Stage 2 with no pause.
+
+**Specifically, after Stage 2 finishes (test-plan.json written + validated)** → emit the approval-gate table to chat, THEN call AskUserQuestion with no pause.
+
+**Specifically, after the user answers the approval gate** → save approved-plan.json, then invoke skill `executing-pr-tests` with no pause.
+
+**Specifically, after Stage 3 finishes (test-results.json written)** → invoke skill `fixing-test-failures` (or write fix-pr-ref.json=null if nothing to fix), then immediately invoke skill `reporting-pr-test-results`.
+
+If you find yourself emitting a status line ("done", "validated", "10 items planned") and your turn ENDS there — that's a bug. The status line is a log marker, not a stopping point. Continue.
 
 ## Inputs
 
@@ -131,15 +141,17 @@ rendered as a human-readable table.**
 
 ### 6. Approval gate
 
-This step has TWO mandatory outputs, in order:
+Four sub-steps. **Do all four in this turn. Do not stop between them.**
 
-1. **A human-readable markdown table** of the plan items — for the human to read.
-2. **An AskUserQuestion** with a small set of decisions — for the human to act on.
+**6a.** Emit a markdown header line: `## Plan for PR #<num> — <total> items` (as part of your assistant message — do NOT use the Write tool for this; it goes to chat).
 
-**Neither order nor format is optional.** Do NOT:
-- Skip the table and jump straight to AskUserQuestion (the question is unanswerable without context).
-- Print the test-plan JSON instead of the table (JSON is wall-of-text; table is scannable).
-- Combine "plan items" and "summary" into a single one-line "3 lint + 5 ui — run?" — too coarse to spot a wrong item.
+**6b.** Emit the plan items as a markdown table (in the SAME assistant message, immediately below 6a's header). Format below. Every column populated for every row.
+
+**6c.** Emit one summary line below the table: `Estimated: ~<N> min, ~$<cost>`. Best-effort estimate (rough: lint-only ≈ 5s/$0.001, bash ≈ 30s/$0.005, chrome-devtools ≈ 60s/$0.05 per item).
+
+**6d.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
+
+**Do NOT** skip the table (6a–6c) and jump to AskUserQuestion (6d) — the question is unanswerable without context. **Do NOT** print the test-plan JSON instead of the table. **Do NOT** collapse to "3 lint + 5 ui — run?".
 
 Required format for the table:
 

@@ -2,6 +2,18 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.20 — 2026-05-13
+
+### Orchestrator: cement "no stopping between stages" with concrete sub-steps
+- **Bug**: even after v0.3.14/v0.3.19's "do not pause" language, the AI still stopped after writing `test-plan.json` and validating it. Pattern was: write file → emit `[proctor:plan] done — 10 items planned` → end turn. The user had to manually type `继续` after each stage. Reported by zealot@theplant.jp.
+- **Root cause**: "Then immediately proceed to..." is soft — when the AI's "concrete tool calls left to make in this turn" list goes empty after the schema-validate Bash, the turn naturally ends. The status line registers as a "task complete" signal.
+- **Fix** (`proctor.md` top-of-file + Stage 6):
+  - **New "Your turn ends ONLY when..." section** — enumerates the four legitimate end-states explicitly. If none has happened, the turn must continue. The status line is now explicitly called out as NOT a stopping signal.
+  - **Per-stage continuation rules** stated as "Specifically, after Stage N finishes → invoke <next concrete tool call> with no pause." Names the next tool call instead of "proceed".
+  - **Approval gate broken into four numbered sub-steps** (6a header, 6b table, 6c summary line, 6d AskUserQuestion). Each is a single concrete action in the same assistant turn. Combined directive: "Do all four. Do not stop between them."
+
+After this, "Plan completed but no further execution" should be impossible — the AskUserQuestion call is enumerated as a required action of Stage 6, not a vague follow-up.
+
 ## v0.3.19 — 2026-05-13
 
 ### No more JSON walls in chat — stage artifacts go to disk, status lines go to chat
