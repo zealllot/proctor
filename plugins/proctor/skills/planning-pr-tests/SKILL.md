@@ -142,6 +142,77 @@ Two happy + two negatives gives the reviewer signal that the feature actually wo
 
 When the PR body explicitly lists more negative cases than happy ones (rare, but happens for security-hardening PRs), respect that — but always include at least one happy-path item per new code path.
 
+## Journey-first planning (write BEFORE the items array)
+
+Don't plan hunk-by-hunk. Read the PR body + ChangeMap first, then derive **1–3 user journeys** — concrete sequences a real person walks through to use the feature. ONLY THEN write the items, grouped by journey.
+
+A user journey is: a goal + an ordered set of steps + a final-state assertion. Example for the Digital Reward type=Image/Game PR:
+
+```
+Journey 1: "Create-Image-Reward"
+  Goal: Admin creates a published Image-type digital reward.
+  Steps:
+    1. (precondition) Logged in as developer, no existing reward with this name.
+    2. Open /admin/rewards/new
+    3. Select Type = Image, fill asset + name
+    4. Click Save
+    5. Click Publish
+    6. Verify: reward appears in list with status=Published.
+  After-state: navigate away, navigate back, reload — record still there.
+
+Journey 2: "Create-Game-Reward"
+  Goal: Same as Journey 1 but for Game type, requiring a valid URL.
+  Steps: <similar>
+
+Journey 3: "Reject-Bad-Game-URL"
+  Goal: A reward submitted with an invalid Game URL is rejected with a clear error.
+  Steps:
+    1. Logged in as developer.
+    2. Open form, select Type=Game.
+    3. Enter GameUrl = 'not-a-url'.
+    4. Click Save.
+    5. Verify: 422 with "Game URL is not a valid URL"; form not submitted.
+```
+
+Tag every plan item with the `journey` field naming its journey. Items within a journey list each other in `depends_on` if they share state — e.g. the "verify list still has it" item depends on the "save it" item. Items in different journeys are independent.
+
+Why journeys: reviewers think about features as "did the create-publish flow work end-to-end", not "did 7 isolated assertions pass". Grouping items by journey gives the report a structure that maps to product behavior. Also forces the planner to think "what's the full happy path" before getting absorbed in negative-case minutiae.
+
+How many journeys: **1–3**. More than 3 means you're over-segmenting; the diff probably has fewer cohesive user-facing flows than that. Single-flow PRs (a typo fix, a docs change, an internal refactor) can have ZERO journeys — just a flat item list — that's fine.
+
+## Item-to-item data dependency (`data_from`)
+
+When item B is meaningful ONLY IF item A succeeded (A creates a record, B edits that record), declare it explicitly:
+
+```jsonc
+{
+  "id": "t-005",
+  "what": "HAPPY: Save Image reward 'fixture-image-1'",
+  "journey": "Create-Image-Reward",
+  "depends_on": [],
+  // ...
+},
+{
+  "id": "t-006",
+  "what": "Edit Image reward 'fixture-image-1': replace asset",
+  "journey": "Create-Image-Reward",
+  "depends_on": ["t-005"],     // execution-order dep
+  "data_from": ["t-005"],      // STATE dep — if t-005 fails, skip t-006
+  // ...
+}
+```
+
+`depends_on` orders execution. `data_from` says "the world-state I need can only be set up by these items succeeding". If a `data_from` source fails or is skipped, the executor marks this item `skipped` (not `fail`) with reason `data-dep-failed: t-005`. Without `data_from`, item B would have run and errored ambiguously — was it B's logic that broke, or was the test invalidated upstream?
+
+Use `data_from` when:
+- B reads a record A just created
+- B asserts an effect that only happens after A's side-effect
+- B targets a URL whose path includes A's generated ID
+
+DON'T use `data_from` for items that share fixture data but don't share live-test state — those are independent runs, no skip-on-upstream-fail.
+
+The schema enforces: every `data_from` entry must also appear in `depends_on` (data dependency implies ordering).
+
 ## Write-operation persistence — required assertions
 
 For any test item that performs a write (POST/PUT/DELETE, form submit, file upload, state-changing button click), the immediate response (toast / 200 / element visible) is necessary but NOT sufficient. The reviewer needs to know the change actually persisted.

@@ -89,10 +89,23 @@ Output: a single `TestResults` JSON object.
    dispatch as before, no account grouping.
 
 4. For each item (within its group's authed context):
-   - Dispatch a fresh subagent with the item JSON, env, the path
-     to `<logs_dir>/<id>.log`, AND the Chrome context handle for its
-     group. Items without `as_account` set go into the default group
-     (= `auth.accounts[0].name`).
+   - **Check `data_from` first** (v0.3.23+). If the item declares
+     `data_from: ["t-007", ...]` and ANY listed source has status
+     `"fail"` or `"skipped"` in the already-accumulated results, do
+     NOT dispatch — record this item as:
+     ```json
+     {"id": "t-008", "status": "skipped",
+      "reason": "data-dep-failed: t-007",
+      "evidence": "Skipped because upstream t-007 had status=<fail|skipped>; this item's state would have been invalid."}
+     ```
+     and continue to the next item. This propagates: if t-007 was
+     skipped due to t-006, and t-008 has data_from=[t-007], t-008 also
+     gets skipped with `data-dep-failed: t-007` (the chain reason is
+     visible up one level; the report walks the full chain).
+   - Otherwise dispatch a fresh subagent with the item JSON, env, the
+     path to `<logs_dir>/<id>.log`, AND the Chrome context handle for
+     its group. Items without `as_account` set go into the default
+     group (= `auth.accounts[0].name`).
    - Receive its single-result JSON.
    - Append to results array.
 

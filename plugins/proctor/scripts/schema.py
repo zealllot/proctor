@@ -174,12 +174,46 @@ def validate_test_plan(tp: dict) -> None:
         if "error_type" in item and item["error_type"] is not None:
             _require(item["error_type"] in VALID_ERROR_TYPE,
                      f"TestPlan.items[{i}].error_type {item['error_type']!r} not in {sorted(VALID_ERROR_TYPE)}")
+        # `journey` (v0.3.23+) optional — name of the user journey this
+        # item belongs to. Items grouped by journey in the report so a
+        # reviewer can see "the Create-Image-Reward flow has 4 items,
+        # all passed". Free-form short string, kebab/snake_case
+        # recommended. Items not part of a journey omit this.
+        if "journey" in item and item["journey"] is not None:
+            _require(isinstance(item["journey"], str) and item["journey"].strip(),
+                     f"TestPlan.items[{i}].journey must be a non-empty string if set")
+        # `data_from` (v0.3.23+) optional list of item IDs — declares
+        # that THIS item's test state depends on the LISTED items
+        # having successfully produced their effect (e.g. created a
+        # record this item now edits). Stronger than depends_on, which
+        # only orders execution:
+        #   - depends_on: t-007 must finish before t-008 runs
+        #   - data_from:  t-008 must be SKIPPED if t-007 fail/skipped
+        # The executor enforces the skip; the reporter renders it as
+        # "skipped (upstream failed)" with the dep chain visible.
+        if "data_from" in item and item["data_from"] is not None:
+            _require(isinstance(item["data_from"], list),
+                     f"TestPlan.items[{i}].data_from must be a list of item IDs")
+            for j, src in enumerate(item["data_from"]):
+                _require(isinstance(src, str) and src.strip(),
+                         f"TestPlan.items[{i}].data_from[{j}] must be a non-empty string")
+                _require(src != item["id"],
+                         f"TestPlan.items[{i}] cannot pull data_from itself")
 
-    # Second pass: every depends_on entry must reference a known id.
+    # Second pass: every depends_on / data_from entry must reference a
+    # known id. data_from sources should also be in depends_on (data
+    # dependency implies ordering dependency — auto-validate so the
+    # planner can't accidentally race).
     for i, item in enumerate(tp["items"]):
         for dep in item["depends_on"]:
             _require(dep in seen_ids,
                      f"TestPlan.items[{i}].depends_on references unknown id {dep!r}")
+        for src in (item.get("data_from") or []):
+            _require(src in seen_ids,
+                     f"TestPlan.items[{i}].data_from references unknown id {src!r}")
+            _require(src in item["depends_on"],
+                     f"TestPlan.items[{i}] declares data_from={src!r} but doesn't "
+                     f"list it in depends_on — data dependency requires execution ordering")
 
 
 def validate_test_results(tr: dict) -> None:

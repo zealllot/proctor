@@ -2,6 +2,30 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.23 — 2026-05-13
+
+### Journey-first planning (#1) + `data_from` cross-item state dependency (#4)
+
+**User-journey backbone for plan organization** (`planning-pr-tests/SKILL.md` new section, `journey` field on plan items):
+- Planner must derive 1–3 user journeys from the PR body + ChangeMap BEFORE writing items.
+- A journey = goal + ordered steps + final-state assertion (think QA test cases, not isolated assertions).
+- Each item carries `journey: "<name>"`. Items within a journey can depend on each other; items in different journeys are independent.
+- Cap at 3 journeys (more = over-segmenting). Zero journeys is fine for typo/refactor PRs.
+- Reporter groups items by journey: `### Journey: Create-Image-Reward — 3/4 in this journey`. HTML report opens a journey by default if any item in it failed.
+
+**`data_from` field — strong state dependency** (schema + `executing-pr-tests/SKILL.md` + reporter):
+- Plan items declare `data_from: ["t-007"]` when their meaningfulness depends on `t-007` having SUCCEEDED (not just finished). Distinct from `depends_on` which only orders execution.
+- Schema enforces: every `data_from` entry must also be in `depends_on`. Self-reference rejected.
+- Executor: if any `data_from` source has status `fail`/`skipped`, mark this item `skipped` with `reason: "data-dep-failed: <id>"`. Chain propagates.
+- Reporter renders these distinctly (`⏭ skipped (upstream t-007 failed)`) so the reviewer knows the test was INVALIDATED, not opt-out skipped.
+- Use cases: t-008 edits a record t-007 created; t-009 asserts an effect that t-008's action produces; etc. Don't use for items that share fixture data but not live test state.
+
+### Tests
+- 56 → 63 (7 new): journey field validation, data_from cross-ID validation, data_from-implies-depends_on enforcement, self-reference rejection, list-type enforcement.
+
+### Queued
+- #5 (impact_radius from import graph) — would need analyzing-pr-changes to grow grep-based caller analysis. Not in this release.
+
 ## v0.3.22 — 2026-05-13
 
 ### Planning quality — three QA-thinking rules (write persistence, preconditions, error variety)

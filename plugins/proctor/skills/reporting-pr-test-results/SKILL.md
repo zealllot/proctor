@@ -52,6 +52,22 @@ The base URL above is the `base_url` from `.pr-test.yml`. Captured by chromium h
 
 When `VISUAL_URL_BASE` is empty, omit the entire section — don't render an empty header.
 
+## Journey grouping (v0.3.23+)
+
+If any plan items carry a `journey` field, group them by journey in the report. Render each group as a section (markdown `###` header / HTML `<section>`) with:
+
+```markdown
+### Journey: <journey-name> — <pass>/<total> in this journey
+
+<item rows for that journey, in plan order>
+```
+
+Order journeys by appearance order in the plan (which is the planner's chosen sequence). After all journeys, append an "Other" section for items that don't carry a `journey` field. Skip the "Other" section if it's empty.
+
+Items skipped because of `data_from` failure get an explicit visual: `⏭ skipped (upstream t-007 failed)`. Don't render them collapsed identically to ordinary `skipped` items — the reviewer needs to know "this test was INVALIDATED, not opt-out skipped" so they can focus on fixing the upstream first.
+
+In the HTML report, journeys become `<details>` blocks that default open if the journey has any fail items, closed if all-pass. Same logic as per-item details but one level higher.
+
 ## Per-item section
 
 For EACH item, render a `<details>`-collapsed block. Pass items default closed; fail items default open (`<details open>`); skipped items default closed.

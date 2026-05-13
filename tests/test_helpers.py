@@ -573,3 +573,61 @@ def test_plan_item_error_type_unknown_rejected():
                       "risk":"low","depends_on":[], "error_type":"made-up"}]}
     with pytest.raises(SchemaError):
         validate_test_plan(bad)
+
+
+# --- v0.3.23: journey + data_from cross-item dependency -------------------
+
+def test_plan_item_journey_field_accepted():
+    valid = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                        "risk":"low","depends_on":[], "journey":"create-image-reward"}]}
+    validate_test_plan(valid)
+
+
+def test_plan_item_journey_empty_rejected():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":[], "journey":""}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_item_data_from_valid():
+    valid = {"items": [
+        {"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+         "risk":"low","depends_on":[]},
+        {"id":"t-2","category":"api","what":"x","how":"y","tool":"bash",
+         "risk":"low","depends_on":["t-1"], "data_from":["t-1"]},
+    ]}
+    validate_test_plan(valid)
+
+
+def test_plan_item_data_from_unknown_id_rejected():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":["t-9"], "data_from":["t-9"]}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_item_data_from_implies_depends_on():
+    # data_from MUST be in depends_on to enforce ordering.
+    bad = {"items": [
+        {"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+         "risk":"low","depends_on":[]},
+        {"id":"t-2","category":"api","what":"x","how":"y","tool":"bash",
+         "risk":"low","depends_on":[], "data_from":["t-1"]},  # missing in depends_on
+    ]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_item_data_from_self_rejected():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":[], "data_from":["t-1"]}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_item_data_from_must_be_list():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":[], "data_from":"t-9"}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
