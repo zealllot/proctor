@@ -828,14 +828,16 @@ Don't leave SQL as a TODO. Read the codebase, figure out the schema, generate th
 
    **DO NOT assume Python's `bcrypt` module is installed** — it's not in the stdlib. Use the bcrypt that's already on the developer's machine via the project's own toolchain:
 
-   - **If the project is Go** (`go.mod` exists): generate the hash via a tiny inline Go program using `golang.org/x/crypto/bcrypt` — the same library the app uses, and it's already in go.sum because qor/auth pulls it transitively. No new dep:
+   - **If the project is Go** (`go.mod` exists): generate the hash via a tiny inline Go program using `golang.org/x/crypto/bcrypt` — the same library the app uses, and it's already in go.sum because qor/auth pulls it transitively. No new dep.
+
+     **The temp dir MUST live INSIDE the project tree** (not `$TMPDIR` / `/var/folders/...`) so that `go run` can walk up and find the project's `go.mod`. On macOS specifically `mktemp -d -t` lands in `/var/folders/...` and `go run` fails with "no required module provides package...". Use a relative template starting with `./`:
 
      ```bash
      gen_hash() {
-       local tmpgo
-       tmpgo=$(mktemp -t proctor-hash-XXXXXX).go
-       trap "rm -f '$tmpgo'" RETURN
-       cat > "$tmpgo" <<'GO'
+       local tmpdir
+       tmpdir=$(mktemp -d "./.proctor-hash-XXXXXX")
+       trap "rm -rf '$tmpdir'" RETURN
+       cat > "$tmpdir/main.go" <<'GO'
      package main
      import ("fmt"; "os"; "golang.org/x/crypto/bcrypt")
      func main() {
@@ -844,9 +846,11 @@ Don't leave SQL as a TODO. Read the codebase, figure out the schema, generate th
        fmt.Println(string(h))
      }
      GO
-       go run "$tmpgo" "$1"
+       go run "$tmpdir/main.go" "$1"
      }
      ```
+
+     The wizard ALSO appends `.proctor-hash-*/` to `.gitignore` so an interrupted run (Ctrl+C bypasses the trap) doesn't litter `git status`.
 
    - **If the project is Node** (`package.json`): `npx -y bcrypt-cli "$1" 10`.
    - **If the project is Python** (`pyproject.toml` / `requirements*.txt`): inline a check — if `python3 -c 'import bcrypt'` succeeds, use it; otherwise `pip3 install --user bcrypt` then retry, with a friendly error message if both fail.
@@ -1122,7 +1126,10 @@ Read `.gitignore`. For each of these lines, append it ONLY if not already presen
 ```
 .pr-test.local.yml
 .proctor/
+.proctor-hash-*/
 ```
+
+(`.proctor-hash-*/` covers the in-tree temp dirs the Go-stack `gen_hash` helper creates during seed-script runs. The script's `trap RETURN rm -rf` cleans them up under normal exit; this gitignore line covers the Ctrl+C case.)
 
 ### 8d — Patch `.github/workflows/proctor.yml` (DO NOT overwrite)
 

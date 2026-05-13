@@ -2,6 +2,18 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.13 — 2026-05-13
+
+### Seed script: temp dir must live inside project tree (Go module resolution)
+- **Bug**: v0.3.10's Go-stack `gen_hash` used `mktemp -d -t proctor-hash-XXXXXX` (with `-t`), which on macOS lands in `/var/folders/...`. The temp `main.go` there is OUTSIDE the project tree, so `go run` walking up for `go.mod` never finds the project's manifest and fails with `no required module provides package golang.org/x/crypto/bcrypt`. PRoctor self-diagnosed this when running its own scenarios on mcd-website and patched the seed script in place — that fix is being upstreamed.
+- **Fix**: temp dir created INSIDE the project tree via `mktemp -d "./.proctor-hash-XXXXXX"`. `go run` walks up and finds the project's `go.mod`. `trap RETURN rm -rf` cleans up on normal exit; `.gitignore` adds `.proctor-hash-*/` for the Ctrl+C-doesn't-clean-up case.
+- **Why this matters**: Go's module resolution requires the source file's containing-dir-or-ancestor to have a `go.mod`. There's no way to override that from the command line. The only options are:
+  1. Put the temp source inside the project tree (chosen — minimal change).
+  2. Commit a permanent helper at `hack/proctor-bcrypt/main.go` and build-then-run (more noise in the project, but no temp dirs).
+  3. Use a different bcrypt source (Python — broken on macOS PEP 668; `htpasswd` — not always installed).
+  
+  Option 1 wins on simplicity.
+
 ## v0.3.12 — 2026-05-13
 
 ### Seed script: embed `setup:` block so PRoctor auto-starts the local server
