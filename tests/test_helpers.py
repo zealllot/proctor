@@ -1024,6 +1024,153 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.3.37: worktree-based PR-head alignment ---------------------------
+
+from plugins.proctor.scripts.worktree import setup as wt_setup, teardown as wt_teardown
+
+
+def _init_repo_with_commits(repo_path):
+    """Create a tiny git repo with two commits and a 'PR-like' branch
+    at the second commit. Returns (initial_sha, pr_sha)."""
+    sp = subprocess
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo_path, check=True)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=repo_path, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo_path, check=True)
+    sp.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_path, check=True)
+    (repo_path / "file.txt").write_text("initial\n")
+    sp.run(["git", "add", "."], cwd=repo_path, check=True)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_path, check=True)
+    initial_sha = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (repo_path / "file.txt").write_text("pr content\n")
+    sp.run(["git", "add", "."], cwd=repo_path, check=True)
+    sp.run(["git", "commit", "-q", "-m", "pr commit"], cwd=repo_path, check=True)
+    pr_sha = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    # Reset main to initial so HEAD is at initial; PR sha is reachable
+    # through the reflog (the tests below pass the SHA directly).
+    sp.run(["git", "reset", "--hard", initial_sha], cwd=repo_path, check=True)
+    return initial_sha, pr_sha
+
+
+def test_worktree_setup_creates_aligned_checkout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    # Worktree is checked out at the PR sha.
+    head = subprocess.run(
+        ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == pr_sha
+    # The worktree's file has PR content, not initial.
+    assert (wt_path / "file.txt").read_text() == "pr content\n"
+    # Marker file recorded the path.
+    marker = run_dir / "worktree-path.txt"
+    assert marker.exists()
+    assert marker.read_text().strip() == str(wt_path.resolve())
+
+
+def test_worktree_setup_idempotent_when_sha_matches(tmp_path):
+    """Calling setup twice at the same SHA shouldn't error or
+    recreate."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt1 = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                   repo_root=repo)
+    wt2 = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                   repo_root=repo)
+    assert wt1 == wt2
+
+
+def test_worktree_setup_copies_pr_test_local_yml(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # Drop a gitignored local config in the repo.
+    (repo / ".pr-test.local.yml").write_text("setup: [echo hi]\n")
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    copied = wt_path / ".pr-test.local.yml"
+    assert copied.exists()
+    assert copied.read_text() == "setup: [echo hi]\n"
+
+
+def test_worktree_setup_no_local_yml_is_fine(tmp_path):
+    """If the dev hasn't created .pr-test.local.yml, setup shouldn't
+    error — just create the worktree without it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    assert not (wt_path / ".pr-test.local.yml").exists()
+
+
+def test_worktree_teardown_removes_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    assert wt_path.exists()
+    wt_teardown(run_dir=run_dir, repo_root=repo)
+    assert not wt_path.exists()
+    # Marker file removed.
+    assert not (run_dir / "worktree-path.txt").exists()
+
+
+def test_worktree_teardown_no_marker_is_noop(tmp_path):
+    """Teardown when no setup ever happened should be a quiet no-op
+    (covers the cur_head == pr_head case where setup is skipped)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
+    # No marker, no worktree — should not raise.
+    wt_teardown(run_dir=run_dir, repo_root=repo)
+
+
+def test_worktree_setup_recreates_when_sha_differs(tmp_path):
+    """If the existing worktree is at a different SHA than requested
+    (rare but possible — e.g. force-push between two runs in the same
+    run dir, or manual interference), tear it down and recreate."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initial_sha, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_setup(run_dir=run_dir, pr_number=99, head_sha=initial_sha,
+             repo_root=repo)
+    # Now call setup with the OTHER sha — should recreate.
+    new_wt = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                      repo_root=repo)
+    head = subprocess.run(
+        ["git", "-C", str(new_wt), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == pr_sha
+
+
 def test_plan_smells_warnings_sorted_for_stability():
     plan = {"items": [
         {"id": "t-005", "category": "api", "tool": "chrome-devtools",

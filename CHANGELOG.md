@@ -2,6 +2,40 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.37 — 2026-05-13
+
+### Auto-checkout via worktree — chrome-devtools tests run against PR head, not user's branch
+
+User trace on v0.3.36 showed an "ideal" plan (14 items, schema-clean, plan_smells-clean) get a result of 6 pass / 0 fail / **8 skipped** all with `reason: "branch-mismatch"`. The diagnosis was correct (local dev server was running user's `ci/proctor-v0.3-migrate` branch, not PR #1115's `mdx-12639-support-new-digital-reward-type`), but the friction was unacceptable: the user had to manually stash, fetch, checkout, restart their dev server, run PRoctor, then restore. For every PR they test.
+
+This release adds automatic PR-aligned worktree management to the executor so chrome-devtools tests always run against the PR's code, without touching the user's working tree.
+
+**New helper** (`plugins/proctor/scripts/worktree.py`):
+- `setup --run-dir <dir> --pr-number <n> --head-sha <sha>` — creates `.proctor/runs/<run-id>/pr-checkout/` as a detached-HEAD worktree at PR's head SHA.
+  - Fetches `pull/<n>/head` from origin if the SHA isn't already in local objects.
+  - Verifies the fetched SHA matches the captured `pr.head_sha` — surfaces force-push corruption loudly instead of silently testing the wrong commit.
+  - Copies `.pr-test.local.yml` from the original repo into the worktree (gitignored file, carries the dev's setup commands + credentials).
+  - Detached HEAD avoids claiming the PR's branch name in the user's repo.
+  - Idempotent: if worktree at the right SHA already exists, no-op. If at the wrong SHA (e.g. force-push between runs), tear down + recreate.
+- `teardown --run-dir <dir>` — `git worktree remove --force` and unlink the marker file. Best-effort; failures don't abort the run.
+
+**Executor flow** (`executing-pr-tests/SKILL.md`):
+- Step 2 (newly numbered): align worktree before setup. If `git rev-parse HEAD == pr.head_sha`, skip the worktree entirely (`WORKTREE_DIR=$(pwd)`). Otherwise create one.
+- Step 2b: setup commands run with `cwd=$WORKTREE_DIR`. Auth + chrome-devtools items inherit the same cwd.
+- Step 5 (cleanup): teardown the worktree regardless of pass/fail. If user was already at PR head, this is a no-op.
+- CI mode skips the worktree entirely — the CI test env is already deployed at PR head via the workflow.
+
+### What changes for the developer
+
+- No more `git stash + checkout + restart server + run + restore` dance.
+- `/proctor:proctor <PR>` from any branch with any working-tree state Just Works™.
+- The temporary worktree at `.proctor/runs/<run-id>/pr-checkout/` is the only directory PRoctor writes to outside its run dir. After teardown it's gone.
+- Dev's `.pr-test.local.yml` is copied into the worktree — same auth + setup runs as before. Other gitignored files (`.env`, `node_modules/`, etc.) are NOT copied; if the consumer's setup needs them, declare them or rebuild from source.
+- If the PR was force-pushed since PRoctor captured `pr.head_sha`, the fetch sanity-check fails loudly with a "was the PR force-pushed?" message rather than silently testing the wrong commit.
+
+### Tests
+- 163 → 170 (+7): worktree created at expected SHA, .pr-test.local.yml copied, missing local-yml is fine, idempotent on same SHA, recreate on different SHA, teardown removes worktree + marker, teardown no-op when marker absent.
+
 ## v0.3.36 — 2026-05-13
 
 ### plan_smells vocabulary expansion + reload-sibling self-flag fix

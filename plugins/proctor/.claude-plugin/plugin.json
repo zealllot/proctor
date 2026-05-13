@@ -1,6 +1,6 @@
 {
   "name": "proctor",
-  "version": "0.3.36",
+  "version": "0.3.37",
   "description": "PRoctor — AI-driven PR test runner. Analyzes a GitHub PR, plans tests, executes them via chrome-devtools/Bash, auto-fixes failures with a fix PR, and reports back as a PR comment.",
   "author": {
     "name": "zealllot",

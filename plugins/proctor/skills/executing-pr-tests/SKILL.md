@@ -25,8 +25,32 @@ Output: a single `TestResults` JSON object.
    The command-level orchestrator will detect `aborted` and skip fix +
    replace report with a force-push notice.
 
-2. **Run setup** from the merged config. Each command via Bash. If any
-   exits non-zero → abort with `aborted: "setup-failed"`.
+2. **Align to PR head via worktree** (v0.3.37+, local mode only). Before running setup, check whether the dev's checkout is at the PR's head SHA. If it isn't, set up an ephemeral worktree so the dev server compiles + runs PR's code, not the user's current branch's code.
+
+   ```bash
+   cur_head=$(git rev-parse HEAD)
+   pr_head="<value from pr.head_sha>"
+   if [ "$cur_head" = "$pr_head" ]; then
+       WORKTREE_DIR="$(pwd)"   # already aligned, no worktree needed
+   else
+       WORKTREE_DIR=$(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/worktree.py setup \
+           --run-dir .proctor/runs/<run-id> \
+           --pr-number <pr.number> \
+           --head-sha "$pr_head")
+   fi
+   ```
+
+   The helper:
+   - Fetches `pull/<n>/head` if the SHA isn't already in local objects.
+   - Creates a detached-HEAD worktree at `.proctor/runs/<run-id>/pr-checkout/`.
+   - Copies `.pr-test.local.yml` from the original repo into the worktree (it's gitignored, so it wouldn't otherwise be present — but the dev's setup commands + credentials live there).
+   - Prints the absolute worktree path on stdout.
+
+   On failure (PR force-pushed since plan was captured, fetch unavailable, etc.), the helper raises; abort the run with `aborted: "worktree-setup-failed"`.
+
+   In CI mode (no local dev server — `auth:` present, `setup:` empty), skip this step entirely. The CI test env is already deployed at the PR's SHA via the workflow.
+
+2b. **Run setup** from the merged config, with cwd set to `$WORKTREE_DIR`. Each command via Bash. If any exits non-zero → abort with `aborted: "setup-failed"`.
 
    The merged config is `.pr-test.yml` overlaid by `.pr-test.local.yml`
    when the latter exists (the file is gitignored — only developers
@@ -171,6 +195,22 @@ Output: a single `TestResults` JSON object.
    in legacy mode, also kill setup processes by sending SIGTERM to
    the process group started by setup commands (use `setsid` to start
    them; track the PIDs in `<logs_dir>/setup.pids`).
+
+   Then **tear down the worktree** (v0.3.37+) regardless of pass/fail:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/worktree.py teardown \
+       --run-dir .proctor/runs/<run-id>
+   ```
+
+   The helper is best-effort: if the worktree has untracked files or
+   a process still holds a file, `git worktree remove --force` will
+   fail and the marker file `worktree-path.txt` stays for the dev to
+   clean up manually. Do NOT fail the run for a teardown error —
+   it's not a test result, and the worktree is in the run's own
+   directory so it can't accumulate dangerous garbage across runs.
+   When the original cwd was already at PR head (no worktree was
+   created), this teardown is a no-op.
 
 6. Compute `summary` counters by walking `items`. Validate with
    `schema.py:validate_test_results`. Emit one JSON object.
