@@ -1,0 +1,16 @@
+{
+  "name": "zealllot-proctor",
+  "description": "PRoctor — AI-driven PR test runner as a Claude Code plugin. Drives a real browser against a running admin (deployed test env or developer's localhost), auto-logs in with form + TOTP, runs role-aware checks per PR.",
+  "owner": {
+    "name": "zealllot",
+    "url": "https://github.com/zealllot"
+  },
+  "plugins": [
+    {
+      "name": "proctor",
+      "source": "./plugins/proctor",
+      "description": "AI-driven PR test runner — Claude Code plugin. Analyze diff → plan tests → execute (chrome-devtools/Bash) → auto-fix → report comment. v0.3+ supports auto-login (form + TOTP) against deployed test envs with multi-role admin accounts.",
+      "version": "0.3.1"
+    }
+  ]
+}
