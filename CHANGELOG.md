@@ -2,6 +2,13 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.11 — 2026-05-13
+
+### Seed script: bash 3.2 compatible (macOS default `/bin/bash`)
+- **Bug**: v0.3.6–0.3.10's seed script used `declare -A` (associative arrays) — a bash 4+ feature. macOS ships bash 3.2 as `/bin/bash`; `#!/usr/bin/env bash` resolves to whatever's first in PATH, and many dev machines hit the system one. On bash 3.2, `declare -A` silently no-ops, then `[developer]=` is interpreted as INDEXED-array arithmetic indexing → `developer` evaluated as a variable → `set -u` errors with "developer: unbound variable". Reported by zealot@theplant.jp.
+- **Fix**: rewrite to use parallel indexed arrays (`ROLES=(a b c)`, `EMAILS=(...)`, `SEEDS=()`) iterated by `for i in "${!ROLES[@]}"`. Works identically on bash 3.2 through 5.x. No platform-specific shebang gymnastics needed.
+- **The TOTP seeds are now generated *inside* the loop** instead of upfront — so a partial-run failure leaves a clean state (re-run = fresh seeds, no half-written `.pr-test.local.yml`).
+
 ## v0.3.10 — 2026-05-13
 
 ### Seed script: use the project's own bcrypt, not Python's
