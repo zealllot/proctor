@@ -2,6 +2,18 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.15 — 2026-05-13
+
+### Approval gate: render the plan as a markdown table, not a one-line summary
+- **Bug**: at the local-mode approval gate, PRoctor was presenting "10 items: 3 lint-only + 2 bash + 5 chrome-devtools — Run all?" with no per-item visibility. The user couldn't tell what each item actually tested without `cat`-ing `test-plan.json` themselves or trusting the AI blindly. Reported by zealot@theplant.jp.
+- **Fix**: the orchestrator now MUST render the full plan as a markdown table to chat BEFORE invoking AskUserQuestion. Columns: id / category / risk / tool / as_account / what (one-sentence). Below the table, a rough cost/time estimate.
+- **AskUserQuestion simplified to a 3-way decision** (was implicit "uncheck unwanted ones" which didn't actually fit AskUserQuestion's multi-select shape for 10+ items):
+  - Run all (Recommended)
+  - Drop specific items (follow-up free-text question for IDs)
+  - Cancel — let me edit the plan first (abort + invite hand-edit + re-invoke)
+
+Now the user gets a scannable view of "what AI is about to do" and can intervene at item granularity.
+
 ## v0.3.14 — 2026-05-13
 
 ### Orchestrator: stop pausing between stages

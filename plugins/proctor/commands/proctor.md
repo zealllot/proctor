@@ -117,8 +117,33 @@ is for.
 
 ### 6. Approval gate
 
-Local mode: use `AskUserQuestion` to present each test item; the user
-unchecks unwanted ones. Save filtered plan as
+**Before invoking AskUserQuestion, print the full plan as a markdown table to chat.** A one-line summary like "3 lint-only + 2 bash + 5 chrome-devtools" doesn't give the user enough information to make a meaningful decision; they're either rubber-stamping "Run all" or rejecting blindly. The table is what lets them spot "wait, t-007 is testing the wrong thing" or "skip t-009, that endpoint isn't deployed yet".
+
+Required format:
+
+```markdown
+## Plan for PR #<num> — <total> items
+
+| # | Cat | Risk | Tool | As | What |
+|---|---|---|---|---|---|
+| t-001 | api | low | lint-only | dev | Proto enum DigitalContentType declared (IMAGE/GAME values) |
+| t-002 | api | low | lint-only | dev | model.DigitalContentType correctly mapped to proto enum |
+| t-003 | api | medium | bash | dev | `go vet ./mcd-service_api/...` clean after changes |
+| t-004 | api | high | chrome-devtools | dev | Admin form renders Image + Game radio + dependent fields |
+| t-005 | api | high | chrome-devtools | dev | Save Image reward end-to-end: form → DB → publish |
+| ... |
+```
+
+Render EVERY item's `id` / `category` / `risk` / `tool` / `as_account` (or "—" if unset) / a *concise* version of `what` (one sentence; if the original is longer, summarize — but keep accuracy). Don't truncate; let it wrap.
+
+Below the table, render the cost / time estimate if you can compute one (rough: lint-only ≈ 5s each, bash ≈ 30s, chrome-devtools ≈ 60s each; total time is one line, dollar cost is `~$0.05 × runtime_items`).
+
+THEN call AskUserQuestion with simple, decisive options:
+- **Run all <N> items** (Recommended)
+- **Drop specific items** — opens a follow-up free-text question for the IDs to skip (`t-002 t-007`)
+- **Cancel — let me edit the plan first** — abort run; user can hand-edit `.proctor/runs/<run-id>/test-plan.json` and re-invoke `/proctor:proctor`
+
+Save filtered plan as
 `.proctor/runs/<run-id>/approved-plan.json`.
 
 CI mode, `require_approval: false`: copy plan → approved-plan, post
