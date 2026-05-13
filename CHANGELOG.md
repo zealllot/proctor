@@ -2,6 +2,31 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.0 — 2026-05-13
+
+### Added (major: existing-env mode + multi-role testing)
+- **Auth block in `.pr-test.yml`** — `auth.type: form_with_totp` lets PRoctor log into the deployed test env (or developer's localhost) as a real admin, including 2FA. No more CI bring-up needed for runtime tests. Configure once: login URL, four CSS selectors (email/password/totp/submit), and an array of admin accounts. PRoctor performs the login flow before any chrome-devtools item runs.
+- **Multi-account, role-aware planning + execution.** `.pr-test.yml.auth.accounts[]` declares each admin role you want PRoctor to test under (`developer`, `editor`, `viewer`, …). Each account has a `role_label` for planner context. Plan items can carry an optional `as_account: <name>` field to target a specific role; when omitted, the executor defaults to `accounts[0]`. The executor groups items by `as_account`, performs one login per group, and never lets cookies leak across roles. Especially valuable for diffs that change permission logic — the planner can emit the SAME check as multiple items with different expected outcomes per role.
+- **`.pr-test.local.yml` overlay.** Per-developer overrides (different `base_url`, different env var names) live in `.pr-test.local.yml` and are gitignored. PRoctor deep-merges it over `.pr-test.yml` at load time. Dicts merge key-by-key recursively; lists REPLACE (the `accounts` array specifically — partial overlay of credentials would cause confusing silent fallthroughs). Matches the `.env` / `.env.local` pattern many tools use.
+- **`scripts/totp.py` helper.** Pure-stdlib RFC 6238 TOTP code generator (HMAC-SHA1, 30-second step, 6 digits — Google Authenticator / Authy / 1Password / qor-auth defaults). Padding-tolerant for base32 seeds copied from QR codes. The executor calls this when a login form requires 2FA: `python3 $CLAUDE_PLUGIN_ROOT/scripts/totp.py "$SEED"`.
+
+### Wizard
+- **`/proctor-init` gains an "existing-env path".** New Q0 at the top asks "test against existing running server, or bring up a fresh server in CI?". The existing-env path skips DB / setup / Postgres detection entirely and walks a much shorter flow: login form selectors, number of admin roles, per-account env-var names, base URL. Generates a smaller `.pr-test.yml` (auth block only — no setup commands) plus a `.pr-test.local.yml.example` for developers to copy.
+- Wizard automatically appends `.pr-test.local.yml` and `.proctor/` to `.gitignore`.
+- Per-account secret walkthrough at the end: for every account, prompts user (in their own shell, never seeing the value) to set 3 secrets via `gh secret set`. Reminds them the TOTP value is the **base32 seed under the QR code**, not the 6-digit code.
+
+### Schema additions (`plugins/proctor/scripts/schema.py`)
+- `validate_pr_test_config(cfg)` — strict validation of the auth block when present (type, login_url, all four selectors, accounts array with unique names and required env var fields). Permissive when auth is absent (legacy/CI-bring-up mode unchanged).
+- `validate_test_plan_account_refs(plan, cfg)` — second-pass check that every `item.as_account` references a real account name.
+- `load_config(repo_root)` — loads `.pr-test.yml` and merges `.pr-test.local.yml` over it via `_deep_merge_overlay`.
+- `validate_test_plan` now also enforces `as_account` is a non-empty string when set.
+
+### Tests
+- 16 new unit tests covering: legacy-mode config (no auth), full auth + multi-account, rejection of unknown auth type / missing selectors / empty accounts / duplicate names, plan account-ref cross-validation, deep merge semantics (dict recurse / list replace / scalar override), TOTP RFC 6238 test vector, base32 padding tolerance, 30-second step behavior. Total suite: 30 → 46.
+
+### Not changed (backwards compat)
+- Existing v0.2.x consumers without `auth:` in their `.pr-test.yml` see no behavior change. The legacy `setup:` / `base_url` flow still works for CI bring-up; the wizard still offers that path when explicitly chosen.
+
 ## v0.2.14 — 2026-05-11
 
 ### Fixed

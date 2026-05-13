@@ -8,6 +8,9 @@ correctness (e.g. whether a SHA actually exists in the repo).
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 VALID_CATEGORIES = {
     "frontend", "api", "schema", "infra",
     "mobile", "cli", "e2e-flow", "docs",
@@ -15,6 +18,17 @@ VALID_CATEGORIES = {
 VALID_RISK = {"low", "medium", "high"}
 VALID_TOOL = {"chrome-devtools", "bash", "curl", "lint-only", "skip"}
 VALID_STATUS = {"pass", "fail", "skipped"}
+
+# Auth types accepted in .pr-test.yml's auth.type field. Add new values
+# here when adding support for other login mechanisms (oauth, magic
+# link, etc.); each new value needs a corresponding flow in the
+# executing-pr-tests skill.
+VALID_AUTH_TYPES = {"form_with_totp"}
+
+# Required form selectors when auth.type == "form_with_totp". Each value
+# must be a CSS selector that uniquely identifies the relevant DOM node
+# on the consumer's actual login page.
+_FORM_TOTP_SELECTOR_KEYS = {"email", "password", "totp", "submit"}
 
 
 class SchemaError(ValueError):
@@ -111,6 +125,14 @@ def validate_test_plan(tp: dict) -> None:
         for dep in item["depends_on"]:
             _require(dep != item["id"],
                      f"TestPlan.items[{i}] cannot depend on itself")
+        # `as_account` (v0.3.0+) optional — references which configured
+        # admin account to run this item under. When omitted, the
+        # executor defaults to auth.accounts[0]. Cross-referencing
+        # against the actual account list happens via
+        # validate_test_plan_account_refs(plan, cfg).
+        if "as_account" in item and item["as_account"] is not None:
+            _require(isinstance(item["as_account"], str) and item["as_account"].strip(),
+                     f"TestPlan.items[{i}].as_account must be a non-empty string if set")
 
     # Second pass: every depends_on entry must reference a known id.
     for i, item in enumerate(tp["items"]):
@@ -162,3 +184,114 @@ def validate_fix_pr_ref(ref) -> None:
     _require_keys(ref, {"number", "url", "branch", "covers"}, "FixPRRef")
     _require(isinstance(ref["covers"], list) and len(ref["covers"]) > 0,
              "FixPRRef.covers must be non-empty list")
+
+
+# ---------------------------------------------------------------------------
+# .pr-test.yml validation (v0.3.0+) + .pr-test.local.yml overlay loading.
+# ---------------------------------------------------------------------------
+
+def validate_pr_test_config(cfg: dict) -> None:
+    """Validate the merged `.pr-test.yml` (+ optional `.pr-test.local.yml`
+    overlay). Auth block is optional — when omitted, PRoctor runs in the
+    legacy "no-login" mode (driven by the consumer's `setup:` block, which
+    might start a fresh server with bypassed auth). When auth is present,
+    every required sub-key is enforced strictly so consumers get loud
+    feedback instead of a silent misconfiguration mid-run."""
+    _require(isinstance(cfg, dict), ".pr-test.yml: must be a mapping")
+
+    auth = cfg.get("auth")
+    if auth is None:
+        return  # legacy mode, nothing more to check at config level
+    _require(isinstance(auth, dict), ".pr-test.yml.auth: must be a mapping")
+    _require_keys(auth, {"type", "login_url", "selectors", "accounts"},
+                  ".pr-test.yml.auth")
+    _require(auth["type"] in VALID_AUTH_TYPES,
+             f".pr-test.yml.auth.type {auth['type']!r} not in {sorted(VALID_AUTH_TYPES)}")
+
+    if auth["type"] == "form_with_totp":
+        sel = auth["selectors"]
+        _require(isinstance(sel, dict), ".pr-test.yml.auth.selectors: must be a mapping")
+        missing = _FORM_TOTP_SELECTOR_KEYS - set(sel.keys())
+        _require(not missing,
+                 f".pr-test.yml.auth.selectors: missing keys {sorted(missing)}")
+        for k in _FORM_TOTP_SELECTOR_KEYS:
+            _require(isinstance(sel[k], str) and sel[k].strip(),
+                     f".pr-test.yml.auth.selectors.{k}: must be a non-empty string")
+
+    accs = auth["accounts"]
+    _require(isinstance(accs, list) and len(accs) > 0,
+             ".pr-test.yml.auth.accounts: must be a non-empty list")
+    seen_names: set[str] = set()
+    for i, a in enumerate(accs):
+        label = f".pr-test.yml.auth.accounts[{i}]"
+        _require(isinstance(a, dict), f"{label}: must be a mapping")
+        _require_keys(a, {"name", "email_env", "password_env", "totp_seed_env"}, label)
+        for k in ("name", "email_env", "password_env", "totp_seed_env"):
+            _require(isinstance(a[k], str) and a[k].strip(),
+                     f"{label}.{k}: must be a non-empty string")
+        _require(a["name"] not in seen_names,
+                 f"{label}.name {a['name']!r} duplicates an earlier account; "
+                 "names must be unique")
+        seen_names.add(a["name"])
+
+
+def validate_test_plan_account_refs(plan: dict, cfg: dict) -> None:
+    """When `cfg.auth.accounts` is set, every plan item's optional
+    `as_account` field must reference a real account name. This catches
+    typos like `as_account: editer` early instead of mid-execution."""
+    auth = (cfg or {}).get("auth")
+    if not auth:
+        return
+    valid = {a["name"] for a in auth["accounts"]}
+    for i, item in enumerate(plan.get("items", [])):
+        if "as_account" in item and item["as_account"] is not None:
+            _require(item["as_account"] in valid,
+                     f"TestPlan.items[{i}].as_account {item['as_account']!r} "
+                     f"not in auth.accounts ({sorted(valid)})")
+
+
+# ---------------------------------------------------------------------------
+# Config loader: .pr-test.yml + optional .pr-test.local.yml overlay.
+# ---------------------------------------------------------------------------
+
+def _deep_merge_overlay(base: dict, overlay: dict) -> dict:
+    """Merge `overlay` over `base`. Dicts merge key-by-key recursively;
+    lists in overlay REPLACE lists in base (we deliberately do not
+    element-merge `accounts` — that would mix dev-only env vars with
+    test-env ones and produce confusing silent partial overrides).
+    Scalars in overlay win."""
+    out = dict(base)
+    for k, v in overlay.items():
+        if (
+            k in out
+            and isinstance(out[k], dict)
+            and isinstance(v, dict)
+        ):
+            out[k] = _deep_merge_overlay(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config(repo_root: str | os.PathLike[str] = ".") -> dict:
+    """Load the merged PRoctor config for the repo at `repo_root`.
+
+    Reads `.pr-test.yml`; if `.pr-test.local.yml` exists, deep-merges it
+    on top so per-developer overrides (different `base_url`, different
+    secret env var names) take effect without touching the committed file.
+
+    Returns the merged config dict. Does NOT validate — callers should
+    pipe the result through `validate_pr_test_config` before use."""
+    import yaml  # local import — schema.py shouldn't pay yaml cost unless config is loaded
+
+    root = Path(repo_root)
+    base_path = root / ".pr-test.yml"
+    if not base_path.exists():
+        raise FileNotFoundError(f".pr-test.yml not found under {root}")
+    base = yaml.safe_load(base_path.read_text()) or {}
+
+    local_path = root / ".pr-test.local.yml"
+    if local_path.exists():
+        overlay = yaml.safe_load(local_path.read_text()) or {}
+        return _deep_merge_overlay(base, overlay)
+    return base

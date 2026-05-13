@@ -336,3 +336,140 @@ def test_gh_with_retry_re_raises_non_rate_limit(monkeypatch):
     monkeypatch.setattr(pr_fetch.subprocess, "check_output", fake)
     with pytest.raises(subprocess.CalledProcessError):
         pr_fetch._gh_with_retry(["gh", "pr", "view", "1"])
+
+
+# --- v0.3.0: auth block + multi-account + local overlay ----------------------
+
+from plugins.proctor.scripts.schema import (
+    validate_pr_test_config,
+    validate_test_plan_account_refs,
+    _deep_merge_overlay,
+)
+from plugins.proctor.scripts import totp
+
+
+_VALID_AUTH = {
+    "type": "form_with_totp",
+    "login_url": "/auth/login",
+    "selectors": {
+        "email": "input[name=login]",
+        "password": "input[name=password]",
+        "totp": "input[name=passcode]",
+        "submit": "button[type=submit]",
+    },
+    "accounts": [
+        {"name": "dev", "email_env": "D_E", "password_env": "D_P", "totp_seed_env": "D_T"},
+        {"name": "editor", "email_env": "E_E", "password_env": "E_P", "totp_seed_env": "E_T"},
+    ],
+}
+
+
+def test_pr_test_config_legacy_no_auth_ok():
+    validate_pr_test_config({})
+    validate_pr_test_config({"setup": ["echo hi"], "base_url": "http://x"})
+
+
+def test_pr_test_config_full_auth_ok():
+    validate_pr_test_config({"auth": _VALID_AUTH})
+
+
+def test_pr_test_config_rejects_unknown_auth_type():
+    bad = {"auth": dict(_VALID_AUTH, type="oauth2")}
+    with pytest.raises(SchemaError):
+        validate_pr_test_config(bad)
+
+
+def test_pr_test_config_rejects_missing_selector():
+    sel = dict(_VALID_AUTH["selectors"])
+    del sel["totp"]
+    bad = {"auth": dict(_VALID_AUTH, selectors=sel)}
+    with pytest.raises(SchemaError):
+        validate_pr_test_config(bad)
+
+
+def test_pr_test_config_rejects_empty_accounts():
+    bad = {"auth": dict(_VALID_AUTH, accounts=[])}
+    with pytest.raises(SchemaError):
+        validate_pr_test_config(bad)
+
+
+def test_pr_test_config_rejects_duplicate_account_names():
+    bad = {"auth": dict(_VALID_AUTH, accounts=[
+        _VALID_AUTH["accounts"][0],
+        dict(_VALID_AUTH["accounts"][0], email_env="OTHER"),
+    ])}
+    with pytest.raises(SchemaError):
+        validate_pr_test_config(bad)
+
+
+def test_plan_account_ref_ok():
+    plan = {"items": [{"id": "t-1", "category": "api", "what": "x", "how": "y",
+                       "tool": "bash", "risk": "low", "depends_on": [],
+                       "as_account": "editor"}]}
+    validate_test_plan_account_refs(plan, {"auth": _VALID_AUTH})
+
+
+def test_plan_account_ref_unknown_rejected():
+    plan = {"items": [{"id": "t-1", "category": "api", "what": "x", "how": "y",
+                       "tool": "bash", "risk": "low", "depends_on": [],
+                       "as_account": "ghost"}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan_account_refs(plan, {"auth": _VALID_AUTH})
+
+
+def test_plan_account_ref_no_auth_means_no_check():
+    plan = {"items": [{"id": "t-1", "category": "api", "what": "x", "how": "y",
+                       "tool": "bash", "risk": "low", "depends_on": [],
+                       "as_account": "anything"}]}
+    # No auth in cfg → no enforcement (legacy mode is permissive).
+    validate_test_plan_account_refs(plan, {})
+
+
+def test_plan_item_as_account_must_be_nonempty_string():
+    bad_plan = {"items": [{"id": "t-1", "category": "api", "what": "x", "how": "y",
+                           "tool": "bash", "risk": "low", "depends_on": [],
+                           "as_account": ""}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad_plan)
+
+
+def test_deep_merge_scalar_overrides():
+    out = _deep_merge_overlay({"a": 1, "b": 2}, {"a": 9})
+    assert out == {"a": 9, "b": 2}
+
+
+def test_deep_merge_dict_recurses():
+    out = _deep_merge_overlay({"x": {"a": 1, "b": 2}}, {"x": {"b": 9, "c": 3}})
+    assert out == {"x": {"a": 1, "b": 9, "c": 3}}
+
+
+def test_deep_merge_list_replaces():
+    # Lists must REPLACE, not append — accounts arrays would otherwise
+    # accumulate dev-only entries on top of base test-env entries and
+    # cause silent partial overrides.
+    out = _deep_merge_overlay({"accounts": [1, 2, 3]}, {"accounts": [9]})
+    assert out == {"accounts": [9]}
+
+
+# --- totp helper ------------------------------------------------------------
+
+def test_totp_rfc6238_test_vector_truncated_to_6():
+    # RFC 6238 test vector: ASCII '12345678901234567890' at t=59 → 94287082
+    # (8-digit). Truncated to 6 digits → 287082.
+    rfc_seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # base32 of 20-byte ASCII seed
+    assert totp.code(rfc_seed, 59) == "287082"
+
+
+def test_totp_padding_tolerant():
+    # Google Authenticator QR strings often omit `=` padding. Helper must
+    # accept both.
+    seed_padded = "JBSWY3DPEHPK3PXP"           # padded form
+    seed_unpad  = "JBSWY3DPEHPK3PXP"           # already aligned to 8
+    assert totp.code(seed_padded, 0) == totp.code(seed_unpad, 0)
+
+
+def test_totp_changes_with_time_step():
+    seed = "JBSWY3DPEHPK3PXP"
+    # 30-second step: t=0 and t=29 share a code; t=30 differs.
+    assert totp.code(seed, 0) == totp.code(seed, 29)
+    assert totp.code(seed, 0) != totp.code(seed, 30)

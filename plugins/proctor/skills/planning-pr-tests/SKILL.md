@@ -108,6 +108,25 @@ mark `risk: high` so the operator sees an environment was missing.
    - When `requirement_hints` and the diff disagree, plan items for BOTH: one that verifies the body's stated behavior, one that verifies the diff's actual behavior. The mismatch is itself useful signal in the report.
    - If `pr_context` is empty or absent, fall back to inferring tests from the diff alone — same as before.
 
+## Role-aware planning (when `.pr-test.yml` has `auth.accounts`)
+
+If the consumer's `.pr-test.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.
+
+Each item may carry an optional `as_account: <name>` field that references one of the `auth.accounts[].name` values. When omitted, the executor uses `accounts[0]` (by convention the highest-privilege account).
+
+Use `auth.accounts[].role_label` for context — it's a one-line human description of what each role can do (e.g. `"Developer (full admin)"` vs `"Editor (content only)"` vs `"Read-only viewer"`). Read those labels to decide which account each item should run as.
+
+When to plan multi-role items (same behavior, multiple accounts):
+
+- **The diff changes a permission check, role definition, or visibility rule** → plan the same check as several items, one per relevant account, with expected outcomes that DIFFER per role. Example: a diff adds `if !user.IsDeveloper { hide(deleteButton) }` — plan three items:
+  - `t-002` as `developer`: delete button IS visible
+  - `t-003` as `editor`:    delete button is NOT visible
+  - `t-004` as `viewer`:    delete button is NOT visible
+- **The diff adds a feature that's only meaningful for certain roles** → plan as the role(s) that actually see the feature, plus one negative item from a lower role.
+- **The diff is role-agnostic** (schema migration, layout polish, doc update) → leave `as_account` unset; everything runs as `accounts[0]`. Do NOT explode trivially-role-invariant items across all accounts; that just multiplies cost.
+
+Phrasing tip: when an item is role-specific, put the role in the `what:` field — e.g. `what: "As editor, delete button is hidden on /admin/users/:id"`. Makes the report easy to scan.
+
 ## Output JSON shape
 
 ```jsonc
@@ -121,6 +140,17 @@ mark `risk: high` so the operator sees an environment was missing.
       "tool": "chrome-devtools",
       "risk": "low",
       "depends_on": []
+      // "as_account" omitted → executor uses accounts[0]
+    },
+    {
+      "id": "t-002",
+      "category": "frontend",
+      "what": "As editor, Users menu item is hidden",
+      "how": "Navigate to /admin; assert no nav link with text 'Users'",
+      "tool": "chrome-devtools",
+      "risk": "medium",
+      "depends_on": [],
+      "as_account": "editor"   // requires .pr-test.yml.auth.accounts[].name=='editor'
     }
   ]
 }
@@ -131,3 +161,4 @@ mark `risk: high` so the operator sees an environment was missing.
 - Emit exactly one JSON object. No prose.
 - IDs must be unique. `depends_on` must reference IDs that exist in the same plan.
 - `tool` must be one of: `chrome-devtools`, `bash`, `curl`, `lint-only`, `skip`.
+- When set, `as_account` must equal one of `auth.accounts[].name` values from `.pr-test.yml`. The validator rejects unknown names.

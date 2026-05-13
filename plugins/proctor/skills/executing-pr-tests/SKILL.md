@@ -28,18 +28,61 @@ Output: a single `TestResults` JSON object.
 2. **Run setup** from `.pr-test.yml`. Each command via Bash. If any
    exits non-zero → abort with `aborted: "setup-failed"`.
 
-3. **Topologically sort items** by `depends_on`. Items with no
-   unresolved deps run in parallel via the Task tool dispatching to
-   `pr-test-executor`. Items that depend on others wait until their
-   deps land.
+   Skip this entire step when `.pr-test.yml` declares `auth:` and
+   `setup` is empty/absent — that's the v0.3.0+ "external env" mode
+   where the consumer points at an already-running server. The login
+   work in step 3 replaces the local-server bring-up.
 
-4. For each item:
-   - Dispatch a fresh subagent with the item JSON, env, and the path
-     to `<logs_dir>/<id>.log`.
+3. **Login per account, group items by `as_account`** (v0.3.0+, only when
+   `.pr-test.yml.auth` is set). For each distinct `as_account` value
+   in the plan (default = `auth.accounts[0].name` for items without
+   one):
+
+   a. Look up the account by name in `auth.accounts`.
+   b. Read `email_env`, `password_env`, `totp_seed_env` — each is the
+      name of an env var, NOT the credential itself. Fail loudly with
+      `aborted: "auth-misconfigured"` if any of those env vars is unset.
+   c. Open a fresh Chrome incognito context (chrome-devtools MCP). New
+      context per group — cookies from the previous account must not
+      leak.
+   d. Drive `auth.login_url`:
+      - Fill `selectors.email` with `$<email_env>`.
+      - Fill `selectors.password` with `$<password_env>`.
+      - Click `selectors.submit`.
+      - If a TOTP page renders next (heuristic: current URL contains
+        `totp` / `2fa`, OR `selectors.totp` exists in DOM), compute
+        the 6-digit code with:
+
+        ```bash
+        python3 ${CLAUDE_PLUGIN_ROOT}/scripts/totp.py "$<totp_seed_env>"
+        ```
+
+        Fill `selectors.totp` with that code, click `selectors.submit`.
+      - Verify the resulting URL is NOT `auth.login_url` / a 2fa page —
+        if it still is, login failed; emit `aborted: "auth-failed"`
+        with the URL as evidence.
+   e. Now run all items in this group inside this authed context.
+      Items within a group still respect `depends_on` and run in
+      parallel where possible; the parallelism limit is per-group
+      (3 concurrent) so groups can run concurrently with each other.
+
+   Groups execute concurrently to each other when possible (each
+   group has its own browser context). When the run finishes, every
+   browser context is torn down.
+
+   For runs WITHOUT `auth:` (legacy mode): skip 3a–d entirely. Items
+   dispatch as before, no account grouping.
+
+4. For each item (within its group's authed context):
+   - Dispatch a fresh subagent with the item JSON, env, the path
+     to `<logs_dir>/<id>.log`, AND the Chrome context handle for its
+     group. Items without `as_account` set go into the default group
+     (= `auth.accounts[0].name`).
    - Receive its single-result JSON.
    - Append to results array.
 
-5. After all items finish, **kill setup processes**: send SIGTERM to
+5. After all items finish, **clean up**: close all browser contexts;
+   in legacy mode, also kill setup processes by sending SIGTERM to
    the process group started by setup commands (use `setsid` to start
    them; track the PIDs in `<logs_dir>/setup.pids`).
 
