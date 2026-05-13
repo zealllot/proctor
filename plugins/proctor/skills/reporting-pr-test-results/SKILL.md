@@ -71,7 +71,13 @@ Group items by journey for the report.
 
 Order journeys by their position in the plan's `journeys` array (structured) or by first-appearance among items (legacy). After all journeys, append an "Other" section for items that don't carry a journey reference. Skip the "Other" section if it's empty.
 
-Items skipped because of `data_from` failure get an explicit visual: `⏭ skipped (upstream t-007 failed)`. Don't render them collapsed identically to ordinary `skipped` items — the reviewer needs to know "this test was INVALIDATED, not opt-out skipped" so they can focus on fixing the upstream first.
+Skipped items come in three flavors — render each distinctly so the reviewer doesn't lump them together:
+
+- **`reason: "data-dep-failed: t-007"`** → `⏭ skipped (upstream t-007 failed)`. Test was INVALIDATED by an intra-run sibling. Reviewer should fix the upstream first.
+- **`reason: "data-template-missing: t-007.created_id"`** → `⏭ skipped (upstream t-007 didn't produce created_id)`. Same family — producer broke its contract; reviewer jumps to t-007's row.
+- **`reason: "precondition-not-met"`** (v0.3.29+) → `⚠ skipped (environment precondition failed)`. Different cause: the test's assumed starting state is missing — this is an ENVIRONMENT GAP, not a bug in the diff under test. Render the failing command and its exit code from `evidence` so the reviewer can rerun PRoctor against a properly seeded environment.
+
+Don't render any of these collapsed identically to ordinary opt-out `skipped` items (`tool: "skip"` or `status: "skipped"` without a reason).
 
 In the HTML report, journeys become `<details>` blocks that default open if the journey has any fail items, closed if all-pass. Same logic as per-item details but one level higher.
 

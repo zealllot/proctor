@@ -2,6 +2,39 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.29 — 2026-05-13
+
+### Active precondition verification — `verify_precondition_via`
+
+User flagged a remaining gap after the 5-point quality review: `preconditions` was descriptive only — the executor displayed the string but didn't enforce it. When the starting state was wrong (e.g. DB had no Category records and the test edits one), failures got marked `fail` instead of "environment gap", forcing the reviewer to mentally separate "bug in the diff" from "PRoctor was run against the wrong env". This release closes that gap.
+
+**Plan schema** (`schema.py`):
+- New optional `verify_precondition_via: "<shell command>"` field on plan items. Non-empty string when set, null/absent otherwise.
+- Templates (`{{<id>.<key>}}`) inside the command get the same cross-validation as `how:` / `preconditions` — orphan references rejected at plan-time.
+
+**Executor flow** (`executing-pr-tests/SKILL.md`):
+- Insert verification between template substitution and subagent dispatch.
+- Exit 0 → environment matches; proceed.
+- Non-zero exit / command-not-found → mark item `skipped` with `reason: "precondition-not-met"` and a clear evidence line including the command, exit code, and first ~200 chars of stderr. Do NOT dispatch the subagent.
+- The skip is non-actionable from a diff-author standpoint — it signals "your environment is missing X, rerun against a properly seeded env", NOT "your code broke".
+
+**Planning skill** (`planning-pr-tests/SKILL.md`):
+- New "Active precondition verification" section explaining when to use the field: cheap (<1s) idempotent checks with clean exit codes, where vacuous test results would otherwise be confusing.
+- Explicit distinction from `data_from`: the latter handles intra-run upstream-fail propagation; this handles inter-run environment gaps. Different mitigations.
+- Anti-patterns called out: don't use it for "logged in as developer" (auth flow handles that), don't use it to ESTABLISH state (that's setup/seed territory), don't fuzzy-parse stdout (use exit codes).
+
+**Reporter** (`reporting-pr-test-results/SKILL.md`):
+- Skipped items now render in three distinct flavors instead of being lumped together:
+  - `data-dep-failed: <id>` → `⏭ skipped (upstream <id> failed)` — intra-run sibling broke.
+  - `data-template-missing: <id>.<key>` → `⏭ skipped (upstream <id> didn't produce <key>)` — producer contract violated.
+  - `precondition-not-met` → `⚠ skipped (environment precondition failed)` — DIFFERENT visual (warning chevron, not skip arrow) because the action item is "fix env / reseed", not "fix the diff".
+
+### Tests
+- 129 → 135 (+6): field accepted, empty/null/non-string handling, template happy path, template with unknown key rejected.
+
+### What this leaves untouched
+- The "canonical produces vocabulary" item (the user's second remaining observation): explicitly NOT shipped. We weighed adding a Levenshtein-based "did you mean created_id?" hint and concluded a hint-without-enforcement creates CI noise without preventing the bug; the SKILL.md prose examples already model `created_id` / `detail_url` / `slug` consistently. If mixed vocabulary becomes a real-world problem (plans accumulating `id` / `record_id` / `new_id` collisions), revisit.
+
 ## v0.3.28 — 2026-05-13
 
 ### Structured journeys (#2) + impact_radius truncation flag (#5)

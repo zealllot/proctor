@@ -225,6 +225,19 @@ def validate_test_plan(tp: dict) -> None:
         if "preconditions" in item and item["preconditions"] is not None:
             _require(isinstance(item["preconditions"], str) and item["preconditions"].strip(),
                      f"TestPlan.items[{i}].preconditions must be a non-empty string if set")
+        # `verify_precondition_via` (v0.3.29+) optional — a shell
+        # command the executor runs BEFORE dispatching the subagent.
+        # Non-zero exit → item marked `skipped` with
+        # `reason: "precondition-not-met"` so the reviewer can tell
+        # "environment didn't match the assumed state" apart from
+        # "the change under test is broken". The command may contain
+        # `{{<id>.<key>}}` templates which get substituted just like
+        # `how:` / `preconditions` before execution.
+        if "verify_precondition_via" in item and item["verify_precondition_via"] is not None:
+            _require(isinstance(item["verify_precondition_via"], str)
+                     and item["verify_precondition_via"].strip(),
+                     f"TestPlan.items[{i}].verify_precondition_via must be a "
+                     f"non-empty string if set")
         # `error_type` (v0.3.22+) optional — categorization for negative
         # items so the planner can spread coverage across distinct
         # failure-mode classes instead of repeating the same validation
@@ -315,7 +328,7 @@ def validate_test_plan(tp: dict) -> None:
         # declare `produces: [..., <key>, ...]`. Without this, the
         # template would silently render as literal `{{...}}` at
         # runtime and the test would fail in a confusing way.
-        for field_name in ("how", "preconditions"):
+        for field_name in ("how", "preconditions", "verify_precondition_via"):
             text = item.get(field_name)
             if not isinstance(text, str):
                 continue

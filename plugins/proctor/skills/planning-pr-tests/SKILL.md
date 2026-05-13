@@ -372,6 +372,41 @@ When a test requires a specific starting state (logged-in role, seeded data, no 
 
 Don't write `preconditions` for items where the only precondition is "PRoctor is logged in" (that's covered by the auth flow). Use it when there's a non-trivial state that must exist for the test to be meaningful.
 
+### Active precondition verification (`verify_precondition_via`, v0.3.29+)
+
+`preconditions` as a string is descriptive — the executor renders it for human reviewers but doesn't enforce it. When the precondition is something the executor can CHECK cheaply (e.g. "DB has at least one published category", "feature flag X is enabled"), pair the description with an optional one-liner shell command:
+
+```jsonc
+{
+  "id": "t-007",
+  "what": "HAPPY: editing an existing category updates the slug",
+  "preconditions": "At least one Category record exists in the DB.",
+  "verify_precondition_via": "curl -sf \"$BASE_URL/api/categories?per_page=1\" | jq -e '.total > 0'",
+  "how": "Navigate to /admin/categories; click first row; edit slug; save; assert toast.",
+  "tool": "chrome-devtools",
+  ...
+}
+```
+
+Executor behavior (see `executing-pr-tests/SKILL.md`):
+- Run the command via Bash. Exit 0 → proceed; non-zero → mark this item `skipped` with `reason: "precondition-not-met"` and DON'T dispatch the subagent.
+- Templates (`{{<id>.<key>}}`) work inside the command just like in `how:` / `preconditions`.
+- The command should be a SINGLE-SHOT CHECK, not a setup script. If the precondition needs to be ESTABLISHED rather than verified, put that in the consumer's setup flow (`.pr-test.yml setup:` or a seed step earlier in the journey), not here.
+
+When to add it:
+- The test will give confusing results if the precondition isn't met (the assertion path runs against absent state and either passes vacuously or fails for the wrong reason).
+- The check is cheap (≤ 1 second) and doesn't have side effects.
+- The check has a clean exit-code signal — don't try to parse fuzzy stdout patterns.
+
+When NOT to add it:
+- The precondition is "logged in as developer" — already covered by auth flow.
+- The check would cost more than the test itself (e.g. spinning up a fresh DB).
+- The precondition is data this item itself creates as part of `produces` — that's `data_from` territory, not `verify_precondition_via`.
+
+Distinct from `data_from`:
+- `data_from: ["t-005"]` skips this item when an intra-run upstream item failed/skipped.
+- `verify_precondition_via: "..."` skips this item when the ENVIRONMENT doesn't match. Different cause, different mitigation (rerun PRoctor with seeded data vs. fix the upstream test).
+
 ## Error coverage: vary the `error_type`, don't repeat one kind
 
 When you plan more than one negative item, distribute across `error_type` categories instead of stacking the same kind. Valid values:

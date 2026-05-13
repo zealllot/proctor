@@ -103,11 +103,12 @@ Output: a single `TestResults` JSON object.
      gets skipped with `data-dep-failed: t-007` (the chain reason is
      visible up one level; the report walks the full chain).
    - **Substitute `{{<id>.<key>}}` templates** (v0.3.25+) in the
-     item's `how:` and `preconditions` BEFORE dispatch. The schema
-     guarantees every template references a `data_from` source that
-     declares the key in `produces` — but the source's actual
-     `outputs` map might be missing the key at runtime (e.g. the
-     subagent passed but forgot to capture). Substitution rules:
+     item's `how:`, `preconditions`, AND `verify_precondition_via`
+     BEFORE dispatch. The schema guarantees every template references
+     a `data_from` source that declares the key in `produces` — but
+     the source's actual `outputs` map might be missing the key at
+     runtime (e.g. the subagent passed but forgot to capture).
+     Substitution rules:
      - Look up `run_context[<id>][<key>]` (where `run_context` is the
        accumulator `{item_id: outputs_dict}` you've been building
        from prior `outputs` fields).
@@ -121,6 +122,31 @@ Output: a single `TestResults` JSON object.
        This catches subagent errors (producer claimed success but
        failed to capture) BEFORE the dependent test runs against
        broken state. Continue to next item.
+   - **Run `verify_precondition_via`** (v0.3.29+) if set. Execute the
+     (already-substituted) command via Bash inside the group's authed
+     context. Treat exit code as the only signal:
+     - **Exit 0** → environment matches the precondition; proceed to
+       dispatch.
+     - **Non-zero exit** → environment does NOT match. Record this
+       item as:
+       ```json
+       {"id": "t-008", "status": "skipped",
+        "reason": "precondition-not-met",
+        "evidence": "verify_precondition_via `<command>` exited <code>; stderr: <first 200 chars>"}
+       ```
+       and continue to the next item. Do NOT dispatch the subagent —
+       the test would either fail for the wrong reason (looking like
+       a regression when it's an environment gap) or pass vacuously
+       (the assertion path runs against absent state).
+     - **Command not found / shell error** → also skipped with
+       `reason: "precondition-not-met"` and a clear stderr in
+       evidence; do NOT promote this to a fail.
+
+     The distinction `precondition-not-met` vs `fail` is the whole
+     point: it tells the reviewer "this is an environment gap, not a
+     bug in the diff under test". Pair with `data-dep-failed` (the
+     intra-run sibling) so the reporter can render both as
+     non-actionable-skip variants distinct from opt-out skip.
    - Otherwise dispatch a fresh subagent with the item JSON (with
      templates already substituted), env, the path to
      `<logs_dir>/<id>.log`, AND the Chrome context handle for its

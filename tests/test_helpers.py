@@ -714,6 +714,70 @@ def test_plan_journeys_empty_string_field_rejected():
         validate_test_plan(bad)
 
 
+# --- v0.3.29: verify_precondition_via (active precondition check) --------
+
+def test_plan_verify_precondition_via_accepted():
+    valid = {"items": [{
+        "id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+        "risk":"low","depends_on":[],
+        "preconditions":"At least one category exists.",
+        "verify_precondition_via":
+            "curl -sf $BASE_URL/api/categories | jq -e '.total > 0'",
+    }]}
+    validate_test_plan(valid)
+
+
+def test_plan_verify_precondition_via_empty_rejected():
+    bad = {"items": [{
+        "id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+        "risk":"low","depends_on":[], "verify_precondition_via":"",
+    }]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_verify_precondition_via_null_allowed():
+    valid = {"items": [{
+        "id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+        "risk":"low","depends_on":[], "verify_precondition_via":None,
+    }]}
+    validate_test_plan(valid)
+
+
+def test_plan_verify_precondition_via_non_string_rejected():
+    bad = {"items": [{
+        "id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+        "risk":"low","depends_on":[], "verify_precondition_via":["curl", "..."],
+    }]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_verify_precondition_via_template_ok():
+    """Templates inside verify_precondition_via must cross-validate
+    the same way as how:/preconditions templates."""
+    valid = {"items": [
+        _producer_item(produces=["created_id"]),
+        _consumer_item(
+            verify_precondition_via=
+                "curl -sf $BASE_URL/api/items/{{t-1.created_id}}",
+        ),
+    ]}
+    validate_test_plan(valid)
+
+
+def test_plan_verify_precondition_via_template_unknown_key_rejected():
+    bad = {"items": [
+        _producer_item(produces=["created_id"]),
+        _consumer_item(
+            verify_precondition_via=
+                "curl -sf $BASE_URL/api/items/{{t-1.missing_key}}",
+        ),
+    ]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
 def test_change_map_impact_radius_truncated_accepted():
     valid = {
         "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
