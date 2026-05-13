@@ -2,6 +2,48 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.26 — 2026-05-13
+
+### impact_radius — frequency-threshold filter drops single-import-line false positives (#1)
+
+v0.3.24 shipped grep-based `impact_radius` but acknowledged in its own CHANGELOG that the regex approach mishits unrelated same-named identifiers. The most common false positive: an `index.ts` that does `export { Foo } from './foo'` (one match — a re-export, not a real caller). This release closes that case.
+
+**Helper script** (`plugins/proctor/scripts/impact_radius.py`):
+- Moves the grep + threshold + ranking logic out of the SKILL.md procedure (which was an AI-followed bash recipe) and into a tested unit.
+- Uses `git grep -o` (per-MATCH output, not per-line) so multiple occurrences on a single line — `Foo(); Foo();` — count correctly.
+- Aggregates cumulative match count per caller across all hunk identifiers.
+- **Threshold: cumulative count ≥ 2.** A single match is overwhelmingly an `import { Foo } from '...'` line or a re-export. Filtering single-matches removes the dominant false-positive class without language-aware import resolution.
+- Sorts by descending count, then path ascending for stability. Cap at top 10.
+- Excludes the changed file, plus `*_test.{go,ts,tsx,js,jsx}`, `*.spec.*`, `tests/`, `test/`, `__tests__/`, `vendor/`, `node_modules/`, `dist/`, `build/`, `target/`, `.proctor/`.
+- Tunable via flags: `--min-occurrences` (default 2), `--top` (default 10).
+- Uses the `:(exclude)PATTERN` long-form pathspec — the shorthand `:!PATTERN` fails with `Unimplemented pathspec magic '_'` on directories like `__tests__/`.
+
+**Skill** (`analyzing-pr-changes/SKILL.md` Step 7b):
+- Procedure replaced with a single helper invocation: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/impact_radius.py --file FILE --idents "..." --repo .`
+- AI no longer aggregates by hand. Eliminates per-run parsing drift.
+- Distinguishes three outcomes: non-empty list → emit; empty list (analyzed, nothing crossed threshold) → emit `[]`; script failure → omit field entirely.
+
+**Tunability rationale** — why threshold=2:
+- TS/JS real caller: `import { Foo } from '...'` line + `Foo()` call line → 2 matches, passes ✓
+- TS/JS re-export: `export { Foo } from '...'` → 1 match, filtered ✓
+- Go real caller: import doesn't name the symbol; needs `x.Foo()` twice → 2 matches, passes ✓
+- Python real caller: `from foo import Foo` + `Foo()` → 2 matches, passes ✓
+- Single-mention comments / type annotations / docstrings → 1 match, filtered ✓
+- Pathological one-liner with `Foo(); Foo();` on a single line → still 2 matches because `-o` counts per occurrence, not per line ✓
+
+### Tests
+- 86 → 96 (+10): real callers kept, single-match files dropped, changed file excluded from own radius, test files excluded, vendor/node_modules excluded, multi-identifier aggregation works, ranking by count, top_n cap, empty results, empty identifiers, min_occurrences tunability.
+
+### What it does NOT fix
+- Two unrelated symbols sharing an identifier name where the unrelated file uses the colliding name ≥ 2 times still slips through. That would require a compiler-grade import resolver (intentionally out of scope — the planner treats `impact_radius` as advisory). Future work could swap regex for tree-sitter for language-aware false-positive reduction.
+
+### Status of the 5-point quality review
+- #1 impact_radius false-positive control ✅ (this release)
+- #2 journey upgraded to top-level array — queued
+- #3 data_from artifact passing ✅ (v0.3.25)
+- #4 error_type state-conflict diff-pattern triggers — queued
+- #5 impact_radius_truncated flag with auto-risk-upgrade — queued
+
 ## v0.3.25 — 2026-05-13
 
 ### `data_from` artifact passing — producer outputs flow to consumer templates

@@ -79,35 +79,55 @@ on stdout with no surrounding prose, headings, or code fences.
       Cap the candidate list at the top 6 identifiers per hunk to keep
       grep cost bounded.
 
-   b. **Grep the repo for callers**, excluding the changed file and
-      excluding test files. Use one batched git-grep per identifier
-      (single process, regex-pinned to word boundaries):
+   b. **Delegate the grep + threshold + ranking to the helper script.**
+      Don't hand-roll the aggregation — call the dedicated script
+      which has tested filter rules (single-match files dropped, test
+      / vendor / build paths excluded, sorted by descending count,
+      capped at top 10):
 
       ```bash
-      git grep -l --untracked -e '\bIDENT\b' \
-          -- ':!FILE_THAT_CHANGED' \
-             ':!*_test.go' ':!*.test.ts' ':!*.test.tsx' \
-             ':!*.spec.ts' ':!*.spec.tsx' \
-             ':!tests/' ':!__tests__/' ':!vendor/' ':!node_modules/'
+      python3 ${CLAUDE_PLUGIN_ROOT}/scripts/impact_radius.py \
+          --file <FILE_THAT_CHANGED> \
+          --idents "Ident1 Ident2 Ident3" \
+          --repo .
       ```
 
-      For each identifier, collect the resulting file list. Union them
-      across identifiers per hunk.
+      Output is a JSON array of repo-relative paths, ready to plug
+      into the hunk's `impact_radius` field.
 
-   c. **Bound the output.** Sort the union by (count of distinct
-      identifiers referenced) descending, then by path lexicographic
-      ascending for stability. Keep the top **10** entries. Drop the
-      changed file itself (defensive — the exclude pattern should
-      already handle it). Empty list is OK — emit `"impact_radius": []`
-      to record "we looked, found nothing"; omit the field only when
-      step (a) couldn't extract identifiers.
+   c. **What the script enforces** (you don't need to replicate this —
+      just know what's filtered for you):
+      - Word-boundary regex per identifier (`\bIdent\b` — no
+        substring matches).
+      - Excludes the changed file itself, plus `*_test.{go,ts,tsx,js,jsx}`,
+        `*.spec.*`, `tests/`, `test/`, `__tests__/`, `vendor/`,
+        `node_modules/`, `dist/`, `build/`, `target/`, `.proctor/`.
+      - **Threshold: cumulative count per caller must be ≥ 2**
+        (v0.3.26+). A single match is overwhelmingly just an
+        `import { Foo } from '...'` line or a re-export, NOT a
+        real caller. Filtering single-matches drops the most common
+        kind of regex-based false positive (a name that's *imported*
+        but never *used*).
+      - Sort by descending count, then path ascending for stability.
+      - Cap at top 10 entries.
 
-   d. **What this is NOT.** This is a grep, not a compiler-grade import
-      resolver. False positives (an unrelated file using the same
-      identifier name) are accepted in exchange for being cheap and
-      language-agnostic. The planner treats `impact_radius` as a hint
-      ("these files MIGHT regress"), not a fact ("these files WILL
-      regress"). Don't try to be precise here.
+   d. **Output handling.** The script may return:
+      - **Non-empty list** → emit as `"impact_radius": [...]`.
+      - **Empty list** (analyzed, nothing crossed threshold) → emit
+        `"impact_radius": []`. This is distinct from "didn't analyze"
+        and tells the planner not to plan regression items for this
+        hunk.
+      - **Script failure** (no git, hunk in an untracked path, etc.) →
+        OMIT the field entirely. The planner falls back to legacy
+        behavior (no impact-aware planning) for that hunk.
+
+   e. **What this is NOT.** This is a grep + frequency threshold, not
+      a compiler-grade import resolver. False positives where two
+      unrelated symbols share an identifier name AND the unrelated
+      file uses the colliding name ≥ 2 times will still slip through.
+      The planner treats `impact_radius` as a hint ("these files
+      MIGHT regress"), not a fact ("these files WILL regress"). Don't
+      try to be precise here — be cheap, fast, and language-agnostic.
 
 8. Compute `categories_present` as the deduplicated set of hunk
    categories (after directive filters in steps 3 and 6).

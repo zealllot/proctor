@@ -907,3 +907,175 @@ def test_change_map_impact_radius_empty_string_entry_rejected():
     }
     with pytest.raises(SchemaError):
         validate_change_map(bad)
+
+
+# --- v0.3.26: impact_radius frequency threshold (#1) ----------------------
+
+from plugins.proctor.scripts.impact_radius import collect_callers
+
+
+def _init_repo(tmp_path):
+    """Create a tiny git repo in tmp_path and return its path."""
+    sp = subprocess
+    sp.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+def _commit(tmp_path):
+    sp = subprocess
+    sp.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    sp.run(["git", "commit", "-q", "-m", "x"], cwd=tmp_path,
+           check=True, env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+                            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"})
+
+
+def test_impact_radius_filters_single_match(tmp_path):
+    """A file with only ONE occurrence of the identifier (just an
+    import line) should be dropped — that's the core v0.3.26 fix."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    # Real caller: 3 references to Foo.
+    (tmp_path / "caller.go").write_text(
+        'package x\nimport "./x"\nfunc a() { Foo(); Foo(); }\n')
+    # False positive: 1 occurrence — looks like an import-only file.
+    (tmp_path / "false_pos.go").write_text(
+        'package x\n// see also Foo\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "caller.go" in callers
+    assert "false_pos.go" not in callers
+
+
+def test_impact_radius_excludes_changed_file(tmp_path):
+    """The file whose hunk we're analyzing should never appear in its
+    own impact_radius."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text(
+        "package x\nfunc Foo() {}\nfunc bar() { Foo(); Foo(); }\n")
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "src.go" not in callers
+
+
+def test_impact_radius_excludes_test_files(tmp_path):
+    """`*_test.go`, `*.spec.*`, `__tests__/` etc. shouldn't appear —
+    we want PRODUCTION callers, not test consumers."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    # Test file with many matches — should still be filtered out.
+    (tmp_path / "src_test.go").write_text(
+        'package x\nfunc TestFoo(t *testing.T) { Foo(); Foo(); Foo(); }\n')
+    (tmp_path / "real.go").write_text(
+        'package x\nfunc a() { Foo(); Foo(); }\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "real.go" in callers
+    assert "src_test.go" not in callers
+
+
+def test_impact_radius_excludes_vendor_node_modules(tmp_path):
+    """Vendored / node_modules paths are never our responsibility."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "dep.go").write_text(
+        'package vendor\nfunc x() { Foo(); Foo(); Foo(); }\n')
+    (tmp_path / "real.go").write_text(
+        'package x\nfunc x() { Foo(); Foo(); }\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "real.go" in callers
+    assert all("vendor" not in c for c in callers)
+
+
+def test_impact_radius_aggregates_multiple_idents(tmp_path):
+    """A file that mentions ident A once and ident B once should
+    survive — cumulative count across the hunk's identifiers is 2,
+    which crosses the threshold even though no single identifier
+    appears twice."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text(
+        "package x\nfunc Foo() {}\nfunc Bar() {}\n")
+    (tmp_path / "caller.go").write_text(
+        'package x\nfunc a() { Foo(); Bar(); }\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo", "Bar"], repo=str(tmp_path))
+    assert "caller.go" in callers
+
+
+def test_impact_radius_ranks_by_count(tmp_path):
+    """Highest-frequency caller should appear first in the result."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    (tmp_path / "heavy.go").write_text(
+        'package x\nfunc a() { Foo(); Foo(); Foo(); Foo(); Foo(); }\n')
+    (tmp_path / "light.go").write_text(
+        'package x\nfunc a() { Foo(); Foo(); }\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert callers[0] == "heavy.go"
+    assert "light.go" in callers
+
+
+def test_impact_radius_caps_at_top_n(tmp_path):
+    """Result list is capped at top_n entries even when many files
+    would qualify."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    for i in range(15):
+        (tmp_path / f"c{i:02d}.go").write_text(
+            f'package x\nfunc a() {{ Foo(); Foo(); }}  // {i}\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"],
+                              repo=str(tmp_path), top_n=10)
+    assert len(callers) == 10
+
+
+def test_impact_radius_returns_empty_when_no_callers(tmp_path):
+    """No callers at all → empty list, not an error."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    # Other files exist but don't reference Foo.
+    (tmp_path / "other.go").write_text(
+        'package x\nfunc a() { something(); something(); }\n')
+    _commit(tmp_path)
+
+    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert callers == []
+
+
+def test_impact_radius_empty_identifiers_returns_empty(tmp_path):
+    """If the analyzer couldn't extract any identifiers, helper
+    returns [] without invoking git."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\n")
+    _commit(tmp_path)
+
+    assert collect_callers("src.go", [], repo=str(tmp_path)) == []
+
+
+def test_impact_radius_min_occurrences_tunable(tmp_path):
+    """min_occurrences=1 (legacy v0.3.24 behavior) keeps single-match
+    files; the default of 2 drops them. Useful for ad-hoc debugging."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    (tmp_path / "single.go").write_text(
+        'package x\n// references Foo\n')
+    _commit(tmp_path)
+
+    with_threshold = collect_callers("src.go", ["Foo"], repo=str(tmp_path),
+                                     min_occurrences=2)
+    without_threshold = collect_callers("src.go", ["Foo"], repo=str(tmp_path),
+                                        min_occurrences=1)
+    assert "single.go" not in with_threshold
+    assert "single.go" in without_threshold
