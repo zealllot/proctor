@@ -2,6 +2,17 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.19 — 2026-05-13
+
+### No more JSON walls in chat — stage artifacts go to disk, status lines go to chat
+- **Bug**: at the approval gate, AI was dumping the full `test-plan.json` (~100 lines of JSON) into chat, THEN the AskUserQuestion. User saw the wall of JSON, mistook the wait-for-input for a hang, also couldn't actually parse the JSON visually to make a meaningful approval decision. Same pattern at Stage 1 — ChangeMap JSON dumped to chat. Both violate the v0.3.15 "render plan as markdown table" intent.
+- **Fix** (`proctor.md` Stages 1, 2, and 6):
+  - Stage 1: write `change-map.json` to disk, emit ONE status line to chat (`[proctor:analyze] done — <N> hunks, categories: <list>`). Never print the JSON.
+  - Stage 2: write `test-plan.json` to disk, emit ONE status line (`[proctor:plan] done — <N> items planned`). Never print the JSON.
+  - Stage 6 (approval): MANDATORY markdown table renders first, then the AskUserQuestion. New "DO NOT" list explicitly forbids skipping the table, printing JSON instead of the table, or collapsing the table into a one-line "3 lint + 5 ui — run?" summary.
+
+After this, the approval gate looks like a clean table + a 3-option question, not "JSON dump + a question hidden underneath it".
+
 ## v0.3.18 — 2026-05-13
 
 ### Local mode gets a real HTML report (with screenshots, "why this test", auto-open)

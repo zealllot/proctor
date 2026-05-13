@@ -103,23 +103,45 @@ and exit 0. Set a Bash trap to release the lock on exit.
 Apply skill `analyzing-pr-changes`. Save output to
 `.proctor/runs/<run-id>/change-map.json`. Validate with `schema.py`.
 
-**Then immediately proceed to Stage 2.** Do not pause. Do not summarize
-the ChangeMap to the user — they will see it in the report (step 9).
+**DO NOT print the ChangeMap JSON to chat.** The JSON file is the
+artifact; chat is for humans. The ONLY chat output this step produces
+is a one-line status:
+
+```
+[proctor:analyze] done — <N> hunks, categories: <list>
+```
+
+**Then immediately proceed to Stage 2.**
 
 ### 5. Stage 2 — plan
 
 Apply skill `planning-pr-tests`. Save output to
 `.proctor/runs/<run-id>/test-plan.json`. Validate with `schema.py`.
 
-**Then immediately proceed to the approval gate.** Do not pause to
-preview the plan in chat — that's literally what the gate's AskUserQuestion
-is for.
+**DO NOT print the test-plan JSON to chat.** Same reason as Stage 1 —
+JSON is for the validator + the next stage, not a wall of text for
+the human. The ONLY chat output here is:
+
+```
+[proctor:plan] done — <N> items planned
+```
+
+**Then immediately proceed to the approval gate, where the plan gets
+rendered as a human-readable table.**
 
 ### 6. Approval gate
 
-**Before invoking AskUserQuestion, print the full plan as a markdown table to chat.** A one-line summary like "3 lint-only + 2 bash + 5 chrome-devtools" doesn't give the user enough information to make a meaningful decision; they're either rubber-stamping "Run all" or rejecting blindly. The table is what lets them spot "wait, t-007 is testing the wrong thing" or "skip t-009, that endpoint isn't deployed yet".
+This step has TWO mandatory outputs, in order:
 
-Required format:
+1. **A human-readable markdown table** of the plan items — for the human to read.
+2. **An AskUserQuestion** with a small set of decisions — for the human to act on.
+
+**Neither order nor format is optional.** Do NOT:
+- Skip the table and jump straight to AskUserQuestion (the question is unanswerable without context).
+- Print the test-plan JSON instead of the table (JSON is wall-of-text; table is scannable).
+- Combine "plan items" and "summary" into a single one-line "3 lint + 5 ui — run?" — too coarse to spot a wrong item.
+
+Required format for the table:
 
 ```markdown
 ## Plan for PR #<num> — <total> items
