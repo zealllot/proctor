@@ -2,6 +2,19 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.17 — 2026-05-13
+
+### Local report: file:// screenshots + dump full markdown + show paths
+- **Bug**: local-mode report referenced screenshots with the CI-mode "in artifact" link template, which becomes a broken URL when no GitHub Actions run exists. The AI also tended to paraphrase the markdown into a brief "all good" summary instead of dumping the full report. Result: dev saw a stripped-down report with no images, far less detail than the PR-comment version. Reported by zealot@theplant.jp after a local run.
+- **Fix** (`reporting-pr-test-results/SKILL.md`):
+  - Screenshots in local mode use `file://<absolute path>` markdown image embeds — VS Code's markdown preview renders these inline. Also includes the path as a plain string so the dev can open in Preview / their IDE / Finder directly.
+  - Log refs in local mode show the absolute path, not the misleading "in artifact" suffix.
+  - Procedure step 5 explicitly mandates "dump the full rendered markdown verbatim — every `<details>` block, every per-item section. Do NOT summarize, do NOT skip sections, do NOT collapse pass items into a one-line 'all good'." The AI was treating the report markdown as a draft to summarize; it's actually the deliverable.
+  - After the markdown, three follow-up lines tell the dev where the report.md / screenshots / patches dirs live in absolute paths, plus a hint to open `report.md` in VS Code's markdown preview for inline-rendered screenshots.
+
+### Why
+The PR-comment version of the report uses GitHub-hosted artifact URLs + GitHub-rendered markdown — looks polished. Local mode's terminal can't render images and won't auto-collapse `<details>`, but it can give the user accurate paths to open the assets themselves. The fix closes most of the parity gap.
+
 ## v0.3.16 — 2026-05-13
 
 ### Wizard: read the actual login template, don't hardcode qor conventions

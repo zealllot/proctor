@@ -78,13 +78,23 @@ For EACH item, render a `<details>`-collapsed block. Pass items default closed; 
 {if item.screenshot_ref}**Screenshot:**
 {if SCREENSHOT_URL_BASE is set}
 ![{item.id} screenshot]({SCREENSHOT_URL_BASE}{basename of item.screenshot_ref})
+{else if PROCTOR_POST_COMMENT == 0}
+![{item.id} screenshot](file://{absolute path to item.screenshot_ref})
+
+_Path: `{item.screenshot_ref}` (open in Preview / VS Code markdown
+preview for inline rendering, or click the link above on macOS)._
 {else}
 [`{item.screenshot_ref}` in artifact](<server>/<repo>/actions/runs/<github-run-id>#artifacts)
 {end-if}
 {if item.screenshot_focus}_What to look for:_ {item.screenshot_focus}{end-if}
 {end-if}
 
-{if item.logs_ref}**Full log:** `{item.logs_ref}` (in artifact)
+{if item.logs_ref}
+{if PROCTOR_POST_COMMENT == 0}
+**Full log:** `{absolute path to item.logs_ref}`
+{else}
+**Full log:** `{item.logs_ref}` (in artifact)
+{end-if}
 {end-if}
 
 {if status == fail AND item.reason}**Failure reason:** `{item.reason}`
@@ -133,13 +143,17 @@ Re-run with `--push-fix` to also push these as a fix PR.
 4. Save the rendered markdown to `.proctor/runs/<run-id>/report.md` (always — both modes need it).
 5. Branch on `PROCTOR_POST_COMMENT`:
    - `1` → call `post_comment.post(pr_number=..., repo=..., body=<rendered>, summary_for_gist=<one-line>)`. Emit `[proctor:report] done comment_posted=true`.
-   - `0` → skip the post call. Print to stdout:
-     ```
-     [proctor:report] done comment_posted=false
-     Report saved to .proctor/runs/<run-id>/report.md
-     <pass>/<total> passed · <fail> failed · <skipped> skipped
-     ```
-     Then dump the full rendered markdown so the developer sees the full report inline. (The double-log concern from CI doesn't apply here — local invocations are interactive and the user explicitly wants to read the report.)
+   - `0` → skip the post call. Print to stdout, **in this exact order**:
+     1. Status line: `[proctor:report] done comment_posted=false`
+     2. **The full rendered markdown verbatim** — every `<details>` block, every per-item section, every screenshot link, every log link. Do NOT summarize, do NOT skip sections, do NOT collapse pass items into a "all good" sentence. The whole point of local mode is the dev gets the same level of detail they'd see on a PR; the only difference is where the bytes land.
+     3. After the markdown, three short follow-up lines:
+        ```
+        ──────
+        Report file:  <absolute path to .proctor/runs/<run-id>/report.md>
+        Screenshots:  <absolute path to .proctor/runs/<run-id>/screenshots/>  (open report.md in VS Code markdown preview to render images inline)
+        Patches:      <absolute path to .proctor/runs/<run-id>/patches/>      (only if any; show "none" otherwise)
+        ```
+     The double-log concern from CI doesn't apply here — local invocations are interactive and the user explicitly wants to read the report. **No paraphrasing or "here's a summary of the report" — just emit the markdown.**
 
 ## Constraints
 
