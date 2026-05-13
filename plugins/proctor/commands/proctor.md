@@ -8,6 +8,18 @@ allowed-tools: Bash(gh *), Bash(jq *), Bash(yq *), Bash(python3 *), Bash(git *),
 
 Run the PRoctor test pipeline against a GitHub PR.
 
+## ⚠ Critical: this command runs the WHOLE pipeline non-stop
+
+Stages 1–9 below are a single sequence, NOT a checklist with pause points. Once started, run all of them straight through, only stopping for:
+
+- A hard error that requires the developer's decision (auth misconfigured, force-push aborted, setup failed)
+- The approval gate at Stage 6 in local mode (presents the plan via AskUserQuestion; user picks items)
+- The flag-gated CI-mode early exit at Stage 6 (`require_approval: true` + `mode=ci` → exit 0, await comment)
+
+**Do NOT** stop between Stages 1 and 2 to "show the ChangeMap" — that's an artifact, not a checkpoint. **Do NOT** stop between Stages 2 and 3 to "wait for confirmation" — Stage 6 is the only confirmation point. **Do NOT** stop after Stage 5 because tests passed; Stage 6 (fix) and Stage 7 (report) always run regardless.
+
+If you find yourself emitting a partial result (e.g. just the ChangeMap JSON) and not invoking the next stage's skill — that's a bug in your execution, not a feature. Resume immediately.
+
 ## Inputs
 
 - `$ARGUMENTS` — a PR number (e.g. `123`) or full PR URL, optionally followed by flags.
@@ -91,10 +103,17 @@ and exit 0. Set a Bash trap to release the lock on exit.
 Apply skill `analyzing-pr-changes`. Save output to
 `.proctor/runs/<run-id>/change-map.json`. Validate with `schema.py`.
 
+**Then immediately proceed to Stage 2.** Do not pause. Do not summarize
+the ChangeMap to the user — they will see it in the report (step 9).
+
 ### 5. Stage 2 — plan
 
 Apply skill `planning-pr-tests`. Save output to
 `.proctor/runs/<run-id>/test-plan.json`. Validate with `schema.py`.
+
+**Then immediately proceed to the approval gate.** Do not pause to
+preview the plan in chat — that's literally what the gate's AskUserQuestion
+is for.
 
 ### 6. Approval gate
 
@@ -124,6 +143,9 @@ Save output to `.proctor/runs/<run-id>/test-results.json`. Validate.
 If `aborted` field is set, post a PR comment "PRoctor: run aborted
 (<reason>)" and skip Stages 4 + 5.
 
+**Otherwise immediately proceed to Stage 4.** Don't pause to summarize
+pass/fail counts in chat.
+
 ### 8. Stage 4 — fix
 
 If `test-results.json` has any `fail` items AND `.pr-test.yml.auto_fix`
@@ -132,11 +154,16 @@ is true (default), apply skill `fixing-test-failures`. Save output to
 
 If no failures or `auto_fix: false`, write `null` to that path.
 
+**Then immediately proceed to Stage 5.**
+
 ### 9. Stage 5 — report
 
 Apply skill `reporting-pr-test-results`. Pass test-results, fix-pr-ref,
 change-map, run-id, PR number. The skill posts the comment itself; the
 command just needs to surface success/failure to the user.
+
+This is the terminal stage. After report completes (and step 10 releases
+the mutex in CI mode), the command finishes naturally.
 
 ### 10. Release mutex (CI mode only, always — including on failure)
 

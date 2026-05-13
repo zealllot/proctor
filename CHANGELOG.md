@@ -2,6 +2,16 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.14 — 2026-05-13
+
+### Orchestrator: stop pausing between stages
+- **Bug**: `proctor.md` listed stages 1–9 as sections without strong "DO NOT STOP between these" language. AI consistently treated each stage as a checkpoint — wrote the ChangeMap, then idled waiting for confirmation. User had to nudge it to continue. Same for "test-plan written → stop → user prompts → continue". This added 2–4 turns of dead-time per PRoctor invocation and broke the "set it and forget it" promise.
+- **Fix**:
+  1. New "Critical: this command runs the WHOLE pipeline non-stop" callout at top of `proctor.md`, listing the THREE legitimate pause points (hard error, approval gate, CI require_approval exit) and explicitly forbidding the chat-summary-after-each-stage pattern.
+  2. End of each stage's section now has a one-liner "**Then immediately proceed to Stage N+1.** Do not pause." — gives the AI a clear continuation signal as it finishes each section.
+
+After this fix, a local invocation should be: launch, see stage start markers stream by, hit the approval gate (only pause), see stages continue, see report. No "I just emitted the ChangeMap, want to continue?" detours.
+
 ## v0.3.13 — 2026-05-13
 
 ### Seed script: temp dir must live inside project tree (Go module resolution)
