@@ -2,6 +2,13 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.8 — 2026-05-13
+
+### Seed-script generation is now orthogonal to MODE
+- **Bug**: When a v0.3.5 consumer re-ran `/proctor-init` to pick up a newer pin (`MODE=bump-only`), the wizard only patched the workflow version and skipped Step 8c-pre. The dev never got the seed script, never got `.pr-test.local.yml`, and the wizard's summary made it look like everything was already set up. Reported by zealot@theplant.jp.
+- **Fix**: introduce a separate detection flag `NEEDS_SEED_SCRIPT` — true when `.pr-test.yml` declares `auth.accounts` and no `hack/proctor-seed-local.sh` / `scripts/proctor-seed-local.sh` / top-level equivalent exists. The flag is read in EVERY MODE; Step 8c-pre runs whenever it's set. So a `bump-only` consumer who installed PRoctor before v0.3.6 (when seed scripts didn't exist) now gets the script the next time they run the wizard for a version bump.
+- **Idempotence**: if the seed script already exists, Step 8c-pre skips silently — never overwrites the dev's filled-in TODO block.
+
 ## v0.3.7 — 2026-05-13
 
 ### Wizard seed-script: detect email domain + password rules from the codebase

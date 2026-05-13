@@ -41,10 +41,21 @@ CURRENT_PIN=$(grep -oE 'zealllot/proctor/github-action@v[0-9]+\.[0-9]+\.[0-9]+' 
 HAS_AUTH_BLOCK=$(grep -qE '^auth:' .pr-test.yml 2>/dev/null && echo yes)
 ```
 
+Also check whether a local-seed helper exists (orthogonal to MODE — used to decide whether Step 8c-pre runs):
+
+```bash
+HAS_SEED_SCRIPT=$( \
+  test -x hack/proctor-seed-local.sh -o \
+       -x scripts/proctor-seed-local.sh -o \
+       -x ./proctor-seed-local.sh && echo yes \
+)
+```
+
 Branch on what's there:
 
 - **Neither file exists** → fresh install. Set `MODE=fresh`. Continue to Step 1.
-- **Workflow exists but action pin is current and `auth:` block already present** → already on v0.3. Tell the user "PRoctor is already integrated and up to date" and stop unless they want to re-run for some other reason.
+- **Workflow exists, pin is current, `auth:` block present, AND seed script exists** → fully set up. Tell the user "PRoctor is already integrated and up to date" and stop.
+- **Workflow exists, pin is current, `auth:` block present, but seed script MISSING** → set `MODE=bump-only` (no other workflow patching) and `NEEDS_SEED_SCRIPT=yes`. The wizard ALSO runs Step 8c-pre to generate the missing seed script. Skip Sections 1–7 (config already correct).
 - **Files exist but no `auth:` block** (typical v0.2.x consumer) → set `MODE=migrate`. Ask:
 
   > "Detected existing PRoctor integration pinned at <CURRENT_PIN>. v0.3.0 introduces:
@@ -60,13 +71,16 @@ Branch on what's there:
 
 `MODE` decides what runs next:
 
-| MODE | Skip Step 1–6 | Run Section 7 | Apply via |
-|---|---|---|---|
-| `fresh` | — | — | Step 1 onward (full flow, asks Q0 for path) |
-| `migrate` | yes | yes (skip Q-EnvC count if existing config already lists accounts) | Section 7 + Section 8 patcher |
-| `bump-only` | yes | — | Section 8 patcher (workflow version only) |
+| MODE | Skip Step 1–6 | Run Section 7 | Run Step 8c-pre (seed script) | Apply via |
+|---|---|---|---|---|
+| `fresh` | — | — | always | Step 1 onward |
+| `migrate` | yes | yes | always | Section 7 + Section 8 patcher |
+| `bump-only` (full v0.3) | yes | — | — | Section 8 patcher (version only) |
+| `bump-only` + `NEEDS_SEED_SCRIPT=yes` | yes | — | yes | Section 8 patcher + Step 8c-pre only |
 
 For `migrate` and `bump-only`, **do NOT call out to Sections 1–6**; they're CI-bring-up flow only.
+
+**Seed-script gating is orthogonal to MODE**: any time `.pr-test.yml` declares `auth.accounts` AND no local seed script exists, Step 8c-pre runs. Bumping the action version doesn't help a dev who still needs to seed local users.
 
 ## 1. Detect stack
 
@@ -760,7 +774,11 @@ For **Python / Django / FastAPI / Rails / etc.** — emit a TODO placeholder:
 
 ### 8c-pre — Write the local-seed helper script
 
-For local-mode use, generate `hack/proctor-seed-local.sh` (or `scripts/proctor-seed-local.sh` if no `hack/`, or top-level `proctor-seed-local.sh` if neither exists). This script:
+**Runs whenever `NEEDS_SEED_SCRIPT=yes`** (i.e. `auth.accounts` declared but no `hack/proctor-seed-local.sh` / `scripts/proctor-seed-local.sh` / top-level equivalent exists yet). Orthogonal to MODE — runs in fresh, migrate, AND bump-only-with-missing-script.
+
+If the seed script already exists, **don't overwrite** — just skip this step. The dev's filled-in TODO block (their project-specific UPSERT SQL) is in there; clobbering would discard that work.
+
+Generate `hack/proctor-seed-local.sh` (or `scripts/proctor-seed-local.sh` if no `hack/`, or top-level `proctor-seed-local.sh` if neither exists). This script:
 
 1. Generates a fresh 32-char base32 TOTP seed per account.
 2. Inserts/upserts each account into the local DB.
