@@ -2,6 +2,28 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.18 — 2026-05-13
+
+### Local mode gets a real HTML report (with screenshots, "why this test", auto-open)
+- **User feedback**: "the local report isn't readable — no screenshots, explanations too thin, I can't tell what was tested or why."
+- **Three changes**:
+
+  **1. New `rationale` field on plan items.** Planning skill now writes WHY each test was generated for THIS diff (cites the relevant hunk / PR-body claim / risk category). Schema validates the field optionally. The reporter renders it as "Why this test" — the dev can audit the planner's reasoning, not just "trust me bro".
+
+  **2. HTML report alongside the markdown** (`.proctor/runs/<run-id>/report.html`). Single self-contained file (CSS inlined, screenshots via `./screenshots/<id>.png` relative path). Features:
+  - Sticky header with pass/fail counts + cost
+  - Per-item `<details>` blocks — fail items default OPEN, pass items default closed
+  - Five sections per item: Why this test / What it did / How / Result / Screenshot
+  - Dark mode via `prefers-color-scheme` (no JS)
+  - Click-to-zoom screenshots (native browser behavior)
+
+  **3. Auto-open**: at the end of a local run, the reporter calls `open <report.html>` (macOS) / `xdg-open` (Linux). The dev gets the report in their browser without typing `open` themselves.
+
+- **Stdout in local mode is now MINIMAL** — short summary + paths only. No more dumping the full markdown verbatim into chat; the HTML is the readable artifact, terminal output is just signposting.
+
+### Why HTML over markdown for local
+The PR-comment use case loves markdown because GitHub renders it nicely. Locally, terminals can't render images, can't collapse `<details>`, and look noisy. HTML in a browser solves all three with one extra file. The markdown still gets written (`.proctor/runs/<run-id>/report.md`) for anyone who wants to copy it into another tool.
+
 ## v0.3.17 — 2026-05-13
 
 ### Local report: file:// screenshots + dump full markdown + show paths

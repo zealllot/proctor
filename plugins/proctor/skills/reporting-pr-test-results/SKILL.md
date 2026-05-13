@@ -142,18 +142,141 @@ Re-run with `--push-fix` to also push these as a fix PR.
 3. Compute a one-line summary (`<pass>/<total> passed`) for use as the `summary_for_gist` if the body exceeds GitHub's comment size limit.
 4. Save the rendered markdown to `.proctor/runs/<run-id>/report.md` (always — both modes need it).
 5. Branch on `PROCTOR_POST_COMMENT`:
-   - `1` → call `post_comment.post(pr_number=..., repo=..., body=<rendered>, summary_for_gist=<one-line>)`. Emit `[proctor:report] done comment_posted=true`.
-   - `0` → skip the post call. Print to stdout, **in this exact order**:
+   - `1` (CI) → call `post_comment.post(pr_number=..., repo=..., body=<rendered>, summary_for_gist=<one-line>)`. Emit `[proctor:report] done comment_posted=true`. Done.
+   - `0` (local) → **also generate an HTML report** alongside the markdown (markdown is for posting to PRs; HTML is the dev-facing artifact). See the HTML template below.
+
+   For local mode, print to stdout in this exact order:
      1. Status line: `[proctor:report] done comment_posted=false`
-     2. **The full rendered markdown verbatim** — every `<details>` block, every per-item section, every screenshot link, every log link. Do NOT summarize, do NOT skip sections, do NOT collapse pass items into a "all good" sentence. The whole point of local mode is the dev gets the same level of detail they'd see on a PR; the only difference is where the bytes land.
-     3. After the markdown, three short follow-up lines:
+     2. A short summary: `<pass>/<total> passed · <fail> failed · <skipped> skipped · cost $<n> · time <Nm>`
+     3. The three follow-up lines:
         ```
         ──────
-        Report file:  <absolute path to .proctor/runs/<run-id>/report.md>
-        Screenshots:  <absolute path to .proctor/runs/<run-id>/screenshots/>  (open report.md in VS Code markdown preview to render images inline)
-        Patches:      <absolute path to .proctor/runs/<run-id>/patches/>      (only if any; show "none" otherwise)
+        HTML report:  <abs path to .proctor/runs/<run-id>/report.html>  ← OPEN THIS
+        Markdown:     <abs path to .proctor/runs/<run-id>/report.md>
+        Screenshots:  <abs path to .proctor/runs/<run-id>/screenshots/>
+        Patches:      <abs path to .proctor/runs/<run-id>/patches/>      (only if any; otherwise "none")
         ```
-     The double-log concern from CI doesn't apply here — local invocations are interactive and the user explicitly wants to read the report. **No paraphrasing or "here's a summary of the report" — just emit the markdown.**
+     4. Try to `open <abs path to report.html>` (macOS) or `xdg-open <...>` (Linux); on failure (e.g. headless), just leave the path printed.
+
+   In local mode, **do NOT dump the full markdown to chat**. The HTML report is the readable artifact, the markdown is a backup for PR-posting use. Dumping the markdown verbatim adds noise in the terminal that's worse than the HTML.
+
+## HTML report template (local mode)
+
+Generate `<run-dir>/report.html` as a single self-contained file. Screenshots referenced by relative path (`./screenshots/<id>.png`) so the file is small and portable as long as you don't move it out of the run dir.
+
+Structure:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PRoctor — PR #<num> @ <head_sha[:7]></title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 960px; margin: 0 auto; padding: 24px; line-height: 1.5; }
+    header { position: sticky; top: 0; background: Canvas; padding: 16px 0; border-bottom: 1px solid #444; }
+    h1 { margin: 0; font-size: 1.4em; }
+    .summary { display: flex; gap: 16px; margin: 8px 0; font-size: 0.9em; color: #888; }
+    .summary .pass { color: #2da44e; }
+    .summary .fail { color: #cf222e; }
+    .item { border: 1px solid #ddd; border-radius: 6px; margin: 12px 0; }
+    .item summary { padding: 12px; cursor: pointer; user-select: none; }
+    .item.pass summary { color: #2da44e; }
+    .item.fail summary { color: #cf222e; }
+    .item.skip summary { color: #888; }
+    .item-body { padding: 0 16px 16px; border-top: 1px solid #eee; }
+    .section { margin: 12px 0; }
+    .section h3 { font-size: 0.85em; text-transform: uppercase; color: #888; margin: 4px 0; letter-spacing: 0.05em; }
+    .section p { margin: 0; }
+    pre { background: #f6f8fa; padding: 8px 12px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; }
+    .screenshot { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; margin-top: 8px; }
+    .chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; background: #eee; color: #555; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0d1117; color: #c9d1d9; }
+      .item { border-color: #30363d; }
+      pre { background: #161b22; }
+      .chip { background: #21262d; color: #8b949e; }
+      .screenshot { border-color: #30363d; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>PRoctor — PR #<num> @ <head_sha[:7]></h1>
+  <div class="summary">
+    <span class="pass">✓ <pass>/<total> passed</span>
+    {if fail > 0}<span class="fail">✗ <fail> failed</span>{end-if}
+    {if skipped > 0}<span>⏭ <skipped> skipped</span>{end-if}
+    <span>Cost: $<cost></span>
+    <span>Run id: <code><run-id></code></span>
+  </div>
+</header>
+
+{for each item, ordered: failures first, then pass, then skipped:}
+<details class="item <pass|fail|skip>" {open if fail}>
+  <summary>
+    <strong>[<status emoji>] <id></strong>
+    — <what>
+    <span class="chip"><category></span>
+    {if as_account}<span class="chip">as: <as_account></span>{end-if}
+  </summary>
+  <div class="item-body">
+    {if rationale}
+    <div class="section">
+      <h3>Why this test</h3>
+      <p><rationale></p>
+    </div>
+    {end-if}
+
+    <div class="section">
+      <h3>What it did</h3>
+      <p><1–2 sentence plain-English description of the test action></p>
+    </div>
+
+    {if command}
+    <div class="section">
+      <h3>How (the actual command)</h3>
+      <pre><command></pre>
+    </div>
+    {end-if}
+
+    <div class="section">
+      <h3>Result</h3>
+      <p><evidence>{if status==fail and reason}<br><strong>Failure reason:</strong> <reason></code>{end-if}</p>
+      {if output_excerpt}<pre><output_excerpt — truncated to 60 lines></pre>{end-if}
+    </div>
+
+    {if screenshot_ref}
+    <div class="section">
+      <h3>Screenshot</h3>
+      <img class="screenshot" src="./screenshots/<basename of screenshot_ref>" alt="<id> screenshot">
+      {if screenshot_focus}<p><em>What to look for:</em> <screenshot_focus></p>{end-if}
+    </div>
+    {end-if}
+
+    {if logs_ref}
+    <div class="section">
+      <h3>Full log</h3>
+      <p><a href="<relative path to logs_ref>"><logs_ref></a></p>
+    </div>
+    {end-if}
+  </div>
+</details>
+{end-for}
+
+{if FixPRRef}
+<section style="margin-top: 32px;">
+  <h2>Auto-fix</h2>
+  <!-- Same as markdown's Auto-fix section, just in HTML. -->
+</section>
+{end-if}
+
+</body>
+</html>
+```
+
+The HTML must be valid (no `</strong>` mismatched, etc.). Test for parse-ability before saving (Python `html.parser` minimal check). If parse fails, write the markdown as fallback and warn.
 
 ## Constraints
 

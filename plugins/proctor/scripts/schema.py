@@ -133,6 +133,16 @@ def validate_test_plan(tp: dict) -> None:
         if "as_account" in item and item["as_account"] is not None:
             _require(isinstance(item["as_account"], str) and item["as_account"].strip(),
                      f"TestPlan.items[{i}].as_account must be a non-empty string if set")
+        # `rationale` (v0.3.18+) optional — one-paragraph explanation of
+        # WHY the planner generated this item for THIS diff (which hunk
+        # it targets, which acceptance criterion it checks, which risk
+        # it mitigates). Shown in the report under "Why this test" so
+        # the developer can audit whether the planner's reasoning makes
+        # sense. Missing rationale just means that section is omitted
+        # for backward compat with older plans.
+        if "rationale" in item and item["rationale"] is not None:
+            _require(isinstance(item["rationale"], str) and item["rationale"].strip(),
+                     f"TestPlan.items[{i}].rationale must be a non-empty string if set")
 
     # Second pass: every depends_on entry must reference a known id.
     for i, item in enumerate(tp["items"]):

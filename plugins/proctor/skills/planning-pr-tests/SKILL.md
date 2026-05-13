@@ -129,6 +129,12 @@ Phrasing tip: when an item is role-specific, put the role in the `what:` field â
 
 ## Output JSON shape
 
+Every item MUST carry a `rationale` field â€” a one-paragraph explanation of WHY this test was generated for THIS diff. The report renders it as "Why this test" so the developer can audit the planner's reasoning. Without it, the dev sees test items appearing out of nowhere and can't tell whether the AI understood the change. Tie the rationale to one or more of:
+
+- a specific hunk in the ChangeMap (cite the file + brief description of what changed there)
+- a claim in `pr_context.body` / `pr_context.requirement_hints` (quote the relevant phrase)
+- a category-level risk (e.g. "schema change â†’ migrations need verifying")
+
 ```jsonc
 {
   "items": [
@@ -139,7 +145,8 @@ Phrasing tip: when an item is role-specific, put the role in the `what:` field â
       "how": "Navigate to base_url; assert button[name='Sign in'] is visible",
       "tool": "chrome-devtools",
       "risk": "low",
-      "depends_on": []
+      "depends_on": [],
+      "rationale": "The diff in src/auth/LoginButton.tsx adds an aria-label and changes the visible text from 'Login' to 'Sign in'. This item verifies the new visible text is what users see at /login."
       // "as_account" omitted â†’ executor uses accounts[0]
     },
     {
@@ -150,11 +157,17 @@ Phrasing tip: when an item is role-specific, put the role in the `what:` field â
       "tool": "chrome-devtools",
       "risk": "medium",
       "depends_on": [],
-      "as_account": "editor"   // requires .pr-test.yml.auth.accounts[].name=='editor'
+      "as_account": "editor",
+      "rationale": "The diff in admin/permissions.go added `if !user.IsDeveloper { hide(\"users\") }`. The corresponding negative check (editor / viewer) verifies the new permission gate actually hides the menu item for non-developers."
     }
   ]
 }
 ```
+
+Rationale writing rules:
+- One paragraph, 1â€“3 sentences. Not a wall of text.
+- Cite at least one concrete signal from the diff or PR body. "Generated because the PR touches frontend code" is too vague.
+- For multi-role items, the rationale should explain why this SPECIFIC role is the right one to test under.
 
 ## Constraints
 
