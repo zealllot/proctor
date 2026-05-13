@@ -1064,6 +1064,151 @@ def test_impact_radius_empty_identifiers_returns_empty(tmp_path):
     assert collect_callers("src.go", [], repo=str(tmp_path)) == []
 
 
+# --- v0.3.27: error_type diff-pattern triggers (#4) ----------------------
+
+from plugins.proctor.scripts.error_signals import detect as detect_err
+
+
+def test_err_signal_state_conflict_unique_index():
+    sigs = detect_err("CREATE UNIQUE INDEX idx_email ON users(email);")
+    assert "state-conflict" in sigs
+    assert "unique-index-added" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_gorm_unique_tag():
+    sigs = detect_err(
+        '+ Email string `gorm:"column:email;uniqueIndex" json:"email"`')
+    assert "state-conflict" in sigs
+    assert "gorm-unique-index-tag" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_version_field():
+    sigs = detect_err("+\tVersion int `gorm:\"column:version\"`")
+    assert "state-conflict" in sigs
+    assert "version-field-added" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_version_where_clause():
+    sigs = detect_err(
+        "UPDATE rewards SET name = ? WHERE id = ? AND version = ?")
+    assert "state-conflict" in sigs
+    assert "version-where-clause" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_status_guard():
+    sigs = detect_err('if order.Status != "draft" { return ErrCannotEdit }')
+    assert "state-conflict" in sigs
+    assert "state-guard" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_409_response():
+    sigs = detect_err("return c.JSON(http.StatusConflict, msg)")
+    assert "state-conflict" in sigs
+    assert "conflict-response" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_select_for_update():
+    sigs = detect_err("SELECT * FROM orders WHERE id = ? FOR UPDATE")
+    assert "state-conflict" in sigs
+    assert "select-for-update" in sigs["state-conflict"]
+
+
+def test_err_signal_state_conflict_idempotency_key():
+    sigs = detect_err('+ IdempotencyKey string `json:"idempotency_key"`')
+    assert "state-conflict" in sigs
+
+
+def test_err_signal_permission_role_guard():
+    sigs = detect_err("if !user.IsAdmin { return }")
+    assert "permission" in sigs
+    assert "role-check-guard" in sigs["permission"]
+
+
+def test_err_signal_permission_403_response():
+    sigs = detect_err("c.AbortWithStatus(http.StatusForbidden)")
+    assert "permission" in sigs
+
+
+def test_err_signal_auth_middleware():
+    sigs = detect_err(
+        "router.Use(RequireAuth())\nrouter.Use(LoginRequired)")
+    assert "auth" in sigs
+    assert "auth-middleware" in sigs["auth"]
+
+
+def test_err_signal_auth_csrf():
+    sigs = detect_err("config.csrf = true")
+    assert "auth" in sigs
+
+
+def test_err_signal_auth_unauthorized():
+    sigs = detect_err("return http.StatusUnauthorized")
+    assert "auth" in sigs
+
+
+def test_err_signal_not_found_gorm():
+    sigs = detect_err(
+        "if errors.Is(err, gorm.ErrRecordNotFound) { return nil }")
+    assert "not-found" in sigs
+
+
+def test_err_signal_not_found_nil_guard():
+    sigs = detect_err(
+        "if record == nil { return ErrNotFound }")
+    assert "not-found" in sigs
+
+
+def test_err_signal_network_http_client():
+    sigs = detect_err('resp, err := http.Get("https://api.example.com")')
+    assert "network" in sigs
+    assert "http-client" in sigs["network"]
+
+
+def test_err_signal_network_retry():
+    sigs = detect_err("ctx, cancel := context.WithTimeout(ctx, 5*time.Second)")
+    assert "network" in sigs
+    assert "timeout-config" in sigs["network"]
+
+
+def test_err_signal_validation_validate_tag():
+    sigs = detect_err('Name string `validate:"required,max=100"`')
+    assert "validation" in sigs
+
+
+def test_err_signal_validation_rails():
+    sigs = detect_err("validates_presence_of :email")
+    assert "validation" in sigs
+
+
+def test_err_signal_no_match_returns_empty():
+    sigs = detect_err("// just a comment\nfmt.Println(\"hello\")")
+    assert sigs == {}
+
+
+def test_err_signal_signals_dedup_within_error_type():
+    # Multiple lines that trigger the SAME pattern shouldn't produce
+    # duplicate signal names — the report consumer expects unique names.
+    sigs = detect_err(
+        "if !user.IsAdmin { return }\n"
+        "if !user.IsDeveloper { return }\n"
+    )
+    assert sigs["permission"].count("role-check-guard") == 1
+
+
+def test_err_signal_multiple_error_types_in_one_diff():
+    # A real PR routinely touches multiple error_types in one hunk —
+    # the helper must surface ALL of them, not just the first.
+    diff = """
++ if !user.IsAdmin { return c.AbortWithStatus(http.StatusForbidden) }
++ Email string `gorm:"column:email;uniqueIndex"`
++ return http.StatusUnauthorized
+"""
+    sigs = detect_err(diff)
+    assert "permission" in sigs
+    assert "state-conflict" in sigs
+    assert "auth" in sigs
+
+
 def test_impact_radius_min_occurrences_tunable(tmp_path):
     """min_occurrences=1 (legacy v0.3.24 behavior) keeps single-match
     files; the default of 2 drops them. Useful for ad-hoc debugging."""

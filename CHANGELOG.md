@@ -2,6 +2,42 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.27 — 2026-05-13
+
+### error_type diff-pattern triggers — fix the "all-`validation` plan" bias (#4)
+
+The `error_type` enum shipped in v0.3.22 but the planner over-emitted `validation` (validators are easy to spot in a diff) and under-emitted the rest — especially `state-conflict`, which manifests as small schema constraints and status-guard branches that don't visually scream "error handling". This release ships an unambiguous trigger system.
+
+**Helper script** (`plugins/proctor/scripts/error_signals.py`):
+- Scans hunk added-lines for diff patterns and returns `{error_type: [signal_names]}`.
+- Patterns are CONSERVATIVE — false negatives are fine (planner falls back to inference); false positives are not (would make the planner plan items for non-existent failure modes).
+- Coverage today: Go primary (handlers, GORM, gorm tags, sync primitives), Python, Ruby/Rails idioms, SQL DDL, generic HTTP status / error patterns.
+
+**Pattern map (highlights):**
+- **`state-conflict`** (deepest coverage, the hardest to spot): `CREATE UNIQUE INDEX`, `ADD CONSTRAINT ... UNIQUE`, `gorm:"uniqueIndex"` tags, `Version int` / `Revision int` field additions, `WHERE version = ?` clauses, `StatusConflict` / `ErrConflict` / `409` literals, `"already exists" / "duplicate"` error strings, `if order.Status != "..."` guards, `SELECT ... FOR UPDATE`, `sync.Mutex`/`RWMutex`, `idempotency_key` fields.
+- **`permission`**: `IsAdmin`/`IsDeveloper`/`IsEditor`/`IsOwner`/`IsStaff` checks, `RequireRole` / `RequirePermission` / `policy.Allow` / `authorize!` / `cancan` / `enforce` calls, `StatusForbidden`/403.
+- **`auth`**: `RequireAuth` / `RequireLogin` / `MustAuth` / `LoginRequired` / `authenticate_user!`, CSRF references, `StatusUnauthorized`/401, session lifecycle calls.
+- **`not-found`**: `gorm.ErrRecordNotFound`, `if x == nil { return ErrNotFound }`, `StatusNotFound`/404, `render :not_found`.
+- **`network`**: `http.Get/Post/NewRequest`, `Faraday` / `HTTParty` / `Net::HTTP` / `requests.get` / `axios`, `retry` / `backoff` / `with_retries`, `context.WithTimeout`, circuit breakers.
+- **`validation`**: `validate(...)` calls, `validate:"..."` struct tags, `ValidationError` / `StatusBadRequest` / 400 responses, `validates_presence_of :email` / `validates_uniqueness_of` / Rails-style validation DSL, `yup` / `zod` / `joi` / `ajv` frontend validators.
+
+**Planner skill** (`planning-pr-tests/SKILL.md` new section):
+- Run helper against the hunk's added-lines BEFORE writing negative items.
+- For every error_type the helper flagged → plan at least one matching negative item.
+- Signal name goes into the item's `rationale` ("planned because the diff added gorm:\"uniqueIndex\" on Email").
+- New "diff pattern → test recipe" lookup table per error_type, with state-conflict getting the deepest treatment (10 patterns mapped to 10 concrete test recipes).
+- Helper-flagged-nothing fallback: planner can still infer one, leave `error_type` unset, explain in `rationale` why the helper missed it (feedback loop for tuning patterns).
+
+### Tests
+- 96 → 118 (+22): unique-index, gorm-unique-index-tag, version-field-added, version-where-clause, status-guard, conflict-response, select-for-update, idempotency-key, role-check-guard, forbidden-response, auth-middleware, csrf, unauthorized, gorm-not-found, nil-not-found-guard, http-client, timeout-config, validate-tag, rails-validates, no-match-returns-empty, signal-dedup, multi-error-type-in-one-diff.
+
+### Status of the 5-point quality review
+- #1 impact_radius false-positive control ✅ (v0.3.26)
+- #2 journey upgraded to top-level array — queued
+- #3 data_from artifact passing ✅ (v0.3.25)
+- #4 error_type diff-pattern triggers ✅ (this release)
+- #5 impact_radius_truncated flag with auto-risk-upgrade — queued
+
 ## v0.3.26 — 2026-05-13
 
 ### impact_radius — frequency-threshold filter drops single-import-line false positives (#1)

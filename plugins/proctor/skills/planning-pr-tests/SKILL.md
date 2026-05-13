@@ -348,6 +348,58 @@ When you plan more than one negative item, distribute across `error_type` catego
 
 For happy-path items, leave `error_type` unset.
 
+### Diff-pattern triggers for `error_type` (v0.3.27+)
+
+The bias of unaided inference is to over-emit `validation` (validators are easy to spot in a diff) and under-emit the rest — especially `state-conflict`, which manifests as small schema/code patterns that don't visually scream "error handling". Run this helper against each hunk's added-lines BEFORE writing negative items:
+
+```bash
+git diff "$BASE_SHA" "$HEAD_SHA" -- "<hunk_file>" \
+  | grep '^+' \
+  | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/error_signals.py
+```
+
+Output is a JSON map `{error_type: [signal_names]}` — e.g. `{"state-conflict": ["gorm-unique-index-tag", "version-field-added"]}`. For every error_type the helper flagged, **plan at least one matching negative item**. The signal name goes into the item's `rationale` so reviewers can trace WHY the planner chose that error_type.
+
+Below: what each pattern looks like in code, and the canonical test it should produce. Treat this as the planner's "if you see X in the diff, you owe an item of type Y" lookup.
+
+**`state-conflict`** (the hardest type to spot, hence the most detail):
+
+| Diff pattern | Helper signal | Plan this test |
+|---|---|---|
+| `CREATE UNIQUE INDEX ...` migration | `unique-index-added` | Create record A; try to create record B with same key → expect 409/422 with conflict message |
+| `ADD CONSTRAINT ... UNIQUE` | `unique-constraint-added` | Same as above; verify the *exact* error message references the duplicate column |
+| `gorm:"uniqueIndex"` struct tag | `gorm-unique-index-tag` | Submit form twice with same value → second submit rejected |
+| `Version int` / `Revision int` field added | `version-field-added` | Load record; modify it from another session/tab; PUT with stale version → expect 409 |
+| `WHERE version = ?` in update SQL | `version-where-clause` | Same as version-field-added; verify the update only affects 0 rows when version is stale |
+| `StatusConflict` / `ErrConflict` / `409` literal | `conflict-response` | If the diff just added the response — exercise the code path that returns it |
+| `"already exists" / "duplicate"` in error strings | `duplicate-error-returned` | Same — exercise that branch with a real duplicate |
+| `if order.Status != "draft"` guard | `state-guard` | Set status to a non-draft value (publish/archive); attempt the guarded action → expect rejection |
+| `SELECT ... FOR UPDATE` | `select-for-update` | Concurrent updates against same row — verify only one wins (best-effort; can be approximated with sequential edits in two browser contexts) |
+| `sync.Mutex` / `sync.RWMutex` added | `sync-mutex` | If user-visible: trigger two concurrent requests; verify only one effect occurs |
+| `idempotency_key` field / header | `idempotency-key` | Submit same request twice with same key; verify only ONE record created |
+
+**`permission`** — role-based access:
+- `if !user.IsAdmin` / `RequireRole(...)` / `policy.Allow(...)` / `StatusForbidden` returned
+- Test: switch `as_account` to the lower-privilege role; attempt the action; assert 403 (or hidden UI element)
+
+**`auth`** — session / authentication:
+- `RequireAuth` middleware added; CSRF token check; `StatusUnauthorized` returned; session expiry logic
+- Test: clear cookies / use expired token; attempt; assert redirect to login or 401
+
+**`not-found`** — missing record:
+- `gorm.ErrRecordNotFound` / `if x == nil { return ErrNotFound }` / `StatusNotFound` returned / `render :not_found`
+- Test: hit URL with non-existent ID; assert 404 + correct empty-state UI (not 500)
+
+**`network`** — external dependency failure:
+- `http.Get/Post` / `Faraday` / `requests.get` / `retry` / `context.WithTimeout` / `CircuitBreaker`
+- Test: hard to simulate in PRoctor without mocking — usually `lint-only` checking the error path EXISTS in source; or chrome-devtools blocking the URL via DevTools network override if the diff is end-user visible
+
+**`validation`** — form / input rejection (the easy default; only plan when the helper actually flagged it):
+- `validate(...)` call / `validate:"required"` tag / `ValidationError` / `400` returned / `yup.string().required()`
+- Test: submit form with missing / malformed / out-of-range value; assert specific field-level error message
+
+**When the helper returned NOTHING** but you still think a negative item makes sense — fine, infer one, leave `error_type` unset, and explain in `rationale` why the helper missed it. That feedback loop helps tune the patterns over time.
+
 ## Role-aware planning (when `.pr-test.yml` has `auth.accounts`)
 
 If the consumer's `.pr-test.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.
