@@ -599,16 +599,35 @@ For `MODE=migrate`, DROP the existing `setup:` block (no longer needed in existi
 
 ### 8b — Write `.pr-test.local.yml.example`
 
+The example file should include a stack-aware `setup:` block so the developer
+gets auto-server-lifecycle out of the box. Inputs you have from earlier
+detection: `STACK_SUMMARY` (Go / Node / Postgres / etc.), `APP_PORT`,
+`COMPOSE_HIT` (docker-compose path if any), `IMPORT_PATH` (Go projects).
+
+Generate `.pr-test.local.yml.example` like this:
+
 ```yaml
 # Per-developer overrides. Copy this to .pr-test.local.yml and edit.
-# This file is gitignored.
+# Gitignored — each dev keeps their own.
 #
-# Most devs just need to override base_url to point at their local server:
-base_url: http://localhost:<APP_PORT or "PORT_HERE">
+# How this works: every `claude /proctor:proctor <PR>` invocation runs
+# `setup:` first, kills any previously-PRoctor-started server (tracked via
+# pidfile), starts a fresh one with your current code, then runs scenarios.
+# Edit code → re-run /proctor → automatic fresh-server cycle.
 
-# To override credentials for a fully different local-only account set,
-# replace auth.accounts wholesale (the array REPLACES the base on merge —
-# partial entries would silently fall back to test env creds):
+base_url: http://localhost:<APP_PORT>
+
+setup:
+  # < inject stack-aware commands here, see below >
+
+teardown:
+  # Default: leave the server running so you can keep iterating in your
+  # browser between PRoctor runs. PRoctor will kill+restart it on the
+  # NEXT /proctor invocation via the pidfile in setup.
+  []
+
+# Override credentials only if your local dev env has its own ai-tester accounts:
+# (uncomment + edit; the whole `accounts:` array REPLACES the base on merge)
 #
 # auth:
 #   accounts:
@@ -617,6 +636,75 @@ base_url: http://localhost:<APP_PORT or "PORT_HERE">
 #       email_env: LOCAL_DEV_EMAIL
 #       password_env: LOCAL_DEV_PASSWORD
 #       totp_seed_env: LOCAL_DEV_TOTP_SEED
+```
+
+The `setup:` block content depends on `STACK_SUMMARY`. Compose the lines by
+appending the applicable snippets below in order (idempotent restart pattern
+— PRoctor kills its own previous PID via the pidfile, never the dev's
+unrelated processes):
+
+**1. Bring up infra dependencies** (always emit if `COMPOSE_HIT` is set):
+```yaml
+  - docker compose -f <COMPOSE_HIT> up -d
+  - bash -c 'for i in $(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'
+```
+
+If `DB_PROVISION=services` (the rare case), skip this snippet — local has its
+own DB so `services:` only applies in CI.
+
+**2. Kill previous PRoctor-managed app server** (always emit):
+```yaml
+  - bash -c '[ -f /tmp/proctor-<REPO_NAME>.pid ] && kill "$(cat /tmp/proctor-<REPO_NAME>.pid)" 2>/dev/null; true'
+```
+
+`REPO_NAME` = the repo's basename (e.g. `mcd-website`), so multiple PRoctor-managed projects don't collide on pidfile.
+
+**3. Build + start the app server** — pick by stack:
+
+For **Node / Vite / Next**:
+```yaml
+  - corepack enable && corepack prepare pnpm@9 --activate
+  - pnpm install --frozen-lockfile
+  - bash -c 'nohup pnpm dev > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+```
+
+For **Go modules**:
+```yaml
+  - go mod download
+  - bash -c 'set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+```
+
+If the repo has a `dev_env` file (mcd-website convention), source it before `go run` to pick up the right ports / DB creds. Skip sourcing silently if no such file.
+
+For **GOPATH-era Go** (no go.mod):
+```yaml
+  - mkdir -p "$HOME/go/src/<IMPORT_PATH%/*>" && ln -sfn "$PWD" "$HOME/go/src/<IMPORT_PATH>"
+  - cd "$HOME/go/src/<IMPORT_PATH>" && go get -d -v ./... || true
+  - bash -c 'cd "$HOME/go/src/<IMPORT_PATH>" && set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+```
+
+For **Python / Django / FastAPI / Rails / etc.** — emit a TODO placeholder:
+```yaml
+  # TODO: fill in your local server start. Pattern:
+  # - <install deps>
+  # - bash -c 'nohup <run-server> > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+```
+
+**4. Wait loop on the app's port** (always emit):
+```yaml
+  - bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:<APP_PORT>/<HEALTH_PATH> >/dev/null 2>&1 && break; sleep 1; done || { echo "server failed to come up"; tail -50 /tmp/proctor-<REPO_NAME>.log; exit 1; }'
+```
+
+`HEALTH_PATH` = `auth.login_url` rewritten without leading slash (it's a route the app actually serves, so this both verifies the binary booted AND that templates render). For mcd-website with `/auth/login`, this becomes `auth/login`.
+
+**5. Append a comment block reminding the dev about the iteration cycle**:
+```yaml
+# Iteration cycle:
+#   1. Edit code in your editor.
+#   2. Run: claude /proctor:proctor <PR#>
+#   3. PRoctor kills the previous server, builds + starts a fresh one,
+#      runs scenarios, posts the report.
+#   4. Repeat — keep your editor open, PRoctor handles the rest.
 ```
 
 ### 8c — Update `.gitignore`

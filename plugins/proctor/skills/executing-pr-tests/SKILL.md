@@ -25,13 +25,28 @@ Output: a single `TestResults` JSON object.
    The command-level orchestrator will detect `aborted` and skip fix +
    replace report with a force-push notice.
 
-2. **Run setup** from `.pr-test.yml`. Each command via Bash. If any
+2. **Run setup** from the merged config. Each command via Bash. If any
    exits non-zero → abort with `aborted: "setup-failed"`.
 
-   Skip this entire step when `.pr-test.yml` declares `auth:` and
-   `setup` is empty/absent — that's the v0.3.0+ "external env" mode
-   where the consumer points at an already-running server. The login
-   work in step 3 replaces the local-server bring-up.
+   The merged config is `.pr-test.yml` overlaid by `.pr-test.local.yml`
+   when the latter exists (the file is gitignored — only developers
+   running PRoctor locally will have one). In practice:
+
+   - **CI runs** (deployed test env, `auth:` present, no `setup:` in
+     `.pr-test.yml`, no `.pr-test.local.yml`) → setup is empty, skip
+     this step. Auth in step 3 logs into the already-deployed server.
+   - **Local runs** (developer's `claude /proctor:proctor`, where
+     `.pr-test.local.yml` provides `setup:` to bring up the dev
+     server) → setup runs, restarts the local server fresh each
+     invocation, THEN auth logs in.
+   - **Legacy CI bring-up** (v0.2.x consumers, no `auth:`, just
+     `setup:` + `base_url`) → setup runs, auth is skipped.
+
+   Setup commands typically include a "kill previous PRoctor-managed
+   PID via pidfile" idiom so every invocation gets a fresh server
+   without colliding with other PRoctor instances or the dev's own
+   processes. The wizard's `.pr-test.local.yml.example` ships this
+   pattern by default.
 
 3. **Login per account, group items by `as_account`** (v0.3.0+, only when
    `.pr-test.yml.auth` is set). For each distinct `as_account` value

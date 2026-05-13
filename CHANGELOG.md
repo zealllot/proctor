@@ -2,6 +2,32 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.3 — 2026-05-13
+
+### Wizard now generates auto-server-lifecycle for local dev
+- **`.pr-test.local.yml.example` ships a stack-aware `setup:` block**, so when a developer runs `claude /proctor:proctor <PR>` locally, PRoctor brings up the dev server itself — no more "first start your server, then run PRoctor". Edit code → re-run PRoctor → automatic fresh-server cycle:
+  ```
+  claude /proctor:proctor 123
+    → kill previous PRoctor-managed PID via pidfile
+    → docker compose up + wait for DB port
+    → go build / pnpm install / etc.
+    → start server + wait for /admin to respond
+    → form-login each configured account
+    → run scenarios
+  ```
+- **Per-stack templates** for Node/Vite/Next, Go modules, GOPATH-era Go, and Python/Ruby (placeholder). Each starts the server with `nohup ... & echo $! > /tmp/proctor-<REPO_NAME>.pid` so a future invocation can kill it cleanly via pidfile — no `pkill` against patterns that might match the dev's other processes.
+- **Health-check uses `auth.login_url`** as the wait-loop target. The login page rendering proves the binary booted AND templates resolve — useful smoke before scenarios even start.
+
+### Executor SKILL.md clarification
+- The merge-config + setup-runs-when-present-regardless-of-auth behavior is now spelled out explicitly. Previously the phrasing implied setup was for legacy mode only.
+
+### Iteration cycle documented
+- The example file embeds a comment block reminding the dev they don't need to manage `go run` / `pnpm dev` themselves between iterations — that's PRoctor's job now.
+
+### Not changed
+- Schema and TOTP helpers unchanged from v0.3.0.
+- 46 tests still pass.
+
 ## v0.3.2 — 2026-05-13
 
 ### Wizard: discover admin roles from the codebase
