@@ -1,4 +1,5 @@
 import json
+import pathlib
 import subprocess
 import pytest
 from unittest import mock
@@ -859,7 +860,8 @@ def test_plan_smells_cli_strict_exits_1_when_warnings(tmp_path):
         '"what":"save record with missing field rejected; with field, saves",'
         '"how":"...","risk":"high","depends_on":[]}]}'
     )
-    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts" / "plan_smells.py")
     result = subprocess.run(
         ["python3", script, "--strict"],
         stdin=open(bad_plan), capture_output=True, text=True,
@@ -879,7 +881,8 @@ def test_plan_smells_cli_strict_exits_0_when_clean(tmp_path):
         '"what":"Re-open saved record: all fields round-trip",'
         '"how":"...","risk":"high","depends_on":["t-1"],"data_from":["t-1"]}]}'
     )
-    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts" / "plan_smells.py")
     result = subprocess.run(
         ["python3", script, "--strict"],
         stdin=open(clean_plan), capture_output=True, text=True,
@@ -899,7 +902,8 @@ def test_plan_smells_cli_default_advisory_exits_0_even_with_warnings(tmp_path):
         '"what":"save with bad input rejected; valid input saves",'
         '"how":"...","risk":"high","depends_on":[]}]}'
     )
-    script = "/Users/zealllot/go/src/github.com/zealllot/proctor/plugins/proctor/scripts/plan_smells.py"
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts" / "plan_smells.py")
     result = subprocess.run(
         ["python3", script],  # no --strict
         stdin=open(bad_plan), capture_output=True, text=True,
