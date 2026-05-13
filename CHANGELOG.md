@@ -2,6 +2,27 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.22 — 2026-05-13
+
+### Planning quality — three QA-thinking rules (write persistence, preconditions, error variety)
+User submitted a 6-point review of the planning skill. This release lands the three "low difficulty" items; the harder three (user-journey backbone, data_from dependency, impact_radius regression) are queued.
+
+**1. Write-operation persistence (rule, no schema change)** — Every write item (form submit, POST/PUT/DELETE, state-changing click) must include "navigate away → navigate back → reload → assert state matches submitted". Toast/200/element-visible is the immediate response; persistence is the question reviewers actually care about. Rule + worked example in `planning-pr-tests/SKILL.md`.
+
+**2. `preconditions` field on plan items (schema + skill)** — Optional non-empty string. Separates starting-state requirements ("logged in as developer; one published category seeded") from the test ACTION (`how:`). Stops the executor from having to infer starting state from a mixed step list, and gives the report a clean column for human reviewers to read. Skill mandates using it whenever the precondition is anything beyond "PRoctor is logged in".
+
+**3. `error_type` field on negative items (schema + skill)** — Optional enum: `validation` / `permission` / `network` / `state-conflict` / `not-found` / `auth`. Distributes negative-test coverage across distinct failure-mode classes. Rule: among all negative items, at most ~2 share an `error_type` — if you have 4 `validation` items, replace 2 with the `permission` / `state-conflict` / `not-found` variants that the diff actually touches.
+
+### Queued (not in this release)
+| # | Item | Why deferred |
+|---|---|---|
+| 1 | User-journey backbone (preprocess: derive 1–3 journeys from PR body, organize items around them) | Bigger structural change to planning prompt; need to think about journey representation |
+| 4 | `data_from: "t-007"` data dependency between items | Executor needs to carry artifacts (created record IDs etc) forward — touches both schemas + executor logic |
+| 5 | `impact_radius` regression range from import-graph grep | Adds non-trivial analysis to Stage 1; could explode plan size if not capped |
+
+### Tests
+- 51 → 56. New: preconditions accepted/empty-rejected/null-allowed; error_type all-enum-values-accepted/unknown-rejected.
+
 ## v0.3.21 — 2026-05-13
 
 ### Planning: happy-path tests are required, not optional

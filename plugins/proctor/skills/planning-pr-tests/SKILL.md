@@ -142,6 +142,69 @@ Two happy + two negatives gives the reviewer signal that the feature actually wo
 
 When the PR body explicitly lists more negative cases than happy ones (rare, but happens for security-hardening PRs), respect that — but always include at least one happy-path item per new code path.
 
+## Write-operation persistence — required assertions
+
+For any test item that performs a write (POST/PUT/DELETE, form submit, file upload, state-changing button click), the immediate response (toast / 200 / element visible) is necessary but NOT sufficient. The reviewer needs to know the change actually persisted.
+
+For every write-action item, append these checks to `how:`:
+
+1. **Confirm the immediate response** (existing — toast, 200, page transition).
+2. **Navigate away** to the list page or another route, then **navigate back** to the just-edited resource.
+3. **Assert the persisted state** — the field value, record presence in list, status badge — is what was just submitted.
+4. **(If the app supports it) page reload** between steps 2 and 3 — flushes client-side state and proves the value came from the server, not from memory.
+
+Concrete examples:
+
+```
+✗ Insufficient:
+  "Fill form → click Save → assert success toast visible"
+
+✓ With persistence:
+  "Fill form → click Save → assert success toast visible →
+   navigate to /admin/rewards (list page) → assert new record row
+   visible with the submitted name → click into the record → reload
+   the detail page → assert all fields match what was submitted"
+```
+
+If the immediate response IS the persistence (e.g. a generated UUID returned by the API and shown in the URL), that's fine — call it out in the `how:` so a reader knows the test understood the difference. Don't silently rely on "the toast says saved".
+
+## Preconditions: don't bury the starting state in `how:`
+
+When a test requires a specific starting state (logged-in role, seeded data, no existing record with conflicting name, feature flag enabled, etc.), put it in a separate `preconditions` field, NOT mixed into `how:`. Keeps the action steps focused; keeps it obvious to the executor what to verify-or-establish before the test action begins.
+
+```jsonc
+{
+  "id": "t-005",
+  "what": "Editing an existing Image reward updates the asset",
+  "preconditions": "Logged in as developer. An Image-type reward named 'fixture-edit-test' already exists (created by t-004 or via seed).",
+  "how": "Navigate to /admin/rewards; find 'fixture-edit-test' row; click Edit; replace the asset; click Save; assert new asset displays.",
+  "tool": "chrome-devtools",
+  "category": "api",
+  "risk": "high",
+  "depends_on": ["t-004"],
+  "rationale": "..."
+}
+```
+
+Don't write `preconditions` for items where the only precondition is "PRoctor is logged in" (that's covered by the auth flow). Use it when there's a non-trivial state that must exist for the test to be meaningful.
+
+## Error coverage: vary the `error_type`, don't repeat one kind
+
+When you plan more than one negative item, distribute across `error_type` categories instead of stacking the same kind. Valid values:
+
+| `error_type` | When it fires |
+|---|---|
+| `validation` | form / input validator rejects bad data (empty, wrong format, out of range) |
+| `permission` | role-based access check denies action (editor tries to delete) |
+| `network` | upstream API fails, timeout, retry exhausted |
+| `state-conflict` | concurrent edit, duplicate submission, stale-data write |
+| `not-found` | 404 / record was deleted by another user |
+| `auth` | session expired, not logged in, csrf token rejected |
+
+**Coverage rule**: among all your negative items, at most ~2 should share an `error_type`. If you find 4 negatives all `validation`, replace 2 with the `permission` / `state-conflict` / `not-found` variant that's actually present in the diff. Each error_type covered ≈ one new failure-mode class verified.
+
+For happy-path items, leave `error_type` unset.
+
 ## Role-aware planning (when `.pr-test.yml` has `auth.accounts`)
 
 If the consumer's `.pr-test.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.
@@ -187,11 +250,13 @@ Every item MUST carry a `rationale` field — a one-paragraph explanation of WHY
       "id": "t-002",
       "category": "frontend",
       "what": "As editor, Users menu item is hidden",
-      "how": "Navigate to /admin; assert no nav link with text 'Users'",
+      "preconditions": "Logged in as editor (auth.accounts[name=editor]).",
+      "how": "Navigate to /admin; assert no nav link with text 'Users' in the sidebar nav region.",
       "tool": "chrome-devtools",
       "risk": "medium",
       "depends_on": [],
       "as_account": "editor",
+      "error_type": "permission",
       "rationale": "The diff in admin/permissions.go added `if !user.IsDeveloper { hide(\"users\") }`. The corresponding negative check (editor / viewer) verifies the new permission gate actually hides the menu item for non-developers."
     }
   ]

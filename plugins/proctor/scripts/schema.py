@@ -19,6 +19,19 @@ VALID_RISK = {"low", "medium", "high"}
 VALID_TOOL = {"chrome-devtools", "bash", "curl", "lint-only", "skip"}
 VALID_STATUS = {"pass", "fail", "skipped"}
 
+# Optional categorization for negative-path test items so the planner can
+# balance coverage across distinct failure-mode kinds instead of stacking
+# four near-identical validation rejects. Happy-path items leave this
+# unset.
+VALID_ERROR_TYPE = {
+    "validation",       # form / input validator rejects bad data
+    "permission",       # role-based access check fires
+    "network",          # upstream / API failure path
+    "state-conflict",   # concurrent edit / duplicate submit / stale data
+    "not-found",        # 404 / missing-record handling
+    "auth",             # not-logged-in / session-expired
+}
+
 # Auth types accepted in .pr-test.yml's auth.type field. Add new values
 # here when adding support for other login mechanisms (oauth, magic
 # link, etc.); each new value needs a corresponding flow in the
@@ -143,6 +156,24 @@ def validate_test_plan(tp: dict) -> None:
         if "rationale" in item and item["rationale"] is not None:
             _require(isinstance(item["rationale"], str) and item["rationale"].strip(),
                      f"TestPlan.items[{i}].rationale must be a non-empty string if set")
+        # `preconditions` (v0.3.22+) optional — explicit description of
+        # the test's required starting state. Separated from `how:` so
+        # the executor knows what to set up *before* the test action
+        # versus what to execute as the test action itself. Examples:
+        #   "Logged in as developer; DB has one published category."
+        #   "No existing reward named 'fixture-test-image'."
+        # Missing means "no special setup beyond what auth + setup
+        # already arrange".
+        if "preconditions" in item and item["preconditions"] is not None:
+            _require(isinstance(item["preconditions"], str) and item["preconditions"].strip(),
+                     f"TestPlan.items[{i}].preconditions must be a non-empty string if set")
+        # `error_type` (v0.3.22+) optional — categorization for negative
+        # items so the planner can spread coverage across distinct
+        # failure-mode classes instead of repeating the same validation
+        # check in four shapes. Happy-path items must leave this unset.
+        if "error_type" in item and item["error_type"] is not None:
+            _require(item["error_type"] in VALID_ERROR_TYPE,
+                     f"TestPlan.items[{i}].error_type {item['error_type']!r} not in {sorted(VALID_ERROR_TYPE)}")
 
     # Second pass: every depends_on entry must reference a known id.
     for i, item in enumerate(tp["items"]):

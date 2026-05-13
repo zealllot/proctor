@@ -534,3 +534,42 @@ def test_mixed_accounts_different_forms_ok():
         ],
     }}
     validate_pr_test_config(cfg)
+
+
+# --- v0.3.22: preconditions + error_type fields ---------------------------
+
+def test_plan_item_preconditions_accepted():
+    valid = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                        "risk":"low","depends_on":[],
+                        "preconditions":"Logged in as developer."}]}
+    validate_test_plan(valid)
+
+
+def test_plan_item_preconditions_empty_rejected():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":[],
+                      "preconditions":""}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_item_preconditions_null_allowed():
+    # null == omitted, both fine — keeps the field optional.
+    valid = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                        "risk":"low","depends_on":[], "preconditions":None}]}
+    validate_test_plan(valid)
+
+
+def test_plan_item_error_type_accepted():
+    for et in ("validation", "permission", "network", "state-conflict",
+               "not-found", "auth"):
+        item = {"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                "risk":"low","depends_on":[], "error_type": et}
+        validate_test_plan({"items": [item]})
+
+
+def test_plan_item_error_type_unknown_rejected():
+    bad = {"items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                      "risk":"low","depends_on":[], "error_type":"made-up"}]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
