@@ -2,6 +2,27 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.38 — 2026-05-14
+
+### Deprecate orchestrator hard-gate (6d) — the duplicate was stalling the AI
+
+v0.3.37 trace: planning skill ran `plan_smells.py --strict` as its self-audit (v0.3.35+), found one warning (t-012 missing round-trip sibling), regenerated to 13 items, lint clean, returned to orchestrator. Then `✻ Baked for 5m 23s` — the orchestrator AI stalled before emitting the approval-gate table.
+
+Diagnosis: v0.3.32 added `plan_smells` as a hard gate at orchestrator step 6d. v0.3.35 moved the SAME lint INTO the planning skill as its self-audit. Both checks ran — the same script, same exit code. The AI's mental model is "I already validated this, why am I running it again?" and it just sits there. Two layers of the same check is one too many.
+
+This release removes the duplicate.
+
+**Orchestrator** (`commands/proctor.md`):
+- Step 6 is back to FOUR substeps: 6a header → 6b table → 6c estimate → 6d AskUserQuestion. (v0.3.33's renumbering to FIVE substeps is reverted.)
+- Explicit note: "Do NOT re-run `plan_smells.py` at this stage; the planning skill already did. The v0.3.32/v0.3.33 'hard-gate at step 6d' design was deprecated in v0.3.38."
+- New 6c-warn rare path: if `.proctor/runs/<run-id>/plan-smells.txt` exists and is non-empty (planning skill exhausted its 2 regen attempts and surfaced residual warnings), render them as a `### Plan smells (still present after 2 regen attempts)` section so the human reviewer sees what the skill couldn't fix. Same purpose the old 6d advisory fallback served, but now it's just a render — no script invocation.
+- Top-of-file CRITICAL block updated: "step 6 has FOUR substeps" + explicit "do NOT re-run plan_smells here, the skill already did".
+
+**Why this is safer than restoring v0.3.32's design**: v0.3.32's hard gate at the orchestrator level got skipped in real runs because the AI's "validate → emit → ask" mental model didn't include it. v0.3.35 moved the check inside the planning skill specifically because the skill boundary is harder to skip than orchestrator step prose. We trust that boundary; the orchestrator only consumes the artifact.
+
+### Tests
+- Unchanged at 170 (this is orchestrator prose only — no script logic moved).
+
 ## v0.3.37 — 2026-05-13
 
 ### Auto-checkout via worktree — chrome-devtools tests run against PR head, not user's branch
