@@ -22,7 +22,7 @@ Stages 1–9 below are a single sequence, NOT a checklist with pause points.
 
 **Specifically, after Stage 1 finishes (change-map.json written + validated)** → invoke skill `planning-pr-tests` for Stage 2 with no pause.
 
-**Specifically, after Stage 2 finishes (test-plan.json written + validated)** → emit the approval-gate table to chat, THEN call AskUserQuestion with no pause.
+**Specifically, after Stage 2 finishes (test-plan.json written + validated)** → step 6 has **FIVE** substeps (6a header → 6b table → 6c estimate → **6d hard-gate lint** → 6e AskUserQuestion). All five MUST execute in order. The lint at 6d is mandatory; the historical naming `6c-lint` is gone in v0.3.33 — if you remember a "4-substep" sequence from a stale memory, that's wrong, the count is 5. Skipping 6d means the hard gate never fires and the planner ships unaudited plans straight to the human; v0.3.32 added this exact safety net because the planner has demonstrated it cannot reliably self-audit.
 
 **Specifically, after the user answers the approval gate** → save approved-plan.json, then invoke skill `executing-pr-tests` with no pause.
 
@@ -85,8 +85,19 @@ print(json.dumps({'pr': pr, 'diff': diff}))
 ")"
 ```
 
-Persist to `.proctor/runs/<run-id>/{pr.json,diff.patch}` (run-id from
-`runlog.make_run_id`).
+Persist to `.proctor/runs/<run-id>/{pr.json,diff.patch}`. The run-id comes from `runlog.make_run_id` which is **keyword-only** (v0.3.x signature):
+
+```python
+from runlog import make_run_id
+from datetime import datetime, timezone
+run_id = make_run_id(
+    pr_number=pr['number'],
+    head_sha=pr['head_sha'],
+    started_at_iso=datetime.now(timezone.utc).isoformat(),
+)
+```
+
+Calling it positionally (`make_run_id(pr['number'])`) will raise `TypeError: make_run_id() takes 0 positional arguments but 1 was given` — that's the signature enforcing kw-only.
 
 ### 3. Acquire mutex (CI mode only)
 
@@ -141,7 +152,7 @@ rendered as a human-readable table.**
 
 ### 6. Approval gate
 
-Four sub-steps. **Do all four in this turn. Do not stop between them.**
+**FIVE sub-steps.** All five MUST run in this turn, in order, with no stop between them. The substeps are explicitly numbered 6a / 6b / 6c / 6d / 6e — if you remember a "four-substep" version from training data or stale context, IGNORE IT. v0.3.33 inserted 6d (hard-gate lint) as a peer to the others, not as an aside.
 
 **6a.** Emit a markdown header line: `## Plan for PR #<num> — <total> items` (as part of your assistant message — do NOT use the Write tool for this; it goes to chat).
 
@@ -149,32 +160,39 @@ Four sub-steps. **Do all four in this turn. Do not stop between them.**
 
 **6c.** Emit one summary line below the table: `Estimated: ~<N> min, ~$<cost>`. Best-effort estimate (rough: lint-only ≈ 5s/$0.001, bash ≈ 30s/$0.005, chrome-devtools ≈ 60s/$0.05 per item).
 
-**6c-lint.** (v0.3.30+, HARD GATE in v0.3.32+) Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict < .proctor/runs/<run-id>/test-plan.json` capturing stdout AND exit code.
+**6d. HARD-GATE LINT** (mandatory; not optional; not advisory). Run:
 
-- **Exit 0** (no warnings) → proceed to 6d.
-- **Exit 1** (warnings fired) → DO NOT proceed to 6d. The plan has structural defects the planner has demonstrated it can't reliably self-correct from prose rules alone. Hard-gate behavior:
-  1. Read `.proctor/runs/<run-id>/regen-count.txt` (treat missing file as 0). If the count is < 2, regenerate:
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
+    < .proctor/runs/<run-id>/test-plan.json
+echo "EXIT=$?"
+```
+
+This is a separate Bash invocation. You MUST run it. You cannot proceed to 6e without running it. The v0.3.32 release added this exact safety net because the planner has demonstrated it ships plans with structural defects (combined happy+negative items, no round-trip sibling for save actions) that the human can't catch by skimming the table — only the lint catches them mechanically.
+
+Behavior based on exit code:
+
+- **Exit 0** (no warnings) → proceed to 6e. Render nothing — the gate is invisible in the happy path.
+- **Exit 1** (warnings fired) → DO NOT proceed to 6e. Hard-gate behavior:
+  1. Read `.proctor/runs/<run-id>/regen-count.txt` (treat missing as 0). If count < 2, regenerate:
      a. Write the warnings to `.proctor/runs/<run-id>/plan-smells.txt`.
      b. Increment regen-count and write it back.
-     c. Print one chat line: `[proctor:plan] hard-gate triggered (attempt <N+1>/3); regenerating plan with smells feedback.` Then re-invoke the `planning-pr-tests` skill with the existing change-map.json AND the smells warnings as feedback — explicitly instructing the planner to:
-        - Split every item whose `what:` combines happy and negative phrasing into separate items per assertion class (one happy, N separate negatives).
+     c. Print one chat line: `[proctor:plan] hard-gate triggered (attempt <N+1>/3); regenerating plan with smells feedback.`
+     d. Re-invoke the `planning-pr-tests` skill with the existing change-map.json AND the smells warnings as feedback — explicitly instruct the planner to:
+        - Split every item whose `what:` combines happy and negative phrasing into separate items per assertion class.
         - For every chrome-devtools save/create/update action, add a sibling item linked by `data_from: [<save_id>]` whose `what:` describes re-opening the saved record (use `re-open`, `round-trip`, `reload`, `appears in list`, or `detail page` so the lint recognizes it).
         - Preserve the existing journeys structure; do not start from scratch.
-     d. Overwrite `.proctor/runs/<run-id>/test-plan.json` with the regenerated plan.
-     e. Re-validate via `schema.py`.
-     f. Loop back to 6c-lint (run plan_smells again).
-  2. If regen-count has already reached 2 (= 3rd attempt was the regenerated version that still failed), STOP regenerating. Fall through to advisory mode for this run only:
-     - Emit a `### Plan smells (still present after 2 regeneration attempts)` section with the warnings as bullets starting with `⚠`.
-     - Print one chat line: `[proctor:plan] hard-gate exhausted regen attempts; surfacing warnings to the human reviewer.`
-     - Proceed to 6d so the user can choose "Cancel — let me edit the plan first" and intervene manually.
+     e. Overwrite `.proctor/runs/<run-id>/test-plan.json` with the regenerated plan.
+     f. Re-validate via `schema.py`.
+     g. Loop back to 6d (run plan_smells again with the new plan).
+  2. If regen-count reached 2 (= the 3rd attempt still failed), STOP regenerating. Fall through to advisory mode for this run only:
+     - Emit a `### Plan smells (still present after 2 regeneration attempts)` section with warnings as bullets starting with `⚠`.
+     - Print: `[proctor:plan] hard-gate exhausted regen attempts; surfacing warnings to the human reviewer.`
+     - Proceed to 6e so the user can pick "Cancel — let me edit the plan first" and intervene manually.
 
-If the script emits nothing (exit 0), skip rendering any "Plan smells" section. The reviewer never sees a 6c-lint output in the happy path — the gate is invisible when it isn't needed.
+**6e.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
 
-**Why hard-gate**: the planner has historically shipped plans with happy+negative combined into one item and no round-trip sibling for save actions, even when SKILL.md says MANDATORY in three places. The lint catches these mechanically. Forcing a regeneration with explicit feedback is cheaper than asking the human to spot the defect in a 9-row table and pick "Cancel — let me edit the plan first".
-
-**6d.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
-
-**Do NOT** skip the table (6a–6c) and jump to AskUserQuestion (6d) — the question is unanswerable without context. **Do NOT** print the test-plan JSON instead of the table. **Do NOT** collapse to "3 lint + 5 ui — run?".
+**Do NOT** skip the table (6a–6c) and jump straight to AskUserQuestion (6e) — the question is unanswerable without context. **Do NOT** skip 6d — that's the mandatory hard-gate; running 6a → 6b → 6c → 6e bypasses the v0.3.32 safety net and ships unaudited plans to the human. **Do NOT** print the test-plan JSON instead of the table. **Do NOT** collapse to "3 lint + 5 ui — run?".
 
 Required format for the table:
 

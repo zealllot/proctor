@@ -2,6 +2,34 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.33 — 2026-05-13
+
+### Hard-gate lint renamed step 6c-lint → step 6d (so the AI actually runs it)
+
+User trace from v0.3.32 against PR #1115 showed the orchestrator AI **skipping the hard-gate lint entirely**. It went: stage 2 plan written → 6a header → 6b table → 6c estimate → straight to the AskUserQuestion. No `plan_smells.py --strict` invocation anywhere in the trace. The hard-gate safety net was invisible because the AI never engaged it.
+
+Root cause: the v0.3.32 step was named `6c-lint` with a hyphenated suffix, sitting between proper-numbered substeps. The AI's mental model was "approval gate has substeps 6a, 6b, 6c, 6d" — `6c-lint` reads like an aside or footnote and gets skipped under attention pressure. Plus the prose at top-of-file said "after Stage 2 finishes → emit the approval-gate table to chat, THEN call AskUserQuestion" with no mention of the lint between them.
+
+This release fixes both:
+
+**Renumber** (`plugins/proctor/commands/proctor.md`):
+- `6c-lint` → **`6d` HARD-GATE LINT** (a proper peer-numbered substep, no hyphen suffix).
+- Old `6d` (AskUserQuestion) → `6e`.
+- "Four sub-steps" → "FIVE sub-steps" with explicit "ignore stale memory of a four-substep version".
+- Bash invocation block elevated to a fenced code block in 6d so the AI sees it as an actual command, not prose.
+- "Do NOT" forbidden-shortcut list updated: explicit "Do NOT skip 6d" — running 6a→6b→6c→6e bypasses the safety net and ships unaudited plans.
+
+**Top-of-file CRITICAL block** updated:
+- "after Stage 2 finishes → emit table THEN AskUserQuestion" prose replaced with explicit "step 6 has FIVE substeps including 6d hard-gate lint; all five MUST execute in order".
+- Adds an anti-stale-memory clause: if you remember a four-substep version, that's wrong, the count is 5.
+
+### Bonus: `make_run_id` calling-convention doc fix
+
+User trace also showed a `TypeError: make_run_id() takes 0 positional arguments but 1 was given` early in the run because the AI called `make_run_id(pr['number'])` positionally. The function is keyword-only (`def make_run_id(*, pr_number, head_sha, started_at_iso)`). The orchestrator prose just said "run-id from `runlog.make_run_id`" with no example. Replaced with a working snippet showing the kw-only call so the AI doesn't keep hitting this.
+
+### Tests
+- 150 unchanged (this release is orchestrator prose + minor doc fix, no script logic changes).
+
 ## v0.3.32 — 2026-05-13
 
 ### plan_smells from advisory → hard gate with bounded regeneration
