@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.7 — 2026-05-13
+
+### Wizard seed-script: detect email domain + password rules from the codebase
+v0.3.6's seed script hardcoded `proctor-<role>@local.test` and `proctor-local-dev` as the password. Both were placeholders that the user explicitly called out as wrong: emails should match the project's domain convention (`ai-tester-developer@theplant.jp` style), and passwords need to satisfy the app's validator — `proctor-local-dev` would have been rejected by anything with a length≥12 or complexity rule.
+
+- **Email domain detection.** Wizard greps existing user emails out of `README.md` / `CLAUDE.md` / `dev_env` / `dev_env_local` / git author history, picks the most-common-suffix as `EMAIL_DOMAIN`, then asks the user to confirm or override. Generated emails follow `ai-tester-<role>@<EMAIL_DOMAIN>` — descriptive (clearly an AI test account), domain-aligned (looks like a real internal account, which auth systems treat consistently).
+- **Password rules detection.** Wizard reads the app's auth code for password constraints: `min_length`, complexity flags, hashing scheme (bcrypt / argon2 / etc.). qor/auth, devise, passlib, and stdlib bcrypt patterns are all sniffed. The user gets the detected rules and confirms — at which point the wizard generates a password that actually satisfies them, not a guess.
+- **Both interactions are one-question-each** via AskUserQuestion — Recommended option pre-selected.
+
+### Not changed
+- Schema unchanged from v0.3.6.
+- Other wizard steps unchanged.
+- 51 tests still pass.
+
 ## v0.3.6 — 2026-05-13
 
 ### Added: inline auth credentials + local-seed helper script

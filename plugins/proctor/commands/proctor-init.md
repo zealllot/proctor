@@ -766,6 +766,62 @@ For local-mode use, generate `hack/proctor-seed-local.sh` (or `scripts/proctor-s
 2. Inserts/upserts each account into the local DB.
 3. Writes `.pr-test.local.yml` with the resulting credentials as **inline values** (not env vars — the file is gitignored, so plaintext is acceptable for local-only test accounts).
 
+**Before writing the script template, the wizard MUST do two reads:**
+
+#### Read 1: detect the consumer's email domain convention
+
+Look for the project's actual email style — don't make up a `local.test` placeholder when the project clearly uses its own. Try these in order, take the first that returns a hit:
+
+```bash
+# Existing admin / user emails in test fixtures, dev_env, README, CLAUDE.md
+grep -rhoE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' \
+  README.md CLAUDE.md dev_env dev_env_local 2>/dev/null \
+  | grep -vE '(noreply|no-reply|example\.com|test\.com|@local\.test)' \
+  | sort -u | head -5
+
+# Author emails on recent commits (likely match company domain)
+git log --pretty='%ae' -200 2>/dev/null | sort -u | grep -vE 'github|noreply' | head -10
+
+# package.json / go.mod author / repo owner
+gh repo view --json owner --jq '.owner.login' 2>/dev/null
+```
+
+From whatever surfaces, derive `EMAIL_DOMAIN` — pick the most-common-suffix (e.g. multiple `@theplant.jp` matches → `theplant.jp`). Show it to the user via AskUserQuestion:
+
+> "I'll create test accounts as `ai-tester-<role>@<EMAIL_DOMAIN>`. Use `<DETECTED_DOMAIN>`?"
+- **Use `<DETECTED_DOMAIN>`** (Recommended)
+- **Custom domain** — open free-text input.
+
+Save as `EMAIL_DOMAIN`. The generated email template becomes `ai-tester-<role-name>@<EMAIL_DOMAIN>` — descriptive, clearly distinct from real user emails, matches the project's existing convention.
+
+#### Read 2: detect the password requirements from the auth code
+
+A hard-coded `proctor-local-dev` will fail apps with strict password validators (length ≥ 12, mixed-case, special chars). Read the app's auth code to figure out what it actually requires.
+
+```bash
+# Look for password validator funcs and their constraints.
+# qor/auth, devise, passlib, bcrypt, argon2 — find the constraint definitions.
+grep -rEnh '(min_?length|password_?(min|min_length|complexity)|len\(password\)\s*<|MinLength|len\([^)]*\)\s*>=)' \
+  --include='*.go' --include='*.rb' --include='*.py' --include='*.ts' . 2>/dev/null \
+  | head -10
+
+# Bcrypt cost / argon2 params / sha hashing — tells us how to hash for the SQL
+grep -rEnh '(bcrypt\.(Generate|Hash)|argon2|password_hash|crypt\(.*bf|Devise\.bcrypt_cost)' \
+  --include='*.go' --include='*.rb' --include='*.py' . 2>/dev/null | head -5
+
+# qor/auth specifically — uses bcrypt by default, no built-in complexity rules.
+grep -rh 'qor/auth/providers/password' --include='*.go' . 2>/dev/null | head -2
+```
+
+Form a tentative `PASSWORD_RULES` dict like `{min_length: 8, hash: "bcrypt", complexity_required: false}`. Then ask the user via AskUserQuestion:
+
+> "Detected password rules from auth code: min_length=<N>, hash=<bcrypt|argon2|...>, complexity=<yes|no>. Generate test passwords matching these rules?"
+- **Use detected rules** (Recommended)
+- **Edit rules** (opens text fields)
+- **No rules detected — use a sensible default** (length 16, mixed alphanumeric, no special chars) — shown only when grep found nothing.
+
+Use `PASSWORD_RULES` to generate a password the seed script bakes in. For each account, the password can be the same (one local-only value) or per-role unique (more secure but more state to track). v0.3.6 used same-for-all; keep that.
+
 The DB-insertion step is genuinely project-specific (table name, password hashing scheme, role column name). The wizard emits a SCAFFOLD with clear TODO markers; the dev fills them in once. Template:
 
 ```bash
@@ -791,14 +847,17 @@ gen_seed() {
   python3 -c "import secrets, base64; print(base64.b32encode(secrets.token_bytes(20)).decode().rstrip('='))"
 }
 
-# Local default password for every AI tester. Override via PROCTOR_SEED_PASSWORD if you want.
-PASSWORD="${PROCTOR_SEED_PASSWORD:-proctor-local-dev}"
+# Generated password: meets the rules detected from the app's auth code
+# (see PASSWORD_RULES captured during /proctor-init). Override via
+# PROCTOR_SEED_PASSWORD if your CI / sandboxes prefer a different one.
+PASSWORD="${PROCTOR_SEED_PASSWORD:-<GENERATED_PASSWORD_FROM_PASSWORD_RULES>}"
 
-# One entry per role you picked in /proctor-init. Wizard generates this block.
+# One entry per role you picked in /proctor-init. Email pattern matches
+# the project's domain convention: ai-tester-<role>@<EMAIL_DOMAIN>.
 declare -A ROLE_SEEDS=()
 declare -A ROLE_EMAILS=()
 <for each ACCOUNTS[i]:>
-ROLE_EMAILS["<ACCOUNTS[i].name>"]="proctor-<ACCOUNTS[i].name>@local.test"
+ROLE_EMAILS["<ACCOUNTS[i].name>"]="ai-tester-<ACCOUNTS[i].name>@<EMAIL_DOMAIN>"
 ROLE_SEEDS["<ACCOUNTS[i].name>"]="$(gen_seed)"
 </for>
 
