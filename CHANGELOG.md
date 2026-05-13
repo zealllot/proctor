@@ -2,6 +2,58 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.40 — 2026-05-14
+
+### Generalized "unexpected response → read source first" + test-data convention
+
+Two related executor-contract additions, both responses to live-trace feedback.
+
+#### Unexpected response → read source first (generalizes v0.3.39)
+
+The v0.3.39 form-submit "no whack-a-mole" rule is a special case of a broader principle: when the system gives the executor a response that doesn't match `how:`'s expectation, the right reaction is NEVER "retry with a tweaked input" — it's "READ THE SOURCE that produced the response, classify the result honestly".
+
+`pr-test-executor.md` gains a top-of-procedure section spelling this out for every tool:
+
+| Tool | What "unexpected" looks like | What to read |
+|---|---|---|
+| chrome-devtools | Element not found, wrong text, unexpected redirect/validator | Handler / route / view / validator for the URL |
+| bash | Non-zero exit on expected-pass, unexpected stderr | Script being invoked, or the program / package it runs |
+| curl | 4xx/5xx vs 2xx mismatch, JSON shape wrong | Route handler / controller |
+| lint-only | Grep/file check produced unanticipated result | The file being checked + the diff |
+
+The procedure: capture actual state → trace to source → classify into one of three buckets — **(a) Diff bug** (`status: fail, reason: assertion`, evidence cites the wrong source line + PR intent), **(b) Planning gap** (`status: fail, reason: missing`, evidence cites code that's correct + test expectation that was wrong), **(c) Environment bug** (`status: skipped, reason: environment`, evidence describes the mismatch). The classification is what the report needs to be valuable; random retry-until-it-works gives the human zero signal about what's actually broken.
+
+Forbidden anti-patterns (each one a real failure mode from previous runs):
+- Click the same button again "to see if it works the second time"
+- Retry curl with different headers "to see which the server wants"
+- Modify the test to match what the code did, without reading why
+- Treat an unexpected redirect as "must mean my action succeeded"
+- Conclude `pass` because "nothing visibly broke" when the assertion target wasn't verified
+
+The v0.3.39 form-submit section is now framed as a specialization of this general rule — the validator error from a partial-fill IS the response that needs investigation before any retry.
+
+#### Test-data convention: `ai-test-` markers, not lorem ipsum
+
+User flagged that the executor was using ambiguous values like `"test"`, `"foo"`, `"fixture-1"` in form fills. Records created by PRoctor live in shared dev / staging DBs alongside real records — these names are indistinguishable from human-created records and impossible to GC safely.
+
+New convention codified on both sides:
+
+- **Names / titles / slugs**: `ai-test-<resource>-<short-item-id>` — e.g. `"ai-test-image-reward-t007"`. The item-id suffix keeps two runs distinguishable.
+- **Emails**: `ai-test+<item-id>@proctor.example.com`.
+- **URLs**: `https://ai-test.example.invalid/<slug>` (`.invalid` TLD is reserved for tests).
+- **Slugs**: `ai-test-<item_id>` (idempotent retry support — same item always uses same slug).
+- **Prices / amounts**: an obvious outside-real-range value (`99999.99` or `0.01`).
+- **Descriptions**: `AI test record created by PRoctor item <item-id>`.
+- **File uploads**: a 1×1 transparent PNG named `ai-test.png` — real bytes, clearly test.
+- **Phone**: `+8100000000` (or country-specific test pattern).
+
+Forbidden values: `test`, `foo`, `bar`, `asdf`, `1234`, lorem ipsum, real-looking names. If the form's validator rejects `-` or `+`, swap to the closest compliant pattern (`aitestimagerewardt007`) but keep the `aitest` prefix intact.
+
+Both the executor agent and the planner skill enforce this — planner cites the recommended values in `how:` upfront, executor honors them; if planner omits the values, executor falls back to the convention.
+
+### Tests
+- 170 unchanged (this is agent + skill prose only).
+
 ## v0.3.39 — 2026-05-14
 
 ### Forbid form-submit whack-a-mole — read validator first, fill once, save once

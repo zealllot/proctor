@@ -611,6 +611,18 @@ Mechanics:
 
 The executor's contract (in `agents/pr-test-executor.md` "no whack-a-mole" section) makes this load-bearing: if the path isn't cited and the executor can't find the validator, it falls back to DOM-snapshot heuristics which catch fewer requirements. So citing it isn't a nice-to-have — it's the input the executor needs to do its job correctly.
 
+### Test-data convention in `how:` (v0.3.40+)
+
+When `how:` suggests specific values for a happy save (a name, an email, a URL), use the `ai-test-` prefix convention rather than `fixture-1` / `test` / lorem ipsum. The executor enforces this contract too, but having the planner write it in `how:` upfront prevents the executor from inventing inconsistent markers:
+
+- Name / title / slug: `ai-test-<resource>-<short-item-id>` — e.g. `"ai-test-image-reward-t007"`. The item-id suffix keeps two runs distinguishable.
+- Email: `ai-test+<item-id>@proctor.example.com`.
+- URL: `https://ai-test.example.invalid/<slug>` (the `.invalid` TLD is reserved).
+- Description: `AI test record created by PRoctor item <item-id>`.
+- Price / amount: an obvious outside-real-range value (`99999.99`, `0.01`).
+
+Why: records created by PRoctor end up in shared dev / staging databases. `Reward "test"` is ambiguous; `Reward "ai-test-image-reward-t007"` is unmistakably from a PRoctor run and safe to GC. The convention also lets the human reviewer grep the DB for `ai-test-` to find every PRoctor-created record from any run.
+
 ## Self-audit BEFORE handing the plan back (v0.3.35+)
 
 After writing `test-plan.json` and BEFORE returning to the orchestrator, you MUST run the plan-smells lint as the LAST step of this skill. This is the safety net for everything in this skill — every rule above (one-assertion-per-item, write-needs-roundtrip, coverage balance) is mechanically checked here:
