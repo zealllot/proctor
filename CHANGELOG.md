@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.5 — 2026-05-13
+
+### Wizard role-discovery: Pass A is authoritative, Pass B annotates only
+- **Bug**: v0.3.4 still missed `Role_internal_readonly` on mcd-website. Reason: the wizard's planner *did* read `roles.go` via Pass A but then intersected against `rolesPower` (Pass B's map-key extraction). Roles missing from `rolesPower` (read-only ones typically don't have a power value) got silently dropped.
+- **Fix**: explicit "Pass A wins" semantics. When the roles file is found and any identifier was extracted, that set IS the complete list. Pass B is reduced to providing display annotations (e.g. `(power 6)` next to a role's checkbox label) — never to filter or shrink the list. Verification step added: after building `DETECTED_ROLES`, the wizard re-greps the roles file and confirms every `const` / `var` / enum member appears in the final set.
+- **Preserve Pass A entries through filtering**: framework-keyword filter / id-substring filter / `^[a-z][a-z0-9_]*$` cleanup only apply to Pass-B-only entries. Anything Pass A identified is kept even if a filter rule would have dropped it.
+
+### Why
+The wizard's job is to read the role definitions correctly — not to second-guess them against a power table. A role that exists in code is a role.
+
+### Not changed
+- Schema / TOTP / executor / planner unchanged.
+- All other wizard steps untouched.
+
 ## v0.3.4 — 2026-05-13
 
 ### Wizard role-discovery now catches multi-word snake_case

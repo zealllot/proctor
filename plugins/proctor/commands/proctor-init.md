@@ -504,13 +504,28 @@ grep -rhoE '"[a-z][a-z0-9_]{2,30}"' \
   . 2>/dev/null | sed 's|"||g' | sort -u
 ```
 
-Merge Pass A's extracted identifiers + Pass B's matches into `DETECTED_ROLES`:
+### Merge into `DETECTED_ROLES` — Pass A wins, Pass B annotates only
 
-- lowercase everything for dedup
-- strip `Role_` / `ROLE_` prefix
-- drop anything that's obviously not a role: bare-letter matches (`a`, `b`), framework keywords (`role`, `roles`, `user`, `users`), things containing `permission` / `migration` / `id` / `key` substring
-- limit to names matching `^[a-z][a-z0-9_]*$` (so display is clean)
-- preserve the original case-and-snake form for the EVENTUAL `auth.accounts[].name` value (the lowercased version is for the picker)
+**Pass A is authoritative when it finds a roles file.** If Pass A located `roles.go` (or `role.py` etc.) and successfully extracted ≥1 identifier from it, those identifiers ARE the complete list. Don't intersect with Pass B. Don't filter against rolesPower / permission tables / migration seeds — a role missing from a power-map is *still a role* (typically the read-only / unprivileged ones).
+
+```
+if PASS_A_IDENTIFIERS:
+    DETECTED_ROLES = PASS_A_IDENTIFIERS
+    # Pass B output is used ONLY to enrich descriptions:
+    # e.g. "Role_developer (power 6) — full admin access"
+else:
+    DETECTED_ROLES = PASS_B_IDENTIFIERS
+```
+
+**Verification before showing the picker**: after building `DETECTED_ROLES`, re-grep the roles file for any `const ` / `var ` / enum members and confirm every one of them appears in `DETECTED_ROLES`. If the count differs, you missed some — add them back. Don't ask the user "did I miss any?"; the file is right there, the wizard's job is to read it correctly.
+
+Filter rules (apply AFTER the union, not as part of authoritative selection):
+- lowercase for dedup keying, but preserve the original casing/snake form for the eventual `auth.accounts[].name` value
+- strip `Role_` / `ROLE_` prefix on display
+- drop names matching `^(role|roles|user|users)$` (framework keywords)
+- drop names containing `permission` / `migration` / `id` substring (false positives from messy greps)
+- require display name matches `^[a-z][a-z0-9_]*$` (cleaning for picker)
+- **never drop a name that came from Pass A** — even if it would have failed the above filters, prefer keeping it over silently losing a legitimate role
 
 Present the result via AskUserQuestion (multi-select):
 
