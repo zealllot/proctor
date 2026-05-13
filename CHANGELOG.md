@@ -2,6 +2,19 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.10 — 2026-05-13
+
+### Seed script: use the project's own bcrypt, not Python's
+- **Bug**: v0.3.9's `gen_hash` helper called `python3 -c "import bcrypt..."`. Python's bcrypt isn't a stdlib module — it requires `pip install bcrypt`. mcd-website's dev machine didn't have it; `./hack/proctor-seed-local.sh` errored on first run with `ModuleNotFoundError: No module named 'bcrypt'`.
+- **Fix**: pick the bcrypt source based on detected stack:
+  - **Go projects** (the case that broke): inline a tiny Go program using `golang.org/x/crypto/bcrypt` — the same library qor/auth uses, already in go.sum. `go run` against a temp file, hash to stdout.
+  - **Node projects**: `npx -y bcrypt-cli`.
+  - **Python projects**: try `import bcrypt`; if it fails, attempt `pip3 install --user bcrypt`; if THAT fails, print a friendly install hint.
+  - **Other stacks**: try Apache's `htpasswd -bnBC 10 ...`; if not available, emit a comment explaining what to install.
+
+### One-line workaround for already-broken installs
+Devs who ran the v0.3.9 seed script and hit `ModuleNotFoundError` can either re-run /proctor-init to regenerate with the v0.3.10 helper, or unblock immediately with `pip3 install bcrypt` and re-run the existing script.
+
 ## v0.3.9 — 2026-05-13
 
 ### Seed script: wizard reads the code and writes the real SQL

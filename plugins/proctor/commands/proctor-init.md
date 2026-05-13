@@ -824,15 +824,35 @@ Don't leave SQL as a TODO. Read the codebase, figure out the schema, generate th
    grep -rEn 'password_themes/clean|qor/auth/providers/password' --include='*.go' . 2>/dev/null | head -3
    ```
 
-   For qor/auth / clean theme: bcrypt at the default cost (10). Postgres can `crypt(plain_text, gen_salt('bf'))` only if the `pgcrypto` extension is installed; otherwise the script must call out to a CLI bcrypt and pass the hash as a literal. Default to the bcrypt-via-Python path because it's more portable than assuming pgcrypto:
+   For qor/auth / clean theme: bcrypt at the default cost (10).
 
-   ```bash
-   gen_hash() {
-     python3 -c "import bcrypt, sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10)).decode())" "$1"
-   }
-   ```
+   **DO NOT assume Python's `bcrypt` module is installed** — it's not in the stdlib. Use the bcrypt that's already on the developer's machine via the project's own toolchain:
 
-   The wizard inlines this helper into the seed script.
+   - **If the project is Go** (`go.mod` exists): generate the hash via a tiny inline Go program using `golang.org/x/crypto/bcrypt` — the same library the app uses, and it's already in go.sum because qor/auth pulls it transitively. No new dep:
+
+     ```bash
+     gen_hash() {
+       local tmpgo
+       tmpgo=$(mktemp -t proctor-hash-XXXXXX).go
+       trap "rm -f '$tmpgo'" RETURN
+       cat > "$tmpgo" <<'GO'
+     package main
+     import ("fmt"; "os"; "golang.org/x/crypto/bcrypt")
+     func main() {
+       h, err := bcrypt.GenerateFromPassword([]byte(os.Args[1]), 10)
+       if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+       fmt.Println(string(h))
+     }
+     GO
+       go run "$tmpgo" "$1"
+     }
+     ```
+
+   - **If the project is Node** (`package.json`): `npx -y bcrypt-cli "$1" 10`.
+   - **If the project is Python** (`pyproject.toml` / `requirements*.txt`): inline a check — if `python3 -c 'import bcrypt'` succeeds, use it; otherwise `pip3 install --user bcrypt` then retry, with a friendly error message if both fail.
+   - **Otherwise** (Rust / Ruby / etc.): fall back to `htpasswd -bnBC 10 "" "$1" | tr -d ':\n'` if `htpasswd` exists (Apache utils — usually pre-installed on macOS / Linux); otherwise emit a comment that the dev needs to install one of: `htpasswd`, `python3-bcrypt`, or `bcrypt-cli`.
+
+   The wizard inlines whichever helper matches the detected stack into the seed script.
 
 4. **For TOTP, check whether the app expects the secret stored as base32, raw bytes, or already-decoded.** Search for how the existing login validates 2FA:
 
