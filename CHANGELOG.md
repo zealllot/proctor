@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.4 — 2026-05-13
+
+### Wizard role-discovery now catches multi-word snake_case
+- **Bug**: the regex `\bRole_[A-Za-z]+\s*=` stopped at the first underscore *inside* the role name. So `Role_developer` matched but `Role_system_administrator` and `Role_internal_readonly` didn't. v0.3.2's discovery on `mcd-website` returned 3 of 5 roles. Reported by zealot@theplant.jp via screenshot.
+- **Fix**: two-pass detection.
+  - **Pass A (file-name-driven)**: find files named `roles.go` / `role.go` / `roles.py` etc. and *read each one* (Read tool, not regex), extract identifiers properly. Catches whatever pattern the project actually uses — including multi-segment snake_case, Ruby symbols, Python Enum members. Won't fail on edge cases the regex couldn't anticipate.
+  - **Pass B (pattern grep)**: regex patterns rewritten to use word-char-permissive matchers (`[a-zA-Z0-9_]+` not `[A-Za-z]+`). Adds Go `rolesPower["..."]`-style map keys, TS enum bodies, Ruby `has_role :sym`, Python `class Role(Enum)` block parsing.
+- **Filtering**: deduplicate, lowercase for picker display, strip framework noise (`role`, `permission`, `migration`, `id`, `key` substrings), require `^[a-z][a-z0-9_]*$` for clean rendering.
+
+### Not changed
+- All other wizard steps (7a/b/d/e, Section 8) unchanged.
+- Schema, TOTP, executor SKILL.md unchanged.
+- 46 tests still pass.
+
 ## v0.3.3 — 2026-05-13
 
 ### Wizard now generates auto-server-lifecycle for local dev

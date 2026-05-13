@@ -449,37 +449,68 @@ Options:
 
 ### Step 7c — Discover admin roles from the codebase
 
-**Don't ask the user to count their roles — detect them.** Run a few greps for common role-enumeration patterns. Bias toward false positives (show everything found); the user will deselect what they don't care to test.
+**Don't ask the user to count their roles — detect them.** Bias toward false positives (show everything found); the user will deselect what they don't care to test. **Multi-word snake_case role names like `system_administrator` and `internal_readonly` MUST be captured** — the regex needs to be word-char-permissive (`\w` / `[a-zA-Z0-9_]+`), not stop-at-second-underscore.
+
+Two-pass detection:
+
+#### Pass A — file-name-driven (high precision)
+
+First locate the file(s) most likely to define roles, then read them:
 
 ```bash
-# Go: const Role_developer = "developer" / type Role string / Role_admin
-grep -rhoE '\bRole[_A-Z][A-Z][a-zA-Z_]+' \
-  --include='*.go' . 2>/dev/null | sort -u
-
-# Go: enum-style with values  Role_editor = 2
-grep -rhoE '\bRole_[A-Za-z]+\s*=' \
-  --include='*.go' . 2>/dev/null | sed 's|\s*=$||' | sort -u
-
-# TypeScript / JS: enum Role { Editor, Viewer } or const ROLES = [...]
-grep -rhE '\b(enum\s+Role|type\s+Role\s*=|ROLES\s*=)' \
-  --include='*.ts' --include='*.tsx' --include='*.js' . 2>/dev/null | head -10
-
-# Python: class Role(Enum): ADMIN = "admin"
-grep -rhE '\bclass\s+Role\b|^\s*[A-Z_]+\s*=\s*"[a-z_]+"' \
-  --include='*.py' . 2>/dev/null | head -20
-
-# Ruby: role :admin / has_role :editor
-grep -rhE 'has_role\s+:|enum\s+role\s*:' \
-  --include='*.rb' . 2>/dev/null | head -20
-
-# Database / config: roles seeded in migrations or seeds
-grep -rhE '"(developer|admin|editor|viewer|reader|writer|operator|manager)"\s*[,)\]]' \
-  --include='*.sql' --include='*.yml' --include='*.json' . 2>/dev/null | head -20
+ROLE_FILES=$(find . -type f \( \
+    -name 'roles.go' -o -name 'role.go' -o \
+    -name 'roles.py' -o -name 'role.py' -o \
+    -name 'roles.rb' -o -name 'role.rb' -o \
+    -name 'roles.ts' -o -name 'role.ts' \
+  \) -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null | head -10)
 ```
 
-Aggregate everything into `DETECTED_ROLES` (deduplicated, lowercased). Strip the `Role_` prefix when present. Examples after dedupe:
-- `developer`, `editor`, `viewer`, `admin`
-- (or just `admin` for a simple app, or empty if nothing matched)
+If any are found, **read each** (Read tool, full file) and extract identifiers manually. Look for: `const Role_x = "y"`, `var Role_x = "y"`, enum members, hash keys, etc. This catches snake_case multi-word names a pure-regex grep often misses.
+
+#### Pass B — pattern-driven grep (fallback / supplement)
+
+Run all of these regardless of Pass A — they cover code that doesn't live in a `roles.*` file:
+
+```bash
+# Go (most permissive: any identifier starting with Role_ followed by word chars).
+# Captures Role_developer, Role_system_administrator, Role_internal_readonly, etc.
+grep -rhoE '\bRole_[a-zA-Z][a-zA-Z0-9_]*' \
+  --include='*.go' . 2>/dev/null | sort -u | sed 's|^Role_||'
+
+# Go (rolesPower-style maps, sometimes used alongside Role_* consts)
+grep -rhoE '\brolesPower\s*\[\s*"[a-zA-Z][a-zA-Z0-9_]*"\s*\]' \
+  --include='*.go' . 2>/dev/null | sed 's|.*"\(.*\)".*|\1|' | sort -u
+
+# TypeScript / JS — enum body content + const ROLES array entries.
+grep -rhoE '\b(enum\s+Role\s*\{[^}]+\})' \
+  --include='*.ts' --include='*.tsx' --include='*.js' . 2>/dev/null
+grep -rhoE '\bROLES\s*=\s*\[[^]]+\]' \
+  --include='*.ts' --include='*.tsx' --include='*.js' . 2>/dev/null
+
+# Python: class Role(Enum) blocks
+grep -rhA20 -E '^\s*class\s+Role\b' --include='*.py' . 2>/dev/null \
+  | grep -E '^\s*[A-Z][A-Z0-9_]*\s*=' | sed 's|=.*||' | tr -d ' ' | sort -u
+
+# Ruby: role :xxx / has_role :xxx
+grep -rhoE 'has_role\s+:[a-z][a-z0-9_]*' --include='*.rb' . 2>/dev/null \
+  | sed 's|.*:||' | sort -u
+
+# Database seeds / migrations / config — role names quoted
+grep -rhoE '"[a-z][a-z0-9_]{2,30}"' \
+  --include='*roles*.sql' --include='*role*.sql' \
+  --include='*roles*.yml' --include='*role*.yml' \
+  --include='*roles*.json' --include='*role*.json' \
+  . 2>/dev/null | sed 's|"||g' | sort -u
+```
+
+Merge Pass A's extracted identifiers + Pass B's matches into `DETECTED_ROLES`:
+
+- lowercase everything for dedup
+- strip `Role_` / `ROLE_` prefix
+- drop anything that's obviously not a role: bare-letter matches (`a`, `b`), framework keywords (`role`, `roles`, `user`, `users`), things containing `permission` / `migration` / `id` / `key` substring
+- limit to names matching `^[a-z][a-z0-9_]*$` (so display is clean)
+- preserve the original case-and-snake form for the EVENTUAL `auth.accounts[].name` value (the lowercased version is for the picker)
 
 Present the result via AskUserQuestion (multi-select):
 
