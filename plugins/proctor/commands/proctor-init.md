@@ -445,21 +445,71 @@ Ask, one short question via AskUserQuestion:
 
 ### Step 7b — Login form selectors (Q-EnvB)
 
-Pre-fill with qor/auth conventions (matches most ThePlant projects). Ask:
+**Don't pre-fill from convention — read the actual login template.** qor/auth ships with one set of `name=` attributes, but every project overrides those templates and the attribute names drift. mcd-website uses `name="email"` (not `name="login"` which is the qor/auth default). Hard-coding the wrong values silently passes init but breaks login at runtime.
 
-> "Confirm the login form selectors. Defaults assume qor/auth conventions — Open `<base_url>/auth/login` in DevTools and check if you need to edit."
+#### Step 7b.1 — find the login template
 
-| field | default |
+```bash
+# Candidate files: anything that contains a password input and an
+# email/login/username input. Covers Go html/template (.tmpl), Rails
+# .erb, React .tsx/.jsx, Vue, Svelte, plain HTML.
+LOGIN_TPL_CANDIDATES=$(
+  grep -rln -E 'type="password".*type="(email|text)"|type="(email|text)".*type="password"' \
+    --include='*.tmpl' --include='*.html' --include='*.htm' \
+    --include='*.erb' --include='*.tsx' --include='*.jsx' --include='*.ts' --include='*.js' \
+    --include='*.vue' --include='*.svelte' --include='*.go' \
+    . 2>/dev/null | head -20
+
+  # Single-file approach above can miss apps where email and password
+  # inputs are in different files (e.g. multistep wizard). Also try:
+  grep -rln -E '<input[^>]*type="password"' \
+    --include='*.tmpl' --include='*.html' --include='*.htm' \
+    --include='*.erb' --include='*.tsx' --include='*.jsx' \
+    --include='*.vue' --include='*.svelte' . 2>/dev/null | head -20
+)
+
+# Filter by path heuristics — pick files whose path mentions auth / login / signin.
+echo "$LOGIN_TPL_CANDIDATES" | grep -iE 'auth|login|signin|session' | head -5
+```
+
+If grep returns a candidate (or several), **Read each** with the Read tool — the candidates are template files, not gigantic.
+
+#### Step 7b.2 — extract selectors from the actual form
+
+For each form `<input>` you read, capture the `name=` attribute and classify by other attributes:
+
+| input attribute | role |
 |---|---|
-| `login_url` | `/auth/login` |
-| `email` | `input[name="login"]` |
-| `password` | `input[name="password"]` |
-| `totp` | `input[name="passcode"]` |
-| `submit` | `button[type="submit"]` |
+| `type="password"` (no other strong signal) | `password` |
+| `type="email"`, OR name matches `email`/`login`/`username`/`user` | `email` |
+| name matches `passcode`/`totp`/`otp`/`2fa`/`token`/`code` AND length-6 ish | `totp` |
+| `<button type="submit">` / `<input type="submit">` in same form | `submit` |
 
-Options:
-- **Use defaults (Recommended)** — store as-is.
-- **Edit** — open follow-up free-text input for each of the 5 fields with the default pre-filled.
+Same for the TOTP/2FA page if it's a separate URL — look for a single short-numeric input on whatever page comes AFTER successful email+password.
+
+For mcd-website specifically the wizard should find:
+- `name="email"` → role: email
+- `name="password"` → role: password
+- `name="passcode"` (qor/auth's totp provider standard) → role: totp
+- `<button type="submit">` → role: submit
+
+Record the detected values as `SELECTORS = {email, password, totp, submit, login_url}`. The `login_url` comes from how the form's `<form action="...">` is set, or you can keep `/auth/login` as a sane default if the form doesn't have an explicit action and the URL is what the user lands on.
+
+#### Step 7b.3 — confirm via AskUserQuestion (cheap sanity check)
+
+> "Detected login form selectors from `<TEMPLATE_FILE>`. Look right?"
+
+Show the table inline with the detected values. Options:
+- **Yes, use these** (Recommended)
+- **No, let me edit** — opens a free-text input for any field the user wants to correct.
+
+#### Step 7b.4 — fallback when detection fails
+
+If `LOGIN_TPL_CANDIDATES` is empty (e.g. the project uses an SSO provider whose login page is hosted externally), tell the user honestly:
+
+> "Couldn't find a login form template in this codebase — your login might be on an external SSO host. Manually open `<base_url>/auth/login` in DevTools, copy the `name=` attributes from each input, and type them below."
+
+Then collect via four free-text questions. Don't silently pretend to know.
 
 ### Step 7c — Discover admin roles from the codebase
 

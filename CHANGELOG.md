@@ -2,6 +2,16 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.16 — 2026-05-13
+
+### Wizard: read the actual login template, don't hardcode qor conventions
+- **Bug**: Step 7b pre-filled `auth.selectors.email = input[name="login"]` from qor/auth defaults. Most consumers override that template — mcd-website's form uses `name="email"`. Hardcoded selectors silently pass init, then login fails at runtime when PRoctor tries to fill a non-existent input. Reported by zealot@theplant.jp during a real /proctor:proctor run on mcd-website (had to inline-patch selectors during execute).
+- **Fix**: Step 7b now greps the codebase for login-form templates (across `.tmpl`, `.html`, `.erb`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.go`), Reads each candidate, and extracts `name=` from the actual `<input>` elements. Classifies by attribute heuristics (`type="password"` → password, `type="email"` or name-matches-`email/login/username` → email, name-matches-`passcode/totp/otp/code` → totp, `<button type="submit">` → submit). Then confirms with the user via AskUserQuestion before baking into `.pr-test.yml`.
+- **Fallback**: if no template is found (e.g. external SSO host), the wizard asks honestly instead of guessing.
+
+### Why this matters
+Every consumer customizes their login template at some point. The qor/auth defaults are a starting point, not a constant. The wizard's job is to read what's there, not assert what should be there.
+
 ## v0.3.15 — 2026-05-13
 
 ### Approval gate: render the plan as a markdown table, not a one-line summary
