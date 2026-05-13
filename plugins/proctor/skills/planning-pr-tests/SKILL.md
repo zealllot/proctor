@@ -326,31 +326,81 @@ When NOT to use templates:
 - The "consume A's state" is implicit (e.g. B just visits a list page A added to — no specific URL or ID needed). Use `data_from` without `produces`.
 - The artifact is something already known statically (a fixture seed name). Hardcode it in both items; no template needed.
 
-## Write-operation persistence — required assertions
+## One assertion class per item — MANDATORY (v0.3.30+)
 
-For any test item that performs a write (POST/PUT/DELETE, form submit, file upload, state-changing button click), the immediate response (toast / 200 / element visible) is necessary but NOT sufficient. The reviewer needs to know the change actually persisted.
+Each plan item MUST verify EITHER success OR a specific failure mode — never both. Items whose `what:` describes both are bugs in the plan, not features:
 
-For every write-action item, append these checks to `how:`:
+- The report shows one status per item; a combined item that did the negative half correctly but failed the happy half becomes "fail" with ambiguous evidence. The reviewer can't tell which half broke without reading the full log.
+- The setup, action, and assertion differ between happy and negative paths. Forcing them into one item makes the assertion vague enough to pass for the wrong reason.
+- The coverage-balance rule REQUIRES both happy and negative items; it does NOT say to fold them into one item.
 
-1. **Confirm the immediate response** (existing — toast, 200, page transition).
-2. **Navigate away** to the list page or another route, then **navigate back** to the just-edited resource.
-3. **Assert the persisted state** — the field value, record presence in list, status badge — is what was just submitted.
-4. **(If the app supports it) page reload** between steps 2 and 3 — flushes client-side state and proves the value came from the server, not from memory.
-
-Concrete examples:
+**Anti-pattern from a real plan we shipped** — every one of these should be split:
 
 ```
-✗ Insufficient:
-  "Fill form → click Save → assert success toast visible"
-
-✓ With persistence:
-  "Fill form → click Save → assert success toast visible →
-   navigate to /admin/rewards (list page) → assert new record row
-   visible with the submitted name → click into the record → reload
-   the detail page → assert all fields match what was submitted"
+✗  t-008  Create reward type=Image: missing asset rejected; with asset, save succeeds
+✗  t-009  Create reward type=Game: empty + invalid Game URL rejected; valid URL saves
 ```
 
-If the immediate response IS the persistence (e.g. a generated UUID returned by the API and shown in the URL), that's fine — call it out in the `how:` so a reader knows the test understood the difference. Don't silently rely on "the toast says saved".
+Split:
+
+```
+✓  t-008  HAPPY: Create reward type=Image with valid asset → 200, record in list
+✓  t-009  HAPPY: Create reward type=Game with valid URL → 200, record in list
+✓  t-010  NEGATIVE: type=Image, missing asset → field validation error (error_type: validation)
+✓  t-011  NEGATIVE: type=Game, invalid URL → URL validation error  (error_type: validation)
+```
+
+The orchestrator runs `plan_smells.py` against your plan at the approval gate; combined-phrasing items get flagged with `⚠ <id>: combines happy and negative phrasing` for the human reviewer to catch. Don't make it work for that — write them split from the start.
+
+## Write-operation persistence — REQUIRED separate item (v0.3.30+)
+
+For any happy-path test item that performs a write (POST/PUT/DELETE, form submit, file upload, state-changing button click), the immediate response (toast / 200 / element visible) is necessary but NOT sufficient. The reviewer needs to know the change actually persisted AND that it round-trips correctly through the read path.
+
+**Pre-v0.3.30 rule said "append persistence checks to `how:`". That was too soft** — planners shipped items with the round-trip step buried inside an already-long `how:` and skimped on it. The orchestrator's `plan_smells.py` would not have caught the omission since the check WAS technically there.
+
+**v0.3.30+ rule: create a SEPARATE sibling item linked by `data_from`.** The save item is one test (does the submit-and-accept path work). The round-trip item is a SECOND test (does the just-written record load correctly through the read path). Two items, two pass/fail signals:
+
+```jsonc
+{
+  "id": "t-005",
+  "journey_id": "j-create-image-reward",
+  "what": "HAPPY: save Image reward 'fixture-img-1' with valid asset",
+  "how": "Open /admin/rewards/new; type=Image; name='fixture-img-1'; pick asset; Save; assert success toast and URL changes to /admin/rewards/<id>.",
+  "produces": ["created_id", "detail_url"],
+  "tool": "chrome-devtools",
+  "category": "frontend",
+  "risk": "high",
+  "depends_on": []
+},
+{
+  "id": "t-006",
+  "journey_id": "j-create-image-reward",
+  "what": "HAPPY: re-open saved Image reward — all fields round-trip correctly",
+  "preconditions": "t-005 created a reward at {{t-005.detail_url}}.",
+  "how": "Navigate away to /admin/rewards (the list page); assert the new row appears with name 'fixture-img-1'; click into the record; HARD-RELOAD the detail page; assert Type='Image', Name='fixture-img-1', asset preview renders the uploaded file — i.e. every submitted field round-trips through the read path.",
+  "tool": "chrome-devtools",
+  "category": "frontend",
+  "risk": "high",
+  "depends_on": ["t-005"],
+  "data_from": ["t-005"]
+}
+```
+
+Why a separate item and not a bigger `how:`:
+
+- **Two distinct pass/fail signals.** When save passes but round-trip fails, the report says "save: ✓, round-trip: ✗" and the reviewer immediately knows the bug is in the read path or the persistence layer — not in the form submission. Bundled into one item, the same scenario shows "fail" with a paragraph of mixed evidence.
+- **`data_from` makes the dependency explicit.** Save fails → round-trip skips with `data-dep-failed: t-005`, not "fail for reasons that look like the read path is broken when actually the write never happened".
+- **The orchestrator's `plan_smells.py` can mechanically check it.** Write items without a sibling reload-and-verify item via `data_from` get flagged at the approval gate. (You CAN'T mechanically check that the inline `how:` actually does persistence — only a separate item is detectable.)
+
+**Apply this rule to**: CREATE, UPDATE, BULK-EDIT, IMPORT, RESTORE-FROM-VERSION-HISTORY, PUBLISH, ARCHIVE — any action that changes server state and is meant to be readable afterward.
+
+**Skip this rule for**:
+- DELETE (the "round-trip" is "not visible in list" — typically already covered by the original happy-path's "row disappears" assertion).
+- Pure validation rejects (nothing was persisted to round-trip — the diff doesn't change the read path).
+- API contract tests using `tool: "bash"` or `tool: "curl"` (the test suite is already exercising both write and read).
+- `tool: "lint-only"` items (no execution at all — UI round-trip is meaningless).
+
+**Sibling phrasing**: the orchestrator's lint looks for words like `re-open`, `round-trip`, `reload`, `re-render`, `loads back`, `navigates back`, `detail page`, `appears in list`, `visible in list`. Use one of these in the sibling item's `what:` so the lint recognizes the pattern and doesn't false-warn.
 
 ## Preconditions: don't bury the starting state in `how:`
 

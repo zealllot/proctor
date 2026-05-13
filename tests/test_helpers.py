@@ -714,6 +714,156 @@ def test_plan_journeys_empty_string_field_rejected():
         validate_test_plan(bad)
 
 
+# --- v0.3.30: plan_smells lint (combined items + missing round-trip) ----
+
+from plugins.proctor.scripts.plan_smells import check as plan_check
+
+
+def test_plan_smells_clean_plan_returns_no_warnings():
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "what": "happy: save Image reward",
+         "how": "fill form, save", "tool": "chrome-devtools",
+         "risk": "high", "depends_on": [], "produces": ["created_id"]},
+        {"id": "t-2", "category": "api",
+         "what": "happy: re-open saved Image, fields round-trip correctly",
+         "how": "navigate back, assert", "tool": "chrome-devtools",
+         "risk": "high", "depends_on": ["t-1"], "data_from": ["t-1"]},
+    ]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_combined_happy_negative_flagged():
+    # The exact phrasing the user's plan emitted in production.
+    plan = {"items": [{
+        "id": "t-008", "category": "api", "tool": "chrome-devtools",
+        "what": "Create reward type=Image: missing asset rejected; with asset, save succeeds",
+        "how": "...", "risk": "high", "depends_on": [],
+    }]}
+    warnings = plan_check(plan)
+    assert len(warnings) >= 1
+    assert any("combines happy and negative" in w for w in warnings)
+    assert any("t-008" in w for w in warnings)
+
+
+def test_plan_smells_combined_phrasing_save_and_reject():
+    plan = {"items": [{
+        "id": "t-009", "category": "api", "tool": "chrome-devtools",
+        "what": "Create reward type=Game: empty + invalid Game URL rejected; valid URL saves",
+        "how": "...", "risk": "high", "depends_on": [],
+    }]}
+    assert any("combines happy and negative" in w for w in plan_check(plan))
+
+
+def test_plan_smells_pure_negative_not_flagged():
+    plan = {"items": [{
+        "id": "t-010", "category": "api", "tool": "chrome-devtools",
+        "what": "Submitting without selecting Type rejected with required error",
+        "how": "...", "risk": "medium", "depends_on": [],
+        "error_type": "validation",
+    }]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_pure_happy_not_flagged():
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: save Image reward with valid asset",
+         "how": "...", "risk": "high", "depends_on": [],
+         "produces": ["created_id"]},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open saved reward, fields load back correctly",
+         "how": "...", "risk": "high",
+         "depends_on": ["t-1"], "data_from": ["t-1"]},
+    ]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_write_without_roundtrip_sibling_flagged():
+    plan = {"items": [{
+        "id": "t-1", "category": "api", "tool": "chrome-devtools",
+        "what": "HAPPY: save Image reward with valid asset",
+        "how": "...", "risk": "high", "depends_on": [],
+    }]}
+    warnings = plan_check(plan)
+    assert any("round-trip" in w and "t-1" in w for w in warnings)
+
+
+def test_plan_smells_write_with_roundtrip_sibling_clean():
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: save Image reward",
+         "how": "...", "risk": "high", "depends_on": [],
+         "produces": ["created_id"]},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "Re-open saved Image, all fields round-trip correctly",
+         "how": "...", "risk": "high",
+         "depends_on": ["t-1"], "data_from": ["t-1"]},
+    ]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_write_with_appears_in_list_sibling_clean():
+    # "appears in list" / "visible in list" counts as round-trip
+    # verification — the record is being read back from server state.
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: save Image reward",
+         "how": "...", "risk": "high", "depends_on": []},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "New reward appears in the /admin/rewards list",
+         "how": "...", "risk": "medium",
+         "depends_on": ["t-1"], "data_from": ["t-1"]},
+    ]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_negative_write_not_flagged():
+    # A write item that's actually a negative test (error_type set)
+    # shouldn't be expected to round-trip — nothing got persisted.
+    plan = {"items": [{
+        "id": "t-1", "category": "api", "tool": "chrome-devtools",
+        "what": "Submit form with missing required field — save rejected",
+        "how": "...", "risk": "medium", "depends_on": [],
+        "error_type": "validation",
+    }]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_lint_only_write_not_flagged():
+    # `tool: "lint-only"` items can't do UI round-trip — skip the check.
+    plan = {"items": [{
+        "id": "t-1", "category": "api", "tool": "lint-only",
+        "what": "Migration creates new column",
+        "how": "...", "risk": "low", "depends_on": [],
+    }]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_bash_write_not_flagged():
+    # Same for bash-tool items (e.g. CLI test suites that do writes).
+    plan = {"items": [{
+        "id": "t-1", "category": "api", "tool": "bash",
+        "what": "go test ./api/... covers the create path",
+        "how": "...", "risk": "low", "depends_on": [],
+    }]}
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_warnings_sorted_for_stability():
+    plan = {"items": [
+        {"id": "t-005", "category": "api", "tool": "chrome-devtools",
+         "what": "save reward succeeds", "how": "...",
+         "risk": "high", "depends_on": []},
+        {"id": "t-001", "category": "api", "tool": "chrome-devtools",
+         "what": "save reward, rejected if missing field",
+         "how": "...", "risk": "high", "depends_on": []},
+    ]}
+    warnings = plan_check(plan)
+    # Combined warnings come first, sorted by item id.
+    combined = [w for w in warnings if "combines" in w]
+    assert combined == sorted(combined)
+
+
 # --- v0.3.29: verify_precondition_via (active precondition check) --------
 
 def test_plan_verify_precondition_via_accepted():

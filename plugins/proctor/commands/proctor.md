@@ -149,6 +149,8 @@ Four sub-steps. **Do all four in this turn. Do not stop between them.**
 
 **6c.** Emit one summary line below the table: `Estimated: ~<N> min, ~$<cost>`. Best-effort estimate (rough: lint-only ≈ 5s/$0.001, bash ≈ 30s/$0.005, chrome-devtools ≈ 60s/$0.05 per item).
 
+**6c-lint.** (v0.3.30+) Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py < .proctor/runs/<run-id>/test-plan.json` and emit the result in chat. If non-empty, render as a `### Plan smells (advisory)` section directly below 6c. Each warning is a bullet starting with `⚠`. If the script emits nothing, skip the section entirely (don't render an empty header). The reviewer uses these to decide between "Run", "Drop items", or "Cancel — let me edit the plan first": typical actionable smells include items that combine happy + negative phrasing (split them) and write items without a sibling round-trip-load item (add the sibling).
+
 **6d.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
 
 **Do NOT** skip the table (6a–6c) and jump to AskUserQuestion (6d) — the question is unanswerable without context. **Do NOT** print the test-plan JSON instead of the table. **Do NOT** collapse to "3 lint + 5 ui — run?".

@@ -2,6 +2,46 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.30 — 2026-05-13
+
+### Plan smells + mandatory round-trip sibling — hard-stop the "save without verify" regression
+
+User re-ran PRoctor against mcd-website after v0.3.29 and the planner shipped this plan for a Digital Reward Image/Game PR:
+
+```
+t-008  Create reward type=Image: missing asset rejected; with asset, save succeeds
+t-009  Create reward type=Game: empty + invalid Game URL rejected; valid URL saves
+```
+
+Two regressions in one observation:
+1. **t-008 / t-009 collapsed happy + negative into one item.** The report shows one status per item; the happy half silently disappears when the negative half passes. The v0.3.21 "happy paths required" rule was satisfied in name (the words "saves" / "succeeds" appear in `what:`) but not in effect.
+2. **No sibling item exists for round-trip data loading.** v0.3.22 said "append persistence checks to `how:`" — planner treats that as decorative and skips the round-trip. For a CRUD PR like this, "did the form save?" without "does the saved record load correctly?" is half a test.
+
+This release ships a mechanical safety net AND tightens the planning rules so the safety net catches what the AI misses.
+
+**Mechanical lint** (`plugins/proctor/scripts/plan_smells.py`):
+- Reads a TestPlan, returns a list of advisory warnings.
+- **Check 1: combined happy + negative phrasing.** When `what:` contains both a success word (`succeeds`/`saves`/`works`/`accepted`/`persists`) AND a rejection word (`rejected`/`invalid`/`error`/`fails`/`forbidden`/`missing`), AND the item does NOT declare `error_type` (which would signal intentional negative phrasing), emit `<id>: combines happy and negative phrasing — split into two items`.
+- **Check 2: write without round-trip sibling.** When `what:` describes a write action (`save`/`create`/`update`/`submit`/`edit`/`publish`/`upload`), the tool is `chrome-devtools` (UI writes — bash/curl/lint-only don't need UI round-trip), `error_type` is unset (negative writes don't persist), and no other item references this one via `data_from` with `what:` containing a round-trip word (`re-open`/`reload`/`round-trip`/`loads back`/`navigates back`/`detail page`/`appears`/`visible in list`), emit `<id>: write action has no sibling item asserting round-trip data loading via data_from — add a follow-up item that re-opens the saved record`.
+- Conservative pattern set: false positives intentionally minimized so the warnings stay trustworthy at the approval gate. Items with explicit `error_type` are skipped from both checks (their negative intent is declared).
+
+**Orchestrator integration** (`commands/proctor.md` Step 6c-lint):
+- Between the plan table (6c) and the AskUserQuestion gate (6d), the orchestrator runs the lint and emits warnings as a `### Plan smells (advisory)` section directly below the cost summary.
+- Empty result → section omitted entirely (no empty-header noise).
+- The reviewer sees the smells alongside the table when deciding "Run all" vs "Drop items" vs "Cancel — let me edit the plan first".
+
+**Planning skill — two MANDATORY rules** (`planning-pr-tests/SKILL.md`):
+- **"One assertion class per item"**: each item verifies EITHER success OR a specific failure mode, never both. Worked anti-pattern from the actual production plan included verbatim with the split version next to it.
+- **"Write-operation persistence — REQUIRED separate item"** (replaces v0.3.22's "append to `how:`" guidance): for happy-path writes via `tool: "chrome-devtools"`, the plan MUST include a sibling item linked by `data_from` that re-opens the saved record and asserts all submitted fields round-trip through the read path. Two distinct pass/fail signals beat one bundled assertion. Mechanically checkable, so the orchestrator catches omissions; planner doesn't need to be perfect on the first pass.
+- Explicit skip list: DELETE / pure validation rejects / `bash`+`curl` items / `lint-only` items — none of these need the sibling check.
+- Explicit phrasing tips for sibling items so they pass the lint without contortions.
+
+### Tests
+- 135 → 147 (+12): clean plan returns no warnings, both production anti-patterns flagged (verbatim from user's run), pure negative not flagged, pure happy round-trip pair clean, write-without-sibling flagged, write-with-roundtrip-sibling clean, "appears in list" recognized as round-trip, negative writes (with error_type) not flagged, lint-only writes not flagged, bash writes not flagged, warnings sorted for stable output.
+
+### What this leaves untouched
+- The `produces` canonical vocabulary item (the "锦上添花" #2 from the previous discussion): still on hold pending real-world evidence of mixed-vocab collisions.
+
 ## v0.3.29 — 2026-05-13
 
 ### Active precondition verification — `verify_precondition_via`
