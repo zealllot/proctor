@@ -107,11 +107,13 @@ def check(plan: dict) -> list[str]:
 
     Warnings are formatted ``<item_id>: <message>`` so the orchestrator
     can print them as a bullet list. Order: combined-happy-negative
-    warnings first, then missing-round-trip warnings, both sorted by
-    item id for stable output."""
+    warnings first, missing-round-trip warnings second, plan-level
+    coverage warnings last, all sorted by item id (or empty id for
+    plan-level) for stable output."""
     items = plan.get("items") or []
     combined_warnings: list[str] = []
     missing_roundtrip_warnings: list[str] = []
+    coverage_warnings: list[str] = []
 
     for it in items:
         what = it.get("what") or ""
@@ -172,9 +174,40 @@ def check(plan: dict) -> list[str]:
             f"fields are visible."
         )
 
+    # 3. All-negative plan: 2+ negative items and ZERO happy-path
+    #    items doing a write action. Fires on the failure mode the
+    #    planner falls into when it rationalizes "happy path is
+    #    deferred because backend dep" — ending up with N validator
+    #    rejects and no save coverage at all. The user has flagged
+    #    this exact pattern across multiple PRoctor runs.
+    negative_count = sum(
+        1 for it in items
+        if it.get("error_type")
+        or _RE_NEG.search((it.get("what") or ""))
+    )
+    happy_write_count = sum(
+        1 for it in items
+        if it.get("tool") == "chrome-devtools"
+        and not it.get("error_type")
+        and _RE_WRITE.search((it.get("what") or ""))
+    )
+    if negative_count >= 2 and happy_write_count == 0:
+        coverage_warnings.append(
+            f"plan-coverage: {negative_count} negative items but 0 "
+            f"chrome-devtools items doing a happy-path save/create. "
+            f"PRs that add new fields/forms need AT LEAST ONE happy "
+            f"item that fills the form with valid input and asserts "
+            f"the record persisted. If backend dependencies block "
+            f"the full save flow, plan the item anyway with "
+            f"tool=\"skip\" and reason=\"backend-dep-not-deployed\" "
+            f"so the gap is visible in the report, not silently "
+            f"absent from the plan."
+        )
+
     combined_warnings.sort()
     missing_roundtrip_warnings.sort()
-    return combined_warnings + missing_roundtrip_warnings
+    coverage_warnings.sort()
+    return combined_warnings + missing_roundtrip_warnings + coverage_warnings
 
 
 def _main() -> int:

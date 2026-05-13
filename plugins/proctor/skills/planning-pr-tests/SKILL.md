@@ -595,9 +595,33 @@ Rationale writing rules:
 - Cite at least one concrete signal from the diff or PR body. "Generated because the PR touches frontend code" is too vague.
 - For multi-role items, the rationale should explain why this SPECIFIC role is the right one to test under.
 
+## Self-audit BEFORE handing the plan back (v0.3.35+)
+
+After writing `test-plan.json` and BEFORE returning to the orchestrator, you MUST run the plan-smells lint as the LAST step of this skill. This is the safety net for everything in this skill — every rule above (one-assertion-per-item, write-needs-roundtrip, coverage balance) is mechanically checked here:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
+    < .proctor/runs/<run-id>/test-plan.json
+```
+
+- **Exit 0** → plan is clean. Print `[proctor:plan] done — N items planned, plan_smells clean` and return.
+- **Exit 1** → READ the warnings on stdout. Each warning tells you exactly what's wrong: items combining happy+negative phrasing, write actions without a `data_from` sibling doing round-trip verification, or 2+ negative items with zero happy-path saves (the "all-negative plan" coverage gap). Regenerate the plan addressing every warning:
+  - Split combined items per assertion class.
+  - Add round-trip sibling items linked by `data_from` for every save/create.
+  - If you skipped happy-path saves because of "backend dep deferred" or similar reasoning — STOP. That's the exact failure mode the lint exists to catch. Plan the happy save anyway, using `tool: "skip"` with `rationale: "backend dependency <ref> not yet deployed — surfacing the planned step so it's visible in the report"` if you genuinely can't run it. The plan must NOT silently omit the happy path.
+  - Overwrite test-plan.json with the regenerated plan.
+  - Re-validate via `schema.validate_test_plan`.
+  - Re-run the lint. Loop max 2 times.
+- After 2 failed regen attempts, give up gracefully: write a `[proctor:plan] WARNING: plan_smells still emits warnings after 2 regens; surfacing as-is for human review` line, leave the plan as-is, and return. The orchestrator's downstream advisory mode will print the warnings before the approval gate.
+
+**Do NOT** skip this self-audit. The orchestrator's approval gate used to do it (`6c-lint` / `6d` in earlier versions) but the controlling AI repeatedly skipped that step. Putting the lint INSIDE this skill — at the contract boundary, alongside schema validation — makes it impossible to skip without abandoning the skill mid-execution.
+
+**Do NOT** rationalize that "this PR's nature makes happy-path tests impossible". Validators only check what saves; if you only test what gets rejected, you're testing the cage, not the building. The lint's "all-negative plan" warning fires specifically to catch this rationalization.
+
 ## Constraints
 
 - Emit exactly one JSON object. No prose.
 - IDs must be unique. `depends_on` must reference IDs that exist in the same plan.
 - `tool` must be one of: `chrome-devtools`, `bash`, `curl`, `lint-only`, `skip`.
 - When set, `as_account` must equal one of `auth.accounts[].name` values from `.pr-test.yml`. The validator rejects unknown names.
+- The final test-plan.json MUST pass `scripts/plan_smells.py --strict` (or 2 failed regen attempts, with the warning explicitly surfaced).

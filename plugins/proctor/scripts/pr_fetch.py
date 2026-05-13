@@ -14,8 +14,14 @@ import time as _time
 from dataclasses import dataclass
 from typing import Optional
 
+# Accept the bare PR URL plus the common tab-suffixed variants users
+# copy-paste from GitHub's UI: `/files`, `/changes`, `/commits`,
+# `/checks`, `/conversation`, and an optional trailing slash or
+# `#issuecomment-...` anchor. The captured `num` is what we use.
 _URL_RE = re.compile(
-    r"^https?://github\.com/(?P<repo>[^/]+/[^/]+)/pull/(?P<num>\d+)/?$"
+    r"^https?://github\.com/(?P<repo>[^/]+/[^/]+)/pull/(?P<num>\d+)"
+    r"(?:/(?:files|changes|commits|checks|conversation))?"
+    r"/?(?:#.*)?$"
 )
 
 

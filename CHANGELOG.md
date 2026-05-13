@@ -2,6 +2,35 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.35 — 2026-05-13
+
+### Lint gate moved INTO the planning skill, new all-negative check, parse_pr_arg URL tolerance
+
+Real-world v0.3.33 trace against PR #1115 showed THREE compounding failures:
+1. **The orchestrator AI skipped step 6d hard-gate lint AGAIN** (despite the v0.3.33 rename). The AI uses a cached "validate → emit table → ask question" mental model and doesn't consult `commands/proctor.md` per step.
+2. **The plan regressed to ALL NEGATIVE** — 5 chrome-devtools items, every one a validator-reject. AI rationalized: "PR body mentions backend dep not deployed, so happy save is deferred." This pattern slips past plan_smells: no save items means no round-trip-sibling check fires.
+3. **`parse_pr_arg` rejected `/changes` URL suffix** — user copy-pasted from GitHub's "Files Changed" tab. Same failure for `/files`, `/commits`, etc.
+
+This release fixes all three.
+
+**Move the lint gate from orchestrator → into the planning skill itself** (`planning-pr-tests/SKILL.md`):
+- The skill's LAST step is now: run `plan_smells.py --strict`. Exit 0 → return. Exit 1 → regenerate (max 2 retries) addressing each warning, then re-validate. After 2 failed regens, write a WARNING log line and return as-is.
+- This makes the lint impossible to skip at the orchestrator level — by the time `commands/proctor.md` step 6 runs, the plan is already audited (or the skill has explicitly logged that audit failed).
+- Explicit anti-pattern callout in the SKILL: "If you skipped happy-path saves because backend-dep deferred — STOP. Plan the happy save anyway with `tool: \"skip\"` + rationale so the gap is visible, not silently absent."
+
+**New `plan_smells.py` check: all-negative plan** (`scripts/plan_smells.py`):
+- Fires when: ≥2 negative items (`error_type` set OR `what:` matches negative phrases) AND 0 chrome-devtools items doing a happy-path write (save/create/update/submit/edit/publish/upload).
+- Warning text guides the planner: "PRs that add new fields/forms need AT LEAST ONE happy item that fills the form with valid input and asserts the record persisted. If backend dependencies block the full save flow, plan the item anyway with `tool=\"skip\"` and `reason=\"backend-dep-not-deployed\"`."
+- This catches the exact failure mode the user observed in 3 successive runs.
+
+**`parse_pr_arg` URL tolerance** (`scripts/pr_fetch.py`):
+- Now accepts `/files`, `/changes`, `/commits`, `/checks`, `/conversation` suffixes (the common tab-link patterns from GitHub UI copy-paste).
+- Also tolerates trailing slash and `#issuecomment-...` anchors.
+- Bare PR URL (no suffix) continues to work.
+
+### Tests
+- 150 → 162 (+12): 9 parametrized URL-suffix tolerance, 3 plan_smells coverage cases (flagged, not-flagged-when-happy-present, not-flagged-for-single-negative).
+
 ## v0.3.33 — 2026-05-13
 
 ### Hard-gate lint renamed step 6c-lint → step 6d (so the AI actually runs it)

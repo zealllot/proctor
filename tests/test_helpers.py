@@ -209,6 +209,23 @@ def test_parse_pr_arg_rejects_garbage():
         parse_pr_arg("not-a-pr")
 
 
+# v0.3.35: URL tab-suffixes from GitHub UI copy-paste
+@pytest.mark.parametrize("url", [
+    "https://github.com/owner/name/pull/42",
+    "https://github.com/owner/name/pull/42/",
+    "https://github.com/owner/name/pull/42/files",
+    "https://github.com/owner/name/pull/42/changes",
+    "https://github.com/owner/name/pull/42/commits",
+    "https://github.com/owner/name/pull/42/checks",
+    "https://github.com/owner/name/pull/42/conversation",
+    "https://github.com/owner/name/pull/42/files/",
+    "https://github.com/owner/name/pull/42/files#issuecomment-12345",
+])
+def test_parse_pr_arg_accepts_tab_suffixes(url):
+    arg = parse_pr_arg(url)
+    assert arg == PRArg(number=42, repo="owner/name")
+
+
 def test_make_run_id_is_deterministic_for_same_inputs():
     a = make_run_id(pr_number=1, head_sha="abc1234", started_at_iso="2026-05-09T10:00:00Z")
     b = make_run_id(pr_number=1, head_sha="abc1234", started_at_iso="2026-05-09T10:00:00Z")
@@ -910,6 +927,77 @@ def test_plan_smells_cli_default_advisory_exits_0_even_with_warnings(tmp_path):
     )
     assert result.returncode == 0
     assert "combines happy and negative" in result.stdout
+
+
+def test_plan_smells_all_negative_no_happy_save_flagged():
+    """The exact failure mode the user hit: 4 validator-reject items,
+    zero happy-path saves. Plan_smells must catch this."""
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "form renders", "how": "...",
+         "risk": "high", "depends_on": []},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator rejects save when type unselected",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+        {"id": "t-3", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator requires asset for Image type",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+        {"id": "t-4", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator requires non-empty Game URL",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+        {"id": "t-5", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator rejects malformed Game URL",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+    ]}
+    warnings = plan_check(plan)
+    assert any("plan-coverage" in w and "0 chrome-devtools items doing a happy-path" in w
+               for w in warnings)
+
+
+def test_plan_smells_happy_save_present_no_coverage_warning():
+    """When the plan has a real happy save item, the coverage check
+    does NOT fire — only the missing-roundtrip would (separate)."""
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "HAPPY: save Image reward with valid asset",
+         "how": "...", "risk": "high", "depends_on": [],
+         "produces": ["created_id"]},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "Re-open saved reward, fields round-trip",
+         "how": "...", "risk": "high",
+         "depends_on": ["t-1"], "data_from": ["t-1"]},
+        {"id": "t-3", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator rejects empty type",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+        {"id": "t-4", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator rejects empty URL",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "validation"},
+    ]}
+    warnings = plan_check(plan)
+    assert not any("plan-coverage" in w for w in warnings)
+
+
+def test_plan_smells_single_negative_not_flagged_for_coverage():
+    """The coverage check requires 2+ negatives — a plan with just
+    one negative and no happy save is unusual but not flagged
+    (might be a hardening-only PR)."""
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+         "what": "form renders", "how": "...",
+         "risk": "high", "depends_on": []},
+        {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+         "what": "Validator rejects unauthorized access",
+         "how": "...", "risk": "high", "depends_on": [],
+         "error_type": "permission"},
+    ]}
+    warnings = plan_check(plan)
+    assert not any("plan-coverage" in w for w in warnings)
 
 
 def test_plan_smells_warnings_sorted_for_stability():
