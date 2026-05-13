@@ -59,10 +59,10 @@ Group items by journey for the report.
 **Structured form (v0.3.28+, preferred)**: when the plan has a top-level `journeys` array, items carry `journey_id` referencing `journeys[].id`. Look up the matching `{id, goal, terminal_state}` entry; the report header includes BOTH the goal (one sentence describing what the user accomplishes) AND the terminal_state (the assertable end-state) so reviewers can scan whether each journey met its bar:
 
 ```markdown
-### Journey: Create-Image-Reward — 3/4 passed
+### Journey: <journey-name from journeys[].id, kebab→Title> — <pass>/<total> passed
 
-**Goal:** Admin creates a published Image-type digital reward.
-**Terminal state:** Reward appears in /admin/rewards list with status=Published and re-renders correctly after a hard reload.
+**Goal:** <verbatim journeys[].goal>
+**Terminal state:** <verbatim journeys[].terminal_state>
 
 <item rows for that journey, in plan order>
 ```

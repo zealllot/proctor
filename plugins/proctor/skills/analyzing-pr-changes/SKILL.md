@@ -159,13 +159,13 @@ on stdout with no surrounding prose, headings, or code fences.
   },
   "hunks": [
     {
-      "file": "admin/rewards/handler.go",
+      "file": "<path/to/changed_file.go>",
       "category": "api",
       "risk": "high",
-      "summary": "Add type=Image / type=Game branches in CreateReward.",
+      "summary": "<one-sentence plain-English description of what changed here>",
       "impact_radius": [
-        "admin/rewards/router.go",
-        "admin/dashboards/rewards_widget.go"
+        "<path/to/caller1.go>",
+        "<path/to/caller2.go>"
       ],
       "impact_radius_truncated": false
     }

@@ -103,7 +103,7 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
      `{"<key>": "<value>", ...}`. Values MUST be strings (downstream
      uses them in URLs / DOM selectors / shell). Examples:
      - `produces: ["created_id", "detail_url"]` after a successful
-       save → `"outputs": {"created_id": "42", "detail_url": "/admin/rewards/42"}`.
+       save → `"outputs": {"created_id": "<the new id>", "detail_url": "<the new detail path>"}`.
        Extract the ID from the post-save URL or from a DOM data-attr;
        extract the detail URL from `window.location.pathname`.
      - `produces: ["slug"]` after a slug-generating action → read it

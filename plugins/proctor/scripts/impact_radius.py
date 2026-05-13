@@ -20,8 +20,8 @@ to a script means:
 Invoked by analyzing-pr-changes; safe to call standalone for debugging:
 
     python3 plugins/proctor/scripts/impact_radius.py \\
-        --file admin/rewards/handler.go \\
-        --idents "CreateReward UpdateReward" \\
+        --file <path/to/changed_file.go> \\
+        --idents "<ChangedFunc1> <ChangedFunc2>" \\
         --repo .
 """
 

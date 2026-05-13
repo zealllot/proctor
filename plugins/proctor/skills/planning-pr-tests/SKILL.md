@@ -119,23 +119,24 @@ For every new behavior the PR introduces (every distinct user-facing path the di
 3. THEN add negative items for validators / edge cases / error states. Aim for ≤ 1 negative item per validator branch, not 1 per typo / one per invalid value.
 4. If you find yourself writing 4 chrome-devtools items and all 4 are "submit X with bad input, expect error" — STOP. Replace one or two with the corresponding "submit X with good input, expect success" variant.
 
-Concrete example for a PR titled "add Digital Reward type=Image / type=Game":
+Worked example (replace `<Resource>` / `<RequiredField>` / `<TypedField>` with your PR's specifics — this shape applies to ANY new-form / new-field PR, regardless of domain):
 
 ```
-✗ All-negative plan (what the AI naturally drafts):
-  t-006  Form renders with new fields
-  t-007  Validator: missing type → error
-  t-008  Validator: Image + empty asset → error
-  t-009  Validator: Game + empty URL → error
-  t-010  Validator: Game + invalid URL → error
+✗ All-negative plan (what the AI naturally drafts when validators are the most visible code change):
+  t-001  Form renders with new fields
+  t-002  Validator: <RequiredField> missing → error
+  t-003  Validator: <TypedField> wrong format → error
+  t-004  Validator: <TypedField> empty when required → error
+  t-005  Validator: <TypedField> out-of-range → error
 
-✓ Balanced plan (what to actually write):
-  t-006  Form renders with new fields
-  t-007  HAPPY: Save Image reward with valid asset → 200, appears in list, published
-  t-008  HAPPY: Save Game reward with valid URL → 200, appears in list, published
-  t-009  NEGATIVE: missing type → error (single validator-coverage check)
-  t-010  NEGATIVE: Game + invalid URL → error (chosen because URL parse is the most likely
-         place to silently relax)
+✓ Balanced plan:
+  t-001  Form renders with new fields
+  t-002  HAPPY: Save <Resource> with all valid inputs → 200, record appears in list
+  t-003  HAPPY: Save <Resource> with the alternative typed variant → 200, record appears in list
+         (only if the diff introduces multiple typed paths — skip otherwise)
+  t-004  NEGATIVE: <RequiredField> missing → field-level error (covers the most likely validator gap)
+  t-005  NEGATIVE: <TypedField> = <silently-relaxable invalid value> → error
+         (chosen because that's the validator branch most likely to regress under refactor)
 ```
 
 Two happy + two negatives gives the reviewer signal that the feature actually works AND that the most important guard rails fire. Five negatives gives signal that bad input gets rejected but says nothing about whether the feature itself ships.
@@ -148,22 +149,24 @@ Don't plan hunk-by-hunk. Read the PR body + ChangeMap first, then derive **1–3
 
 **v0.3.28+ structure** — declare journeys as a top-level array, reference from items by id:
 
+Shape (replace placeholders with whatever your PR actually touches):
+
 ```jsonc
 {
   "journeys": [
     {
-      "id": "j-create-image-reward",
-      "goal": "Admin creates a published Image-type digital reward.",
-      "terminal_state": "Reward appears in /admin/rewards list with status=Published and re-renders correctly after a hard reload."
+      "id": "j-create-<resource>",
+      "goal": "<Role> creates a <Resource> via the form and the record persists.",
+      "terminal_state": "<Resource> appears in /<list_route> with <status_field>=<terminal_value>; survives a hard reload of the detail page."
     },
     {
-      "id": "j-reject-bad-game-url",
-      "goal": "A reward with an invalid Game URL is rejected with a clear error.",
+      "id": "j-reject-<invalid-case>",
+      "goal": "A <Resource> submitted with <invalid_input> is rejected with a clear field-level error.",
       "terminal_state": "Form shows field-level error; no record persisted."
     }
   ],
   "items": [
-    { "id": "t-001", "journey_id": "j-create-image-reward", /* ... */ }
+    { "id": "t-001", "journey_id": "j-create-<resource>", /* ... */ }
   ]
 }
 ```
@@ -171,38 +174,35 @@ Don't plan hunk-by-hunk. Read the PR body + ChangeMap first, then derive **1–3
 `id` should be human-readable kebab-case starting with `j-`. `goal` is one sentence describing what the user accomplishes; `terminal_state` is the assertable end-state the reporter cites in the journey header.
 
 Two reasons for the structured form (over v0.3.23's loose `journey: "<name>"` string):
-1. **No accidental group splits** — two items with `journey: "Create Image Reward"` vs `journey: "create-image-reward"` would render as two separate report sections under string-match grouping. Reference-by-id eliminates that.
-2. **The goal + terminal_state become part of the report header** — reviewers see WHAT the journey is supposed to verify, not just a name. Makes single-glance "did the create-publish flow work" comprehension possible.
+1. **No accidental group splits** — two items whose loose journey strings differ in case / hyphenation / pluralization would render as two separate report sections under string-match grouping. Reference-by-id eliminates that.
+2. **The goal + terminal_state become part of the report header** — reviewers see WHAT the journey is supposed to verify, not just a name.
 
 Legacy `journey: "<name>"` string still validates (backward compat with pre-v0.3.28 plans); schema rejects setting BOTH `journey` and `journey_id` on the same item.
 
-A user journey is: a goal + an ordered set of steps + a final-state assertion. Example for the Digital Reward type=Image/Game PR:
+A user journey is: a goal + an ordered set of steps + a final-state assertion. Concrete example for a hypothetical "draft + publish blog post" PR (deliberately a DIFFERENT domain from anything you might be testing — the shape is what carries over, not the entity names):
 
 ```
-Journey 1: "Create-Image-Reward"
-  Goal: Admin creates a published Image-type digital reward.
+Journey 1: "create-and-publish-post"
+  Goal: Editor drafts a new post and publishes it.
   Steps:
-    1. (precondition) Logged in as developer, no existing reward with this name.
-    2. Open /admin/rewards/new
-    3. Select Type = Image, fill asset + name
-    4. Click Save
+    1. (precondition) Logged in as editor; no post with this slug exists.
+    2. Open /admin/posts/new
+    3. Fill title, body
+    4. Click Save → assert draft saved
     5. Click Publish
-    6. Verify: reward appears in list with status=Published.
-  After-state: navigate away, navigate back, reload — record still there.
+    6. Verify: post appears in /admin/posts with status=Published.
+  After-state: navigate away, navigate back to /admin/posts/<slug>, hard-reload — title + body still render correctly.
 
-Journey 2: "Create-Game-Reward"
-  Goal: Same as Journey 1 but for Game type, requiring a valid URL.
-  Steps: <similar>
-
-Journey 3: "Reject-Bad-Game-URL"
-  Goal: A reward submitted with an invalid Game URL is rejected with a clear error.
+Journey 2: "reject-empty-body"
+  Goal: Posts with empty body are rejected with a field-level error.
   Steps:
-    1. Logged in as developer.
-    2. Open form, select Type=Game.
-    3. Enter GameUrl = 'not-a-url'.
-    4. Click Save.
-    5. Verify: 422 with "Game URL is not a valid URL"; form not submitted.
+    1. Logged in as editor.
+    2. Open form; fill title only.
+    3. Click Save.
+    4. Verify: 422 with "Body is required"; no record persisted.
 ```
+
+Substitute the resource and the actions to whatever your diff actually touches. If your PR is about a checkout flow, the shape is the same: a checkout journey with (precondition / actions / verify) + a reject-bad-input journey.
 
 Tag every plan item with `journey_id` (preferred) or `journey` (legacy). Items within a journey list each other in `depends_on` if they share state — e.g. the "verify list still has it" item depends on the "save it" item. Items in different journeys are independent.
 
@@ -242,14 +242,14 @@ items to test directly:
   hunk) → treat as legacy; plan as before.
 
 Regression items SHOULD be tagged with `category` matching the caller
-(e.g. caller is `admin/rewards/router.go` → category `api`). Do not
+(e.g. caller is `<package>/router.go` → category `api`). Do not
 explode N items per caller — one item that walks the most user-visible
 caller is the goal. The blast-radius signal is "how many fan-out
 files exist", not "test every fan-out file".
 
 Phrase the item's `what:` so a reader sees the regression intent:
 
-> `what: "REGRESSION: dashboard widget that reads CreateReward still renders after Type=Image branch added"`
+> `what: "REGRESSION: <caller-screen-or-handler> still renders / responds correctly after <changed-function>'s new branch is added"`
 
 `impact_radius` is advisory, not authoritative. False positives are
 expected (the grep is identifier-name-based, not type-aware). When you
@@ -263,15 +263,15 @@ When item B is meaningful ONLY IF item A succeeded (A creates a record, B edits 
 ```jsonc
 {
   "id": "t-005",
-  "what": "HAPPY: Save Image reward 'fixture-image-1'",
-  "journey": "Create-Image-Reward",
+  "what": "HAPPY: Create <Record> 'fixture-1' via the form",
+  "journey_id": "j-create-and-edit",
   "depends_on": [],
   // ...
 },
 {
   "id": "t-006",
-  "what": "Edit Image reward 'fixture-image-1': replace asset",
-  "journey": "Create-Image-Reward",
+  "what": "Edit <Record> 'fixture-1': change <field>",
+  "journey_id": "j-create-and-edit",
   "depends_on": ["t-005"],     // execution-order dep
   "data_from": ["t-005"],      // STATE dep — if t-005 fails, skip t-006
   // ...
@@ -299,18 +299,18 @@ The schema enforces: every `data_from` entry must also appear in `depends_on` (d
 ```jsonc
 {
   "id": "t-005",
-  "what": "HAPPY: Save Image reward 'fixture-image-1'",
-  "journey": "Create-Image-Reward",
-  "how": "Navigate to /admin/rewards/new; Type=Image; Name='fixture-image-1'; pick asset; Save; capture the numeric record ID from the resulting /admin/rewards/<id> URL.",
+  "what": "HAPPY: Create <Record> 'fixture-1' via the form",
+  "journey_id": "j-create-and-edit",
+  "how": "Open /<route>/new; fill required fields with 'fixture-1' as the name; Save; capture the new record ID from the resulting /<route>/<id> URL.",
   "depends_on": [],
   "produces": ["created_id", "detail_url"]
 },
 {
   "id": "t-006",
-  "what": "Edit Image reward 'fixture-image-1': replace asset",
-  "journey": "Create-Image-Reward",
-  "preconditions": "Logged in as developer. Record exists at {{t-005.detail_url}}.",
-  "how": "Navigate to {{t-005.detail_url}}; click Edit; replace asset; Save; assert new asset displays.",
+  "what": "Edit <Record> 'fixture-1': change <field>",
+  "journey_id": "j-create-and-edit",
+  "preconditions": "Logged in as <role>. Record exists at {{t-005.detail_url}}.",
+  "how": "Navigate to {{t-005.detail_url}}; click Edit; change <field>; Save; assert new value displays.",
   "depends_on": ["t-005"],
   "data_from": ["t-005"]
 }
@@ -334,20 +334,26 @@ Each plan item MUST verify EITHER success OR a specific failure mode — never b
 - The setup, action, and assertion differ between happy and negative paths. Forcing them into one item makes the assertion vague enough to pass for the wrong reason.
 - The coverage-balance rule REQUIRES both happy and negative items; it does NOT say to fold them into one item.
 
-**Anti-pattern from a real plan we shipped** — every one of these should be split:
+Anti-pattern (any phrasing like this, regardless of domain):
 
 ```
-✗  t-008  Create reward type=Image: missing asset rejected; with asset, save succeeds
-✗  t-009  Create reward type=Game: empty + invalid Game URL rejected; valid URL saves
+✗  t-N  <action> with <invalid_input> rejected; with <valid_input>, succeeds
 ```
 
-Split:
+Split into separate items per assertion class. Two illustrative shapes from DIFFERENT domains so the rule is clearly about structure, not about a specific entity type — adapt to whatever your PR actually changes:
 
 ```
-✓  t-008  HAPPY: Create reward type=Image with valid asset → 200, record in list
-✓  t-009  HAPPY: Create reward type=Game with valid URL → 200, record in list
-✓  t-010  NEGATIVE: type=Image, missing asset → field validation error (error_type: validation)
-✓  t-011  NEGATIVE: type=Game, invalid URL → URL validation error  (error_type: validation)
+User-profile edit:
+✗  t-N    Edit profile: missing email rejected; with email, save succeeds
+✓  t-Na   HAPPY:    edit profile with valid email → 200, email visible on detail reload
+✓  t-Nb   NEGATIVE: edit profile with empty email → "Email is required" error
+                    (error_type: validation)
+
+Saved search filter:
+✗  t-N    Save filter: name too long rejected; valid name saves
+✓  t-Na   HAPPY:    save filter with 30-char name → 200, filter visible in saved-filters list
+✓  t-Nb   NEGATIVE: save filter with 256-char name → "Name max 255 chars" error
+                    (error_type: validation)
 ```
 
 The orchestrator runs `plan_smells.py` against your plan at the approval gate; combined-phrasing items get flagged with `⚠ <id>: combines happy and negative phrasing` for the human reviewer to catch. Don't make it work for that — write them split from the start.
@@ -363,9 +369,9 @@ For any happy-path test item that performs a write (POST/PUT/DELETE, form submit
 ```jsonc
 {
   "id": "t-005",
-  "journey_id": "j-create-image-reward",
-  "what": "HAPPY: save Image reward 'fixture-img-1' with valid asset",
-  "how": "Open /admin/rewards/new; type=Image; name='fixture-img-1'; pick asset; Save; assert success toast and URL changes to /admin/rewards/<id>.",
+  "journey_id": "j-create-<resource>",
+  "what": "HAPPY: create <Resource> 'fixture-1' with all required fields valid",
+  "how": "Open /<list_route>/new; fill required fields including name='fixture-1'; Save; assert success toast and URL changes to /<list_route>/<id>.",
   "produces": ["created_id", "detail_url"],
   "tool": "chrome-devtools",
   "category": "frontend",
@@ -374,10 +380,10 @@ For any happy-path test item that performs a write (POST/PUT/DELETE, form submit
 },
 {
   "id": "t-006",
-  "journey_id": "j-create-image-reward",
-  "what": "HAPPY: re-open saved Image reward — all fields round-trip correctly",
-  "preconditions": "t-005 created a reward at {{t-005.detail_url}}.",
-  "how": "Navigate away to /admin/rewards (the list page); assert the new row appears with name 'fixture-img-1'; click into the record; HARD-RELOAD the detail page; assert Type='Image', Name='fixture-img-1', asset preview renders the uploaded file — i.e. every submitted field round-trips through the read path.",
+  "journey_id": "j-create-<resource>",
+  "what": "HAPPY: re-open saved <Resource> — all fields round-trip correctly",
+  "preconditions": "t-005 created a record at {{t-005.detail_url}}.",
+  "how": "Navigate away to /<list_route> (the list page); assert the new row appears with name 'fixture-1'; click into the record; HARD-RELOAD the detail page; assert every submitted field renders with the submitted value — i.e. every field round-trips through the read path.",
   "tool": "chrome-devtools",
   "category": "frontend",
   "risk": "high",
@@ -409,9 +415,9 @@ When a test requires a specific starting state (logged-in role, seeded data, no 
 ```jsonc
 {
   "id": "t-005",
-  "what": "Editing an existing Image reward updates the asset",
-  "preconditions": "Logged in as developer. An Image-type reward named 'fixture-edit-test' already exists (created by t-004 or via seed).",
-  "how": "Navigate to /admin/rewards; find 'fixture-edit-test' row; click Edit; replace the asset; click Save; assert new asset displays.",
+  "what": "Editing an existing <Record> updates <field>",
+  "preconditions": "Logged in as <role>. A <Record> named 'fixture-edit-test' already exists (created by t-004 or via seed).",
+  "how": "Navigate to /<list_route>; find the 'fixture-edit-test' row; click Edit; change <field>; click Save; assert the new value displays.",
   "tool": "chrome-devtools",
   "category": "api",
   "risk": "high",

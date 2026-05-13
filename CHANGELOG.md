@@ -2,6 +2,45 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.31 — 2026-05-13
+
+### De-hardcode SKILL examples — placeholders + rotated domains
+
+User caught a real prompt-engineering bug: every concrete example in `planning-pr-tests/SKILL.md` (and a few in the orchestrator + other skills) used the mcd-website Digital Reward Image/Game PR's exact entities. The AI planner reads SKILL.md examples as **templates to mimic**, not as one-of-many-shapes illustrations — so plans for unrelated PRs were getting Image/Game-shaped scaffolds.
+
+This release sweeps every example across the plugin and replaces them with EITHER:
+- **Placeholders** (`<Resource>`, `<RequiredField>`, `<TypedField>`, `<role>`, `<list_route>`, `<field>`) for shape-template patterns — clearly marked as "fill these in with your PR's specifics".
+- **Different-domain concretes** for worked examples — blog post drafts, user profile edits, saved search filters — chosen specifically because they DON'T match any obvious PR your AI would actually be testing. Rotation across domains forces the planner to extract the structural pattern rather than copy the entity names.
+
+Files touched:
+- `planning-pr-tests/SKILL.md`:
+  - Coverage-balance worked example → placeholders.
+  - Journey-first structured example → placeholders.
+  - Journey-first prose example → blog post draft/publish (deliberately different domain).
+  - Impact-radius regression phrasing → placeholder.
+  - data_from cross-item example → placeholders.
+  - produces + templates example → placeholders.
+  - One-assertion-per-item split anti-pattern → placeholder pattern + two short examples from user-profile and saved-search-filter domains.
+  - Write-persistence required-sibling example → placeholders.
+  - preconditions example → placeholders.
+- `analyzing-pr-changes/SKILL.md`: ChangeMap output example → placeholders.
+- `reporting-pr-test-results/SKILL.md`: journey header example → placeholders.
+- `agents/pr-test-executor.md`: outputs capture example → placeholder.
+- `commands/proctor.md`: approval-gate plan-table example → placeholder rows.
+- `scripts/impact_radius.py`: CLI example in docstring → placeholders.
+
+Files intentionally left alone:
+- `CHANGELOG.md` historical entries (v0.3.21 / .23 / .25 / .28 / .30) — those are HISTORICAL records of what triggered each release; rewriting them would lose context.
+- `scripts/plan_smells.py` module docstring — the verbatim production plan it cites is the JUSTIFICATION for the script existing, not a template the planner reads.
+- `scripts/schema.py` inline code comments — Python comments aren't read by the planner AI as examples.
+
+### Why this matters
+- The planner cannot distinguish "the documentation happens to use Image/Game" from "Image/Game is the canonical pattern". Every concrete example becomes a default mental model.
+- Rotating domains across examples models the meta-rule: "the structure is what matters; substitute your domain's nouns."
+
+### Tests
+- Unchanged at 147 — the test fixtures continue to use the verbatim production strings (`Create reward type=Image: missing asset rejected; with asset, save succeeds`) so `plan_smells.py` is still pinned against the real-world phrasing it was built to catch.
+
 ## v0.3.30 — 2026-05-13
 
 ### Plan smells + mandatory round-trip sibling — hard-stop the "save without verify" regression

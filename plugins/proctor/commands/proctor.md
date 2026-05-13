@@ -162,11 +162,11 @@ Required format for the table:
 
 | # | Cat | Risk | Tool | As | What |
 |---|---|---|---|---|---|
-| t-001 | api | low | lint-only | dev | Proto enum DigitalContentType declared (IMAGE/GAME values) |
-| t-002 | api | low | lint-only | dev | model.DigitalContentType correctly mapped to proto enum |
-| t-003 | api | medium | bash | dev | `go vet ./mcd-service_api/...` clean after changes |
-| t-004 | api | high | chrome-devtools | dev | Admin form renders Image + Game radio + dependent fields |
-| t-005 | api | high | chrome-devtools | dev | Save Image reward end-to-end: form → DB → publish |
+| t-001 | api | low | lint-only | dev | <one-sentence summary of item 1's what:> |
+| t-002 | api | low | lint-only | dev | <one-sentence summary of item 2's what:> |
+| t-003 | api | medium | bash | dev | <one-sentence summary of item 3's what:> |
+| t-004 | api | high | chrome-devtools | dev | <one-sentence summary of item 4's what:> |
+| t-005 | api | high | chrome-devtools | dev | <one-sentence summary of item 5's what:> |
 | ... |
 ```
 
