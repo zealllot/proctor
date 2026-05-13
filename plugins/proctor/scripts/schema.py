@@ -9,7 +9,21 @@ correctness (e.g. whether a SHA actually exists in the repo).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# Template syntax for cross-item data flow (v0.3.25+):
+#   {{<item_id>.<output_key>}}    e.g. {{t-007.created_id}}
+# - item_id matches the existing id format ([A-Za-z0-9_-]+ — same chars
+#   the planner already uses for t-001 / fix-step-2 / etc.)
+# - output_key must be a valid identifier ([A-Za-z_][A-Za-z0-9_]*) so
+#   downstream items can use a stable, shell-safe reference.
+# Whitespace inside braces is tolerated so plan authors can write
+# `{{ t-005.created_id }}` for readability.
+_TEMPLATE_RE = re.compile(
+    r"\{\{\s*([A-Za-z0-9_-]+)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}"
+)
+_PRODUCES_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 VALID_CATEGORIES = {
     "frontend", "api", "schema", "infra",
@@ -213,11 +227,31 @@ def validate_test_plan(tp: dict) -> None:
                          f"TestPlan.items[{i}].data_from[{j}] must be a non-empty string")
                 _require(src != item["id"],
                          f"TestPlan.items[{i}] cannot pull data_from itself")
+        # `produces` (v0.3.25+) optional list of output key names this
+        # item promises to capture and return to the executor's run
+        # context. Downstream items reference these via
+        # `{{<this_id>.<key>}}` templates in their `how:` /
+        # `preconditions`. Keys must be valid identifiers (used in
+        # shell-ish substitution).
+        if "produces" in item and item["produces"] is not None:
+            _require(isinstance(item["produces"], list),
+                     f"TestPlan.items[{i}].produces must be a list of output key names")
+            seen_keys: set[str] = set()
+            for j, k in enumerate(item["produces"]):
+                _require(isinstance(k, str) and k.strip(),
+                         f"TestPlan.items[{i}].produces[{j}] must be a non-empty string")
+                _require(_PRODUCES_KEY_RE.match(k),
+                         f"TestPlan.items[{i}].produces[{j}] {k!r} must match "
+                         f"[A-Za-z_][A-Za-z0-9_]* (used as a {{{{id.key}}}} substitution token)")
+                _require(k not in seen_keys,
+                         f"TestPlan.items[{i}].produces[{j}] {k!r} duplicates an earlier key")
+                seen_keys.add(k)
 
     # Second pass: every depends_on / data_from entry must reference a
     # known id. data_from sources should also be in depends_on (data
     # dependency implies ordering dependency — auto-validate so the
     # planner can't accidentally race).
+    by_id = {it["id"]: it for it in tp["items"]}
     for i, item in enumerate(tp["items"]):
         for dep in item["depends_on"]:
             _require(dep in seen_ids,
@@ -228,6 +262,32 @@ def validate_test_plan(tp: dict) -> None:
             _require(src in item["depends_on"],
                      f"TestPlan.items[{i}] declares data_from={src!r} but doesn't "
                      f"list it in depends_on — data dependency requires execution ordering")
+        # Third check (v0.3.25+): every {{<id>.<key>}} template in
+        # `how:` / `preconditions` must point to a real upstream item,
+        # be listed in this item's data_from (so the run-context will
+        # be populated when this item runs), and the upstream must
+        # declare `produces: [..., <key>, ...]`. Without this, the
+        # template would silently render as literal `{{...}}` at
+        # runtime and the test would fail in a confusing way.
+        for field_name in ("how", "preconditions"):
+            text = item.get(field_name)
+            if not isinstance(text, str):
+                continue
+            for m in _TEMPLATE_RE.finditer(text):
+                ref_id, ref_key = m.group(1), m.group(2)
+                tpl = f"{{{{{ref_id}.{ref_key}}}}}"
+                _require(ref_id in seen_ids,
+                         f"TestPlan.items[{i}].{field_name}: template {tpl} "
+                         f"references unknown item id {ref_id!r}")
+                _require(ref_id in (item.get("data_from") or []),
+                         f"TestPlan.items[{i}].{field_name}: template {tpl} "
+                         f"requires {ref_id!r} in this item's data_from "
+                         f"(consuming upstream state must be declared explicitly)")
+                producer_keys = by_id[ref_id].get("produces") or []
+                _require(ref_key in producer_keys,
+                         f"TestPlan.items[{i}].{field_name}: template {tpl} "
+                         f"references key {ref_key!r} but item {ref_id!r} does not "
+                         f"declare produces=[..., {ref_key!r}, ...]")
 
 
 def validate_test_results(tr: dict) -> None:
@@ -255,6 +315,23 @@ def validate_test_results(tr: dict) -> None:
             if item.get(opt_str) is not None:
                 _require(isinstance(item[opt_str], str),
                          f"TestResults.items[{i}].{opt_str} must be a string if present")
+        # `outputs` (v0.3.25+) — captured data from this item's run,
+        # keyed by name as declared in the matching TestPlan item's
+        # `produces` array. Downstream items reference these via
+        # `{{<this_id>.<key>}}` templates which the executor substitutes
+        # in-place before dispatching the dependent subagent. Values
+        # MUST be strings (downstream uses them in shell / URL / DOM
+        # contexts where a string is the only sane unit).
+        if item.get("outputs") is not None:
+            _require(isinstance(item["outputs"], dict),
+                     f"TestResults.items[{i}].outputs must be an object if present")
+            for k, v in item["outputs"].items():
+                _require(isinstance(k, str) and _PRODUCES_KEY_RE.match(k),
+                         f"TestResults.items[{i}].outputs: key {k!r} must match "
+                         f"[A-Za-z_][A-Za-z0-9_]*")
+                _require(isinstance(v, str) and v != "",
+                         f"TestResults.items[{i}].outputs[{k!r}]: value must be a "
+                         f"non-empty string (got {v!r})")
         counts[item["status"]] += 1
 
     summary = tr["summary"]

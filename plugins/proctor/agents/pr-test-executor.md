@@ -97,6 +97,28 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
    - `screenshot_ref`: REQUIRED for chrome-devtools items. Path
      relative to the repo root (typically
      `.proctor/runs/<run-id>/screenshots/<id>.png`).
+   - `outputs` (v0.3.25+): REQUIRED when the item's plan entry
+     includes a non-empty `produces: [...]` array. Capture the actual
+     runtime values for every declared key and return them as
+     `{"<key>": "<value>", ...}`. Values MUST be strings (downstream
+     uses them in URLs / DOM selectors / shell). Examples:
+     - `produces: ["created_id", "detail_url"]` after a successful
+       save → `"outputs": {"created_id": "42", "detail_url": "/admin/rewards/42"}`.
+       Extract the ID from the post-save URL or from a DOM data-attr;
+       extract the detail URL from `window.location.pathname`.
+     - `produces: ["slug"]` after a slug-generating action → read it
+       from the visible field, the URL, or the response body — pick
+       the source closest to "what the next item will navigate to".
+     - When a produced value cannot be captured (page didn't redirect,
+       DOM didn't reflect the change), return status=`fail` with
+       `reason: "missing"` — DO NOT return an empty string for the
+       output. The executor checks for missing/empty values and will
+       override your status anyway; surface the real problem.
+
+   When the item's `how:` or `preconditions` contains `{{<id>.<key>}}`
+   placeholders, the executor has ALREADY substituted them before
+   handing you the item — you just see the final values. Don't try to
+   interpret the template syntax yourself.
 
 ## Constraints
 

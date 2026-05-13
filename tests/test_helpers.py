@@ -705,6 +705,197 @@ def test_change_map_impact_radius_self_reference_rejected():
         validate_change_map(bad)
 
 
+def _producer_item(item_id="t-1", produces=None, **over):
+    base = {"id": item_id, "category": "api", "what": "x", "how": "y",
+            "tool": "bash", "risk": "low", "depends_on": []}
+    if produces is not None:
+        base["produces"] = produces
+    base.update(over)
+    return base
+
+
+def _consumer_item(item_id="t-2", data_from=("t-1",), how="y",
+                   preconditions=None, **over):
+    base = {"id": item_id, "category": "api", "what": "x", "how": how,
+            "tool": "bash", "risk": "low",
+            "depends_on": list(data_from), "data_from": list(data_from)}
+    if preconditions is not None:
+        base["preconditions"] = preconditions
+    base.update(over)
+    return base
+
+
+# --- v0.3.25: produces + {{id.key}} template + outputs --------------------
+
+def test_plan_produces_field_accepted():
+    valid = {"items": [_producer_item(produces=["created_id", "detail_url"])]}
+    validate_test_plan(valid)
+
+
+def test_plan_produces_empty_string_rejected():
+    bad = {"items": [_producer_item(produces=[""])]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_produces_invalid_identifier_rejected():
+    # `has-dash` is fine for item ids but NOT for output keys — they
+    # get substituted into shell/URL context where dash-vs-underscore
+    # ambiguity bites.
+    for bad_key in ["1foo", "has-dash", "has space", "a.b"]:
+        bad = {"items": [_producer_item(produces=[bad_key])]}
+        with pytest.raises(SchemaError):
+            validate_test_plan(bad)
+
+
+def test_plan_produces_duplicate_key_rejected():
+    bad = {"items": [_producer_item(produces=["x", "x"])]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_template_ok():
+    valid = {"items": [
+        _producer_item(produces=["created_id"]),
+        _consumer_item(how="Edit record {{t-1.created_id}}; assert OK."),
+    ]}
+    validate_test_plan(valid)
+
+
+def test_plan_template_in_preconditions_ok():
+    valid = {"items": [
+        _producer_item(produces=["detail_url"]),
+        _consumer_item(preconditions="Record at {{t-1.detail_url}} exists.",
+                       how="navigate; assert"),
+    ]}
+    validate_test_plan(valid)
+
+
+def test_plan_template_whitespace_tolerated():
+    # Plan authors might write `{{ t-1.created_id }}` for readability.
+    valid = {"items": [
+        _producer_item(produces=["created_id"]),
+        _consumer_item(how="Edit record {{ t-1.created_id }}; OK."),
+    ]}
+    validate_test_plan(valid)
+
+
+def test_plan_template_unknown_id_rejected():
+    bad = {"items": [_consumer_item(data_from=(), how="Edit {{t-99.id}}.")]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_template_requires_data_from():
+    # depends_on alone is insufficient — using upstream state must
+    # be declared via data_from so the skip-on-fail logic engages.
+    bad = {"items": [
+        _producer_item(produces=["created_id"]),
+        {
+            "id": "t-2", "category": "api", "what": "x",
+            "how": "Edit record {{t-1.created_id}}.",
+            "tool": "bash", "risk": "low",
+            "depends_on": ["t-1"],   # has depends_on
+            # but NO data_from
+        },
+    ]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_template_key_not_in_produces_rejected():
+    bad = {"items": [
+        _producer_item(produces=["other_key"]),
+        _consumer_item(how="Edit record {{t-1.created_id}}."),
+    ]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_template_producer_with_no_produces_rejected():
+    # Upstream item declared NO produces list at all.
+    bad = {"items": [
+        _producer_item(),   # no produces
+        _consumer_item(how="Edit record {{t-1.created_id}}."),
+    ]}
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_test_results_outputs_accepted():
+    valid = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "outputs": {"created_id": "42", "detail_url": "/admin/rewards/42"},
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    validate_test_results(valid)
+
+
+def test_test_results_outputs_null_allowed():
+    # null/absent both fine — items without producers don't carry outputs.
+    valid = {
+        "items": [
+            {"id": "t-1", "status": "pass", "evidence": "ok", "outputs": None},
+            {"id": "t-2", "status": "pass", "evidence": "ok"},  # absent
+        ],
+        "summary": {"total": 2, "pass": 2, "fail": 0, "skipped": 0},
+    }
+    validate_test_results(valid)
+
+
+def test_test_results_outputs_non_string_value_rejected():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "outputs": {"created_id": 42},  # int — must be string
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_test_results_outputs_empty_value_rejected():
+    # Empty string is a producer contract violation — the executor
+    # converts this to a fail anyway, but the schema rejects it as
+    # a value too in case someone hand-edits the JSON.
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "outputs": {"created_id": ""},
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_test_results_outputs_invalid_key_rejected():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "outputs": {"has-dash": "x"},
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_test_results_outputs_must_be_dict():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "outputs": [("created_id", "42")],   # list, not dict
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
 def test_change_map_impact_radius_empty_string_entry_rejected():
     bad = {
         "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},

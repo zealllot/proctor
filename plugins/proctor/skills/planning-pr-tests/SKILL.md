@@ -248,6 +248,43 @@ DON'T use `data_from` for items that share fixture data but don't share live-tes
 
 The schema enforces: every `data_from` entry must also appear in `depends_on` (data dependency implies ordering).
 
+### Passing artifacts from producer to consumer (`produces` + `{{...}}` templates)
+
+`data_from` alone only says "if A failed, skip B". The piece that closes the loop is the actual value B needs from A — typically a generated record ID or URL. The plan declares this explicitly:
+
+1. **On the producer**, declare every output the consumer will read via `produces: ["<key>", ...]`. Keys must be identifier-ish (`[A-Za-z_][A-Za-z0-9_]*`) since they're used inline in shell-ish substitution.
+2. **In the consumer's `how:` or `preconditions`**, reference the value with `{{<producer_id>.<key>}}`. The executor substitutes it before dispatching the consumer subagent.
+
+```jsonc
+{
+  "id": "t-005",
+  "what": "HAPPY: Save Image reward 'fixture-image-1'",
+  "journey": "Create-Image-Reward",
+  "how": "Navigate to /admin/rewards/new; Type=Image; Name='fixture-image-1'; pick asset; Save; capture the numeric record ID from the resulting /admin/rewards/<id> URL.",
+  "depends_on": [],
+  "produces": ["created_id", "detail_url"]
+},
+{
+  "id": "t-006",
+  "what": "Edit Image reward 'fixture-image-1': replace asset",
+  "journey": "Create-Image-Reward",
+  "preconditions": "Logged in as developer. Record exists at {{t-005.detail_url}}.",
+  "how": "Navigate to {{t-005.detail_url}}; click Edit; replace asset; Save; assert new asset displays.",
+  "depends_on": ["t-005"],
+  "data_from": ["t-005"]
+}
+```
+
+**Key rules:**
+- Only declare `produces` for keys downstream items actually consume. Don't speculate.
+- Every `{{<id>.<key>}}` template MUST point to an item in this item's `data_from` and that item MUST list `<key>` in its `produces`. Schema rejects orphan references at validation time so the executor never hits a runtime "what does this template mean" surprise.
+- When the upstream subagent returns `outputs` missing a declared key, the upstream is FAILED (not the downstream) — the contract was promised, not kept.
+- Use canonical key names: `created_id`, `record_id`, `detail_url`, `slug`. Don't invent per-item names; the planner should treat these like a small vocabulary so reviewers see the same words across journeys.
+
+When NOT to use templates:
+- The "consume A's state" is implicit (e.g. B just visits a list page A added to — no specific URL or ID needed). Use `data_from` without `produces`.
+- The artifact is something already known statically (a fixture seed name). Hardcode it in both items; no template needed.
+
 ## Write-operation persistence — required assertions
 
 For any test item that performs a write (POST/PUT/DELETE, form submit, file upload, state-changing button click), the immediate response (toast / 200 / element visible) is necessary but NOT sufficient. The reviewer needs to know the change actually persisted.

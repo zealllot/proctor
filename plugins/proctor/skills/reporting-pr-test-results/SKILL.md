@@ -116,10 +116,20 @@ preview for inline rendering, or click the link above on macOS)._
 {if status == fail AND item.reason}**Failure reason:** `{item.reason}`
 {end-if}
 
+{if item.outputs is non-empty}**Captured artifacts** (consumed by downstream items via `{{<id>.<key>}}`):
+```
+{for each key, value in item.outputs:}
+{key} = {value}
+{end}
+```
+{end-if}
+
 </details>
 ```
 
-If the item has no `command` / `output_excerpt` / `screenshot_ref`, omit those subsections. The section must always include **What it did** and **Evidence**.
+If the item has no `command` / `output_excerpt` / `screenshot_ref` / `outputs`, omit those subsections. The section must always include **What it did** and **Evidence**.
+
+When an item was skipped because of a missing producer output (`reason: "data-template-missing: t-007.created_id"`), surface the upstream id + key in **Failure reason** so the reviewer can jump to the producer's row instead of inspecting the consumer's empty render. Producer-side, when an item failed because of `reason: "producer-missing-output"`, render the declared `produces:` keys vs. the actual `outputs:` keys side-by-side in the **Captured artifacts** subsection so the contract gap is obvious.
 
 ## Auto-fix section
 

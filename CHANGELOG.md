@@ -2,6 +2,53 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.25 — 2026-05-13
+
+### `data_from` artifact passing — producer outputs flow to consumer templates
+
+User flagged the biggest landing gap in v0.3.23's `data_from`: it only said "skip downstream if upstream failed", but never wired the actual VALUES (record IDs, URLs) from producer to consumer. This release closes that gap.
+
+**Plan-side contract** (`planning-pr-tests/SKILL.md` new section, schema):
+- Producer items declare `produces: ["created_id", "detail_url"]` — list of output key names this item promises to capture. Keys must match `[A-Za-z_][A-Za-z0-9_]*` (used in shell-ish substitution).
+- Consumer items reference values inline via `{{<producer_id>.<key>}}` syntax in `how:` / `preconditions`:
+  ```
+  preconditions: "Logged in as developer. Record at {{t-005.detail_url}} exists."
+  how:          "Navigate to {{t-005.detail_url}}; click Edit; replace asset; Save."
+  ```
+- Whitespace inside braces tolerated for readability (`{{ t-005.created_id }}`).
+- Canonical key vocabulary recommended (`created_id`, `record_id`, `detail_url`, `slug`) — keeps cross-journey reviews legible.
+
+**Schema cross-checks** (`schema.py`):
+- Every `{{<id>.<key>}}` in `how:` / `preconditions` must reference an item that's in this item's `data_from` AND that item must list `<key>` in its `produces`. Orphan templates rejected at validation, never make it to runtime.
+- Duplicate keys in `produces` rejected.
+- `outputs` on TestResults items: must be `{string-key: non-empty-string-value}`, keys match identifier pattern. Empty-string values rejected (a producer that returned `""` violated its contract).
+
+**Executor flow** (`executing-pr-tests/SKILL.md` Step 4 + `pr-test-executor.md`):
+- Maintains a `run_context: {item_id: outputs_dict}` accumulator during execution.
+- BEFORE dispatching each item, walks `how:` / `preconditions` for `{{<id>.<key>}}` templates, substitutes from `run_context`. Missing key (e.g. producer passed but forgot to capture) → consumer marked `skipped` with `reason: "data-template-missing: t-007.created_id"`. Catches subagent contract violations BEFORE the dependent test runs against broken state.
+- AFTER receiving subagent result: if the plan declared `produces: [...]` but the result's `outputs` dict is missing/empty for any declared key, override status to `fail` with `reason: "producer-missing-output"`. A producer that doesn't honor its contract is failed regardless of what the subagent thinks.
+- Successful items' `outputs` go into `run_context` for downstream substitution.
+
+**Subagent contract** (`pr-test-executor.md`):
+- New `outputs` return field: REQUIRED when the dispatched item's plan entry has a non-empty `produces:` array. Values must be strings (URL paths, record IDs, slugs — never ints / objects / null).
+- Explicit guidance on capture sources: extract from post-save URL, DOM data-attrs, response body — whatever's closest to "what the next item will navigate to".
+- Templates in the item's `how:` / `preconditions` are ALREADY substituted by the executor when the subagent receives them — subagent doesn't see / interpret `{{...}}` syntax itself.
+
+**Report** (`reporting-pr-test-results/SKILL.md`):
+- Per-item section grows a **Captured artifacts** subsection rendering the `outputs` dict so reviewers can see exactly what flowed downstream.
+- `data-template-missing` skips surface the missing `<id>.<key>` in **Failure reason** so the reviewer can jump to the upstream row.
+- `producer-missing-output` failures render declared `produces:` keys vs. actual `outputs:` keys side-by-side.
+
+### Tests
+- 69 → 86 (+17): produces field acceptance / invalid-key rejection / duplicate-key rejection; template happy path / preconditions / whitespace tolerance / unknown-id / missing-data_from / key-not-in-produces / producer-with-no-produces; outputs accepted / null / non-string value / empty value / invalid key / non-dict-shape.
+
+### Status of the 5-point quality review
+- #1 impact_radius false positive control (regex → frequency threshold) — not in this release
+- #2 journey upgraded from string to top-level array — not in this release
+- #3 data_from artifact passing ✅ (this release)
+- #4 error_type state-conflict diff-pattern triggers in SKILL.md — not in this release
+- #5 impact_radius_truncated flag with auto-risk-upgrade — not in this release
+
 ## v0.3.24 — 2026-05-13
 
 ### `impact_radius` — grep-based caller analysis for regression coverage (#5)

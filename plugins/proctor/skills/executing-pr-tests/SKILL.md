@@ -102,12 +102,44 @@ Output: a single `TestResults` JSON object.
      skipped due to t-006, and t-008 has data_from=[t-007], t-008 also
      gets skipped with `data-dep-failed: t-007` (the chain reason is
      visible up one level; the report walks the full chain).
-   - Otherwise dispatch a fresh subagent with the item JSON, env, the
-     path to `<logs_dir>/<id>.log`, AND the Chrome context handle for
-     its group. Items without `as_account` set go into the default
+   - **Substitute `{{<id>.<key>}}` templates** (v0.3.25+) in the
+     item's `how:` and `preconditions` BEFORE dispatch. The schema
+     guarantees every template references a `data_from` source that
+     declares the key in `produces` — but the source's actual
+     `outputs` map might be missing the key at runtime (e.g. the
+     subagent passed but forgot to capture). Substitution rules:
+     - Look up `run_context[<id>][<key>]` (where `run_context` is the
+       accumulator `{item_id: outputs_dict}` you've been building
+       from prior `outputs` fields).
+     - If found, replace the template inline with that value.
+     - If missing, do NOT dispatch — record this item as:
+       ```json
+       {"id": "t-008", "status": "skipped",
+        "reason": "data-template-missing: t-007.created_id",
+        "evidence": "Upstream t-007 reported status=pass but did not return outputs[\"created_id\"]; cannot render template {{t-007.created_id}} in this item's how:."}
+       ```
+       This catches subagent errors (producer claimed success but
+       failed to capture) BEFORE the dependent test runs against
+       broken state. Continue to next item.
+   - Otherwise dispatch a fresh subagent with the item JSON (with
+     templates already substituted), env, the path to
+     `<logs_dir>/<id>.log`, AND the Chrome context handle for its
+     group. Items without `as_account` set go into the default
      group (= `auth.accounts[0].name`).
-   - Receive its single-result JSON.
-   - Append to results array.
+   - **Validate producer outputs** (v0.3.25+) on the returned result.
+     If the original item declared `produces: ["a", "b"]`, the
+     subagent's `outputs` dict MUST contain both keys with non-empty
+     string values. If any declared key is missing or empty:
+     ```json
+     {"id": "t-007", "status": "fail",
+      "reason": "producer-missing-output",
+      "evidence": "Item declared produces=[\"created_id\"] but subagent returned outputs=<missing/empty for that key>. Cannot satisfy downstream data dependency."}
+     ```
+     (Override whatever status the subagent returned — a producer
+     that misses a contract is a fail regardless.)
+   - Append to results array. If status is `pass` AND `outputs` is
+     non-empty, write `outputs` into `run_context[<this_id>]` so
+     downstream items can substitute against it.
 
 5. After all items finish, **clean up**: close all browser contexts;
    in legacy mode, also kill setup processes by sending SIGTERM to
