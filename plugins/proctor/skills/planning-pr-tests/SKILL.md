@@ -597,6 +597,20 @@ Rationale writing rules:
 - Cite at least one concrete signal from the diff or PR body. "Generated because the PR touches frontend code" is too vague.
 - For multi-role items, the rationale should explain why this SPECIFIC role is the right one to test under.
 
+## Complex-form save items: cite the validator path in `how:` (v0.3.39+)
+
+For chrome-devtools items that submit a form with multiple required fields (every `HAPPY: save / create / update` on a non-trivial form), the executor will read the validator source to enumerate required fields BEFORE filling and saving — that's the executor's "no whack-a-mole" rule. To make that work, **the planner must name the validator file in the item's `how:`** so the executor doesn't have to guess.
+
+Mechanics:
+- Walk the ChangeMap hunks for the file that contains the validator. Most likely candidates: paths matching `*_validator.go`, `models/<resource>.go`, `app/models/<resource>.rb`, `admin_resource.go` / `*_admin.go`, or any hunk whose `summary:` mentions "validator" / "validates" / "required". The `error_signals.py` helper run during planning surfaces these too (`error_type: validation` signals come from this code).
+- In the item's `how:`, include an explicit reference, e.g.:
+
+  > "Navigate to /<list_route>/new. Read the validator source at `<path-to-validator>` to enumerate every required field (note any type-driven branches, e.g. `case TypeImage` requiring asset). Fill ALL required fields with valid values in one pass. Click Save once."
+
+- Don't paraphrase the required-field list into `how:` yourself. Cite the path; let the executor read fresh. The validator might have changed between planning and execution (rare but happens with auto-fix loops).
+
+The executor's contract (in `agents/pr-test-executor.md` "no whack-a-mole" section) makes this load-bearing: if the path isn't cited and the executor can't find the validator, it falls back to DOM-snapshot heuristics which catch fewer requirements. So citing it isn't a nice-to-have — it's the input the executor needs to do its job correctly.
+
 ## Self-audit BEFORE handing the plan back (v0.3.35+)
 
 After writing `test-plan.json` and BEFORE returning to the orchestrator, you MUST run the plan-smells lint as the LAST step of this skill. This is the safety net for everything in this skill — every rule above (one-assertion-per-item, write-needs-roundtrip, coverage balance) is mechanically checked here:

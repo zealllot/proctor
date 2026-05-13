@@ -37,6 +37,24 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
 
 2. Write all logs to `<logs_dir>/<id>.log`.
 
+2a. **For chrome-devtools items that submit a form** (create / update / edit / publish / save), DO NOT play whack-a-mole (v0.3.39+). Whack-a-mole = fill one field, click Save, read a validator error in the toast/UI, fill another field, click Save again, repeat. This is slow, undermines the test (you can't tell whether the form's *intended* behavior was exercised), and confuses the result evidence with multiple intermediate failures.
+
+Instead, BEFORE clicking the Save button for the first time:
+
+1. **Read the validator source first.** The change-map `pr_context.body` or the diff itself almost always names the file. Look for `*_validator.go`, `models/<resource>.go`, `app/models/<resource>.rb`, an `admin_resource.go`, or a `Meta`/`MetaConfig` block. Use the Read tool on it. Enumerate every required-field rule, every type-driven conditional (e.g. "GameUrl required only when DigitalContentType=Game"), every format check (URL parse, email regex, length cap).
+
+2. **Snapshot the live form.** `take_snapshot` on the chrome-devtools page. List every input/select with `required` attribute, `aria-required="true"`, an asterisk in the label, or a `*` glyph. The DOM is the secondary source of truth — server-side-only validators won't show here but client-side ones will.
+
+3. **Plan a single fill pass.** Reconcile (1) and (2): you should have a list of every field this submit needs, plus a valid value for each. Branch on type-driven fields based on the item's `what:` (item says "type=Image" → asset required, GameUrl not; item says "type=Game" → GameUrl required, asset not).
+
+4. **Fill all fields in one go**, then click Save once.
+
+5. If the save unexpectedly returns a validator error you didn't anticipate (a required field neither the validator code nor the DOM exposed clearly), do ONE corrective fill + retry — and flag it in `evidence`: `"Save initially failed on required field <name> not surfaced by validator at <path>; refilled and re-saved successfully."` That tells the human reader there's a planning gap to fix, without burning the test result.
+
+NEVER cycle save→error→fill→save→error 3+ times — that's the anti-pattern this rule exists to forbid. If you find yourself doing it, return `status: "fail"` with `reason: "whack-a-mole"` and an evidence line listing every validator error you hit. The planner will see the cascade in the report and tighten the next round.
+
+Multi-step intentional flows (Save Draft → Edit → Publish, each a separate `Save` click on a known-correct form state) ARE allowed — the rule forbids iterative-trial on a *single* logical submit, not multi-stage workflows that the test legitimately walks through.
+
 3. **For chrome-devtools items**: capture a screenshot at the assertion
    point (after the page is rendered, before returning). Save it to
    `<logs_dir>/screenshots/<id>.png` via the chrome-devtools MCP's

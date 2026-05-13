@@ -2,6 +2,35 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.39 — 2026-05-14
+
+### Forbid form-submit whack-a-mole — read validator first, fill once, save once
+
+User observed during a real run: executor on a HAPPY save item filled one field → clicked Save → got validator error → filled another field → clicked Save → got another error → looped. Reasonable behavior for an AI without code-reading guidance, but anti-pattern for testing:
+- The test result conflates "did the save work?" with "did the AI eventually guess every required field?".
+- Multiple intermediate validator errors pollute the evidence log.
+- Slower (each save round-trip costs a 1-3s page reload + DOM update).
+- Hides a real planning gap: if the test had to discover field N at submit time, the plan should have known about it.
+
+This release codifies the right behavior across two contract documents:
+
+**Executor agent** (`agents/pr-test-executor.md`):
+- New section "For chrome-devtools items that submit a form, DO NOT play whack-a-mole":
+  1. Read the validator source (cited in the item's `how:`) FIRST. Enumerate every required field, every type-driven conditional, every format check.
+  2. Snapshot the live form. List every input/select with `required` attr / `aria-required` / asterisk / `*` glyph.
+  3. Reconcile (1) + (2) into a single fill-plan with valid values for every required field.
+  4. Fill all fields in one pass, click Save once.
+  5. On unexpected validator error: ONE corrective fill + retry, flagged in `evidence` as a planning gap.
+- Hard rule: cycling save → error → fill → save → error 3+ times → return `status: "fail"` with `reason: "whack-a-mole"` and evidence listing every validator error hit. The planner will see the cascade in the report and tighten the next round.
+- Multi-step intentional flows (Save Draft → Edit → Publish, each a known-correct submit) are explicitly still allowed — the rule is "no iterative-trial on a single logical submit", not "no multi-stage workflows".
+
+**Planner skill** (`planning-pr-tests/SKILL.md`):
+- New section "Complex-form save items: cite the validator path in `how:`": for every chrome-devtools save item the `how:` MUST cite the validator file path. Helps the executor read fresh (validator might have shifted between planning and execution under auto-fix loops); without the citation the executor falls back to DOM-snapshot heuristics which catch fewer requirements.
+- Path discovery hint: walk the ChangeMap hunks for files matching `*_validator.go` / `models/<resource>.go` / `app/models/<resource>.rb` / `admin_resource.go`, or whose `summary:` mentions "validator" / "validates" / "required". The v0.3.27 `error_signals.py` `validation` signals come from these.
+
+### Tests
+- 170 unchanged (this is agent + skill prose only; no schema or helper script logic moved).
+
 ## v0.3.38 — 2026-05-14
 
 ### Deprecate orchestrator hard-gate (6d) — the duplicate was stalling the AI
