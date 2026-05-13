@@ -2,6 +2,29 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.9 — 2026-05-13
+
+### Seed script: wizard reads the code and writes the real SQL
+- **Bug**: v0.3.6–0.3.8's seed script left `upsert_user()` as a TODO comment ("replace the SQL below..."). User correctly pointed out this is the wizard punting work back. PRoctor has the codebase right there — it should read the user model and write the actual SQL.
+- **Fix**: new Step 8c-pre Read 0 (runs before the email/password reads). Wizard:
+  1. Locates the user model file (user.go / admin_user.go / via gorm-tagged-struct grep).
+  2. Reads it with the Read tool, extracts: struct name, `TableName()` override or gorm-default plural, columns for email/password/role/TOTP, whether `gorm.Model` is embedded.
+  3. Reads migrations to verify column types + uniqueness constraints.
+  4. Identifies password hashing scheme (bcrypt cost, argon2 params, qor/auth conventions). Inlines a `gen_hash` Python+bcrypt helper into the script — portable, doesn't assume Postgres has `pgcrypto`.
+  5. Identifies TOTP secret storage format from how the app validates 2FA (pquerna/otp default = base32 → no conversion needed; other libs may differ).
+  6. Assembles the actual `INSERT ... ON CONFLICT (...) DO UPDATE SET ...` statement with the discovered column names, and inlines it into the seed script.
+- **Ambiguity handling**: if multiple candidate user models or multiple plausible columns are found, surface via AskUserQuestion *before* generating. No silent guess.
+
+### Now the dev workflow is
+
+```
+claude /proctor:proctor-init     # wizard reads code, generates real SQL
+./hack/proctor-seed-local.sh     # runs the SQL, writes .pr-test.local.yml
+claude /proctor:proctor <PR#>    # tests against local
+```
+
+No more "fill in the TODO". The seed script works on first run.
+
 ## v0.3.8 — 2026-05-13
 
 ### Seed-script generation is now orthogonal to MODE

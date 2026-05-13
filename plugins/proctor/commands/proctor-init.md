@@ -784,7 +784,118 @@ Generate `hack/proctor-seed-local.sh` (or `scripts/proctor-seed-local.sh` if no 
 2. Inserts/upserts each account into the local DB.
 3. Writes `.pr-test.local.yml` with the resulting credentials as **inline values** (not env vars — the file is gitignored, so plaintext is acceptable for local-only test accounts).
 
-**Before writing the script template, the wizard MUST do two reads:**
+**Before writing the script template, the wizard MUST do three reads:**
+
+#### Read 0: derive the actual UPSERT SQL from the user model
+
+Don't leave SQL as a TODO. Read the codebase, figure out the schema, generate the statement. Steps the wizard runs *with the Read tool*, in order:
+
+1. **Find the user model file.** Look for:
+
+   ```bash
+   # Files most likely to define the admin/user model
+   find . -type f \( \
+       -name 'user.go' -o -name 'admin_user.go' -o -name 'user_model.go' \
+     \) -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null
+
+   # Or grep for gorm-tagged structs with email/password fields
+   grep -rln -E 'gorm:"[^"]*" *json:|json:"[^"]*" *gorm:|Email.*\`gorm:|Password.*\`gorm:' \
+     --include='*.go' . 2>/dev/null | head -10
+
+   # Or where the auth flow registers the user model — usually in boot/auth code
+   grep -rln 'auth_identity|RegisterProvider.*password' --include='*.go' . 2>/dev/null | head -5
+   ```
+
+   When you find candidates, **Read each candidate file in full** (Read tool, not grep). Identify:
+   - Struct name (e.g. `User`, `AdminUser`)
+   - Table name (from `TableName() string` method, or default = snake_plural of struct name)
+   - Column for **email/login** (likely `Email`, `Login`, `Username`)
+   - Column for **password hash** (likely `Password`, `EncryptedPassword`, `PasswordHash`)
+   - Column for **role** (likely `Role`, `RoleID`, `Roles` for many-to-many)
+   - Column for **TOTP secret** (likely `TOTPSecret`, `OTPSecret`, `TwoFactorSecret`)
+   - Whether `gorm.Model` is embedded (gives `id, created_at, updated_at, deleted_at`)
+
+2. **Find the migration / table-creation source.** Check `database/migration/` / `migrations/` / similar. Verify the column types and any NOT-NULL / DEFAULT constraints. If the migration is `db.AutoMigrate(&User{})`, the gorm tags from step 1 ARE the schema.
+
+3. **Determine password hash function.** Look at how the app stores passwords. For qor/auth password provider this is bcrypt with the cost set in code. Patterns:
+
+   ```bash
+   grep -rEn 'bcrypt\.(Generate|Hash|GenerateFromPassword)' --include='*.go' . 2>/dev/null | head -5
+   grep -rEn 'password_themes/clean|qor/auth/providers/password' --include='*.go' . 2>/dev/null | head -3
+   ```
+
+   For qor/auth / clean theme: bcrypt at the default cost (10). Postgres can `crypt(plain_text, gen_salt('bf'))` only if the `pgcrypto` extension is installed; otherwise the script must call out to a CLI bcrypt and pass the hash as a literal. Default to the bcrypt-via-Python path because it's more portable than assuming pgcrypto:
+
+   ```bash
+   gen_hash() {
+     python3 -c "import bcrypt, sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10)).decode())" "$1"
+   }
+   ```
+
+   The wizard inlines this helper into the seed script.
+
+4. **For TOTP, check whether the app expects the secret stored as base32, raw bytes, or already-decoded.** Search for how the existing login validates 2FA:
+
+   ```bash
+   grep -rEn 'totp\.(Validate|GenerateCode|GenerateOpts)|otp\.NewKeyFromURL|base32\.Std.*Decode' \
+     --include='*.go' . 2>/dev/null | head -10
+   ```
+
+   For `pquerna/otp/totp` (the de-facto Go library), the secret is stored as the base32 string — same form we generated. No conversion needed.
+
+5. **Assemble the SQL.** Plug everything in:
+
+   ```sql
+   -- USER_MODEL_TABLE = "<extracted table name, e.g. admin_users>"
+   -- columns from the gorm/migration read:
+   INSERT INTO <table> (
+       <email_col>, <password_col>, <role_col>, <totp_col>,
+       created_at, updated_at
+   ) VALUES (
+       $1, $2, $3, $4, now(), now()
+   )
+   ON CONFLICT (<email_col>) DO UPDATE SET
+       <password_col> = EXCLUDED.<password_col>,
+       <role_col>     = EXCLUDED.<role_col>,
+       <totp_col>     = EXCLUDED.<totp_col>,
+       updated_at     = now();
+   ```
+
+   If the table doesn't have a unique constraint on `<email_col>`, fall back to a two-statement `DELETE ... ; INSERT ...` block (idempotent, less elegant).
+
+6. **Insert the password as a PRE-HASHED string** in the SQL, not as plaintext. The seed script calls `gen_hash` BEFORE passing `$2` to `psql`. So the script's `upsert_user` body becomes:
+
+   ```bash
+   upsert_user() {
+     local email="$1" plain_password="$2" role="$3" totp_seed="$4"
+     local hashed
+     hashed="$(gen_hash "$plain_password")"
+     PGPASSWORD="$MCD_DB_PASSWORD" psql -h "$MCD_DB_HOST" -p "$MCD_DB_PORT" \
+       -U "$MCD_DB_USER" -d "$MCD_DB_NAME" <<SQL
+       INSERT INTO admin_users (email, encrypted_password, role, totp_secret, created_at, updated_at)
+       VALUES ('$email', '$hashed', '$role', '$totp_seed', now(), now())
+       ON CONFLICT (email) DO UPDATE
+         SET encrypted_password = EXCLUDED.encrypted_password,
+             role = EXCLUDED.role,
+             totp_secret = EXCLUDED.totp_secret,
+             updated_at = now();
+   SQL
+   }
+   ```
+
+   With actual table / column names substituted by what Steps 1-2 found, and the right env var names from `dev_env` (for mcd-website that's `MCD_DB_*`).
+
+7. **If anything in steps 1-4 is ambiguous** (multiple candidate user models, both TOTPSecret and OTPSecret columns, no migration to verify against), do NOT silently pick one. Present the candidates via AskUserQuestion:
+
+   > "I found two candidate user models: <fileA> and <fileB>. Which one is the admin login?"
+
+   Or for ambiguous columns:
+
+   > "Found columns: email | login. Which is used for admin login?"
+
+   Don't ship a guessed SQL — ask once and bake in the answer.
+
+Save `GENERATED_UPSERT_SQL` for use in the template below.
 
 #### Read 1: detect the consumer's email domain convention
 
@@ -879,30 +990,24 @@ ROLE_EMAILS["<ACCOUNTS[i].name>"]="ai-tester-<ACCOUNTS[i].name>@<EMAIL_DOMAIN>"
 ROLE_SEEDS["<ACCOUNTS[i].name>"]="$(gen_seed)"
 </for>
 
-# === BEGIN PROJECT-SPECIFIC TODO ===
-# Replace the SQL/code below with what your app needs to upsert an admin user
-# with: email, password (hashed appropriately), role, totp_secret. For
-# Postgres + qor/auth this typically looks like:
+# === BEGIN: upsert_user generated by reading the app's code ===
+# Wizard inspected the codebase before generating this. If a column or
+# table name is wrong, edit the SQL below — but PRoctor tried to match
+# what's actually in your models / migrations / auth setup.
 #
-#   INSERT INTO admin_users (email, encrypted_password, role, totp_secret, totp_enabled, created_at, updated_at)
-#   VALUES ($1, crypt($2, gen_salt('bf')), $3, $4, true, now(), now())
-#   ON CONFLICT (email) DO UPDATE
-#     SET encrypted_password = EXCLUDED.encrypted_password,
-#         role = EXCLUDED.role,
-#         totp_secret = EXCLUDED.totp_secret;
-#
-# For other stacks (Devise, Phoenix, Django, etc.) use that ecosystem's
-# admin-user creation primitive.
+# Sources consulted:
+#   - <USER_MODEL_FILE>          ← struct + gorm tags
+#   - <MIGRATION_FILE>           ← CREATE TABLE columns (if any)
+#   - <AUTH_SETUP_FILE>          ← password hashing scheme
 #
 upsert_user() {
   local email="$1" password="$2" role="$3" totp_seed="$4"
-  echo "TODO: upsert email=$email role=$role into your local DB"
-  # PGPASSWORD="$<DB_PASSWORD_ENV>" psql -h "$<DB_HOST_ENV>" -p "$<DB_PORT_ENV>" \
-  #   -U "$<DB_USER_ENV>" -d "$<DB_NAME_ENV>" <<SQL
-  # ...
-  # SQL
+  PGPASSWORD="$<DB_PASSWORD_ENV>" psql -h "$<DB_HOST_ENV>" -p "$<DB_PORT_ENV>" \
+    -U "$<DB_USER_ENV>" -d "$<DB_NAME_ENV>" <<SQL
+<GENERATED_UPSERT_SQL>
+SQL
 }
-# === END PROJECT-SPECIFIC TODO ===
+# === END: upsert_user ===
 
 for role in "${!ROLE_EMAILS[@]}"; do
   upsert_user "${ROLE_EMAILS[$role]}" "$PASSWORD" "$role" "${ROLE_SEEDS[$role]}"
