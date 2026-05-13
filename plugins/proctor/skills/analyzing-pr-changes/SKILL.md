@@ -92,8 +92,18 @@ on stdout with no surrounding prose, headings, or code fences.
           --repo .
       ```
 
-      Output is a JSON array of repo-relative paths, ready to plug
-      into the hunk's `impact_radius` field.
+      Output is a JSON object `{"files": [...], "truncated": <bool>}`.
+      Plug `files` into the hunk's `impact_radius` field; plug
+      `truncated` (when `true`) into `impact_radius_truncated` so the
+      planner knows the visible 10 don't represent the full radius
+      and can auto-upgrade the hunk's risk to `high`.
+
+      v0.3.28+: when `truncated` is `true`, **also override this
+      hunk's `risk` field to `"high"`** before emitting. The planner
+      reads risk and plans more aggressively for high; a hunk whose
+      visible fan-out is capped at 10 but actually has 100s of
+      callers shouldn't sit at the original (likely `medium`) risk
+      just because the visible list happens to fit.
 
    c. **What the script enforces** (you don't need to replicate this —
       just know what's filtered for you):
@@ -156,7 +166,8 @@ on stdout with no surrounding prose, headings, or code fences.
       "impact_radius": [
         "admin/rewards/router.go",
         "admin/dashboards/rewards_widget.go"
-      ]
+      ],
+      "impact_radius_truncated": false
     }
   ],
   "categories_present": ["api"]

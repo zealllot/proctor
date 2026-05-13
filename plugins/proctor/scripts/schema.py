@@ -103,6 +103,13 @@ def validate_change_map(cm: dict) -> None:
                          f"ChangeMap.hunks[{i}].impact_radius[{j}] must be a non-empty string")
                 _require(p != h["file"],
                          f"ChangeMap.hunks[{i}].impact_radius[{j}] cannot reference the changed file itself")
+        # `impact_radius_truncated` (v0.3.28+) — True when the helper
+        # found MORE qualifying callers than top_n. Signals to the
+        # planner that the visible 10 don't represent the full blast
+        # radius and risk should auto-upgrade to high. Boolean only.
+        if "impact_radius_truncated" in h and h["impact_radius_truncated"] is not None:
+            _require(isinstance(h["impact_radius_truncated"], bool),
+                     f"ChangeMap.hunks[{i}].impact_radius_truncated must be a bool")
 
     _require(isinstance(cm["categories_present"], list),
              "ChangeMap.categories_present must be a list")
@@ -147,6 +154,29 @@ def validate_test_plan(tp: dict) -> None:
     _require(isinstance(tp, dict), "TestPlan: must be a dict")
     _require_keys(tp, {"items"}, "TestPlan")
     _require(isinstance(tp["items"], list), "TestPlan.items must be a list")
+
+    # Structured journeys (v0.3.28+) — optional top-level array.
+    # Each entry is {id, goal, terminal_state}; items reference via
+    # `journey_id`. Reporter groups by id (not by free-form `journey`
+    # string), so slight name drift between two items can't split a
+    # single user-flow into two report sections. The v0.3.23 loose
+    # `journey: "<name>"` string still validates (legacy mode) but
+    # the planner skill prefers `journey_id`.
+    journey_ids: set[str] = set()
+    if "journeys" in tp and tp["journeys"] is not None:
+        _require(isinstance(tp["journeys"], list),
+                 "TestPlan.journeys must be a list if present")
+        for i, j in enumerate(tp["journeys"]):
+            _require(isinstance(j, dict),
+                     f"TestPlan.journeys[{i}] must be a dict")
+            _require_keys(j, {"id", "goal", "terminal_state"},
+                          f"TestPlan.journeys[{i}]")
+            for k in ("id", "goal", "terminal_state"):
+                _require(isinstance(j[k], str) and j[k].strip(),
+                         f"TestPlan.journeys[{i}].{k} must be a non-empty string")
+            _require(j["id"] not in journey_ids,
+                     f"TestPlan.journeys[{i}].id {j['id']!r} duplicates an earlier entry")
+            journey_ids.add(j["id"])
 
     seen_ids: set[str] = set()
     for i, item in enumerate(tp["items"]):
@@ -210,6 +240,22 @@ def validate_test_plan(tp: dict) -> None:
         if "journey" in item and item["journey"] is not None:
             _require(isinstance(item["journey"], str) and item["journey"].strip(),
                      f"TestPlan.items[{i}].journey must be a non-empty string if set")
+        # `journey_id` (v0.3.28+) — preferred over the loose `journey`
+        # string. References a top-level journeys[].id so two items
+        # can't accidentally split into separate report groups due to
+        # whitespace / pluralization / typo drift in the name.
+        if "journey_id" in item and item["journey_id"] is not None:
+            _require(isinstance(item["journey_id"], str) and item["journey_id"].strip(),
+                     f"TestPlan.items[{i}].journey_id must be a non-empty string if set")
+            _require(item["journey_id"] in journey_ids,
+                     f"TestPlan.items[{i}].journey_id {item['journey_id']!r} "
+                     f"not in TestPlan.journeys ({sorted(journey_ids)})")
+            # Mixing both forms is ambiguous — reporter would have to
+            # decide which to display. Force the planner to pick one.
+            _require(item.get("journey") is None,
+                     f"TestPlan.items[{i}]: set EITHER journey OR journey_id, "
+                     f"not both (got journey={item.get('journey')!r}, "
+                     f"journey_id={item['journey_id']!r})")
         # `data_from` (v0.3.23+) optional list of item IDs — declares
         # that THIS item's test state depends on the LISTED items
         # having successfully produced their effect (e.g. created a

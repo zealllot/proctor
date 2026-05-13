@@ -144,7 +144,37 @@ When the PR body explicitly lists more negative cases than happy ones (rare, but
 
 ## Journey-first planning (write BEFORE the items array)
 
-Don't plan hunk-by-hunk. Read the PR body + ChangeMap first, then derive **1–3 user journeys** — concrete sequences a real person walks through to use the feature. ONLY THEN write the items, grouped by journey.
+Don't plan hunk-by-hunk. Read the PR body + ChangeMap first, then derive **1–3 user journeys** — concrete sequences a real person walks through to use the feature. ONLY THEN write the items.
+
+**v0.3.28+ structure** — declare journeys as a top-level array, reference from items by id:
+
+```jsonc
+{
+  "journeys": [
+    {
+      "id": "j-create-image-reward",
+      "goal": "Admin creates a published Image-type digital reward.",
+      "terminal_state": "Reward appears in /admin/rewards list with status=Published and re-renders correctly after a hard reload."
+    },
+    {
+      "id": "j-reject-bad-game-url",
+      "goal": "A reward with an invalid Game URL is rejected with a clear error.",
+      "terminal_state": "Form shows field-level error; no record persisted."
+    }
+  ],
+  "items": [
+    { "id": "t-001", "journey_id": "j-create-image-reward", /* ... */ }
+  ]
+}
+```
+
+`id` should be human-readable kebab-case starting with `j-`. `goal` is one sentence describing what the user accomplishes; `terminal_state` is the assertable end-state the reporter cites in the journey header.
+
+Two reasons for the structured form (over v0.3.23's loose `journey: "<name>"` string):
+1. **No accidental group splits** — two items with `journey: "Create Image Reward"` vs `journey: "create-image-reward"` would render as two separate report sections under string-match grouping. Reference-by-id eliminates that.
+2. **The goal + terminal_state become part of the report header** — reviewers see WHAT the journey is supposed to verify, not just a name. Makes single-glance "did the create-publish flow work" comprehension possible.
+
+Legacy `journey: "<name>"` string still validates (backward compat with pre-v0.3.28 plans); schema rejects setting BOTH `journey` and `journey_id` on the same item.
 
 A user journey is: a goal + an ordered set of steps + a final-state assertion. Example for the Digital Reward type=Image/Game PR:
 
@@ -174,7 +204,7 @@ Journey 3: "Reject-Bad-Game-URL"
     5. Verify: 422 with "Game URL is not a valid URL"; form not submitted.
 ```
 
-Tag every plan item with the `journey` field naming its journey. Items within a journey list each other in `depends_on` if they share state — e.g. the "verify list still has it" item depends on the "save it" item. Items in different journeys are independent.
+Tag every plan item with `journey_id` (preferred) or `journey` (legacy). Items within a journey list each other in `depends_on` if they share state — e.g. the "verify list still has it" item depends on the "save it" item. Items in different journeys are independent.
 
 Why journeys: reviewers think about features as "did the create-publish flow work end-to-end", not "did 7 isolated assertions pass". Grouping items by journey gives the report a structure that maps to product behavior. Also forces the planner to think "what's the full happy path" before getting absorbed in negative-case minutiae.
 
@@ -187,11 +217,22 @@ that list names files that **import / reference the changed symbol(s)**
 and may regress. Treat these as additional surface to cover, NOT as
 items to test directly:
 
-- **High-impact hunk** (`impact_radius` has 5+ files) → plan ONE
-  regression item that exercises the most likely caller path. Pick the
-  caller that's closest to user-visible behavior (a `handler.go` /
-  `router.go` / `*_screen.tsx` beats an internal `helpers.go`). Cite
-  the caller file in the item's `rationale`.
+- **Truncated radius** (`impact_radius_truncated: true`, v0.3.28+) →
+  the 10 visible files are NOT the full blast radius (monorepo with
+  100s of callers; the helper capped at 10). **Force `risk: "high"`**
+  on the regression item AND on the hunk-level items targeting this
+  symbol, regardless of what the original hunk risk was. Plan
+  **TWO** regression items: one for the highest-fan-out caller, one
+  for the next caller in a different subtree (so a single bad
+  release-time test choice doesn't miss whole packages). Cite the
+  truncation in `rationale`: "impact_radius truncated at top 10 of
+  many — this hunk's actual fan-out is larger than visible; planned
+  two regression items as a sample-of-the-iceberg."
+- **High-impact hunk** (`impact_radius` has 5+ files, NOT truncated)
+  → plan ONE regression item that exercises the most likely caller
+  path. Pick the caller closest to user-visible behavior (a
+  `handler.go` / `router.go` / `*_screen.tsx` beats an internal
+  `helpers.go`). Cite the caller file in the item's `rationale`.
 - **Medium-impact hunk** (1–4 files) → optional extra item. Add it
   only if the diff modified the function's signature, return shape, or
   side-effect contract — not for pure-additive changes.

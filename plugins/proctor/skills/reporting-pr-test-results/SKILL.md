@@ -52,17 +52,24 @@ The base URL above is the `base_url` from `.pr-test.yml`. Captured by chromium h
 
 When `VISUAL_URL_BASE` is empty, omit the entire section — don't render an empty header.
 
-## Journey grouping (v0.3.23+)
+## Journey grouping (v0.3.23+ loose, v0.3.28+ structured)
 
-If any plan items carry a `journey` field, group them by journey in the report. Render each group as a section (markdown `###` header / HTML `<section>`) with:
+Group items by journey for the report.
+
+**Structured form (v0.3.28+, preferred)**: when the plan has a top-level `journeys` array, items carry `journey_id` referencing `journeys[].id`. Look up the matching `{id, goal, terminal_state}` entry; the report header includes BOTH the goal (one sentence describing what the user accomplishes) AND the terminal_state (the assertable end-state) so reviewers can scan whether each journey met its bar:
 
 ```markdown
-### Journey: <journey-name> — <pass>/<total> in this journey
+### Journey: Create-Image-Reward — 3/4 passed
+
+**Goal:** Admin creates a published Image-type digital reward.
+**Terminal state:** Reward appears in /admin/rewards list with status=Published and re-renders correctly after a hard reload.
 
 <item rows for that journey, in plan order>
 ```
 
-Order journeys by appearance order in the plan (which is the planner's chosen sequence). After all journeys, append an "Other" section for items that don't carry a `journey` field. Skip the "Other" section if it's empty.
+**Legacy form (v0.3.23, fallback)**: when items only have a free-form `journey: "<name>"` string, render the simpler header `### Journey: <name> — <pass>/<total>` without goal/terminal_state lines.
+
+Order journeys by their position in the plan's `journeys` array (structured) or by first-appearance among items (legacy). After all journeys, append an "Other" section for items that don't carry a journey reference. Skip the "Other" section if it's empty.
 
 Items skipped because of `data_from` failure get an explicit visual: `⏭ skipped (upstream t-007 failed)`. Don't render them collapsed identically to ordinary `skipped` items — the reviewer needs to know "this test was INVALIDATED, not opt-out skipped" so they can focus on fixing the upstream first.
 

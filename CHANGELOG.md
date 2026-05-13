@@ -2,6 +2,63 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.28 — 2026-05-13
+
+### Structured journeys (#2) + impact_radius truncation flag (#5)
+
+Final two of the user's 5-point quality review. After this release, all five are in.
+
+#### Structured top-level journeys (#2)
+
+v0.3.23 shipped journeys as a loose `journey: "<name>"` string on each item. Drawback: two items with `"create-image-reward"` vs `"Create Image Reward"` split into two report sections under string-match grouping; and the journey's `goal` + `terminal_state` (what the journey actually verifies) lived only in the planner skill prose, never reaching the report.
+
+This release promotes journeys to a structured top-level array in the plan:
+
+```jsonc
+{
+  "journeys": [
+    {
+      "id": "j-create-image-reward",
+      "goal": "Admin creates a published Image-type digital reward.",
+      "terminal_state": "Reward appears in /admin/rewards with status=Published; survives hard reload."
+    }
+  ],
+  "items": [
+    { "id": "t-001", "journey_id": "j-create-image-reward", ... }
+  ]
+}
+```
+
+- Schema: optional `journeys: [{id, goal, terminal_state}]` top-level; items reference via `journey_id`.
+- Cross-validation: `journey_id` must exist in `journeys[]`; setting BOTH `journey` and `journey_id` is rejected (ambiguous for the reporter).
+- Duplicate `id` values rejected; empty-string `id`/`goal`/`terminal_state` rejected.
+- Legacy `journey: "<name>"` string still validates — backward compat for pre-v0.3.28 plans and consumers running mixed versions.
+- Reporter (`reporting-pr-test-results/SKILL.md`): when items use `journey_id`, the journey header renders `### Journey: <name> — <pass>/<total>` PLUS `**Goal:** <goal>` and `**Terminal state:** <terminal_state>` lines. Reviewers see WHAT the journey was meant to verify, not just a name.
+
+#### impact_radius truncation flag (#5)
+
+v0.3.26's `impact_radius` capped at top 10 callers. Drawback for monorepos: a core util with 200 callers shows 10 in the radius, and the planner has no way to know the visible 10 don't represent the full blast surface.
+
+This release adds a truncation signal:
+
+- `impact_radius.py` helper returns `{"files": [...], "truncated": <bool>}`. `truncated` is `True` when MORE survivors crossed the threshold than `top_n`.
+- ChangeMap hunk schema: optional `impact_radius_truncated: bool` (boolean only, no nullable).
+- Analyzer skill: when helper returns `truncated: true`, **override the hunk's risk to `"high"`** before emitting (truncated fan-out means the visible 10 are a sample of a larger iceberg; risk should reflect the iceberg, not the sample).
+- Planner skill: when `impact_radius_truncated: true`, plan **TWO** regression items instead of one — pick the highest-fan-out caller AND the next caller in a different subtree so one bad release-time choice doesn't miss whole packages. Both items inherit `risk: "high"` and cite the truncation in `rationale`.
+
+**API note**: this is a breaking change for direct `collect_callers()` Python callers — the return type changed from `list[str]` to `{"files": list[str], "truncated": bool}`. Only the analyzer skill + tests were calling it, both updated in this release. CLI output also changed shape; pre-v0.3.28 consumers can pipe through `jq '.files'` for the old list-only shape.
+
+### Tests
+- 118 → 129 (+11): structured journeys (accepted, journey_id references, mixed journey+journey_id rejected, legacy string still validates, missing fields rejected, duplicate id rejected, empty string field rejected), impact_radius_truncated accepted, truncated flag type-checked, plus 3 truncation behavior tests in the helper (truncated-when-over-top_n, not-truncated-under-top_n, not-truncated-at-exact-boundary).
+
+### Status of the 5-point quality review — 5/5 complete
+
+- #1 impact_radius false-positive control ✅ (v0.3.26)
+- #2 journey upgraded to top-level array ✅ (this release)
+- #3 data_from artifact passing ✅ (v0.3.25)
+- #4 error_type diff-pattern triggers ✅ (v0.3.27)
+- #5 impact_radius_truncated flag + auto-risk-upgrade ✅ (this release)
+
 ## v0.3.27 — 2026-05-13
 
 ### error_type diff-pattern triggers — fix the "all-`validation` plan" bias (#4)

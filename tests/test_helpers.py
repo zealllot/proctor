@@ -633,6 +633,115 @@ def test_plan_item_data_from_must_be_list():
         validate_test_plan(bad)
 
 
+# --- v0.3.28: structured journeys + impact_radius_truncated --------------
+
+def test_plan_structured_journeys_accepted():
+    valid = {
+        "journeys": [{
+            "id": "j-create-image",
+            "goal": "Admin creates a published image reward.",
+            "terminal_state": "Reward visible in list with status=Published.",
+        }],
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[], "journey_id":"j-create-image"}],
+    }
+    validate_test_plan(valid)
+
+
+def test_plan_journey_id_must_reference_existing_journey():
+    bad = {
+        "journeys": [{"id":"j-a","goal":"g","terminal_state":"t"}],
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[], "journey_id":"j-z"}],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_journey_and_journey_id_both_set_rejected():
+    # The reporter would have to choose which to display — force a pick.
+    bad = {
+        "journeys": [{"id":"j-a","goal":"g","terminal_state":"t"}],
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[],
+                   "journey":"Create Image Reward", "journey_id":"j-a"}],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_legacy_journey_string_still_works():
+    """v0.3.23 plans without journeys[] / journey_id should still
+    validate so we don't break consumers who haven't migrated."""
+    valid = {
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[],
+                   "journey":"create-image-reward"}],
+    }
+    validate_test_plan(valid)
+
+
+def test_plan_journeys_missing_fields_rejected():
+    bad = {
+        "journeys": [{"id":"j-a","goal":"g"}],  # missing terminal_state
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[]}],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_journeys_duplicate_id_rejected():
+    bad = {
+        "journeys": [
+            {"id":"j-a","goal":"g","terminal_state":"t"},
+            {"id":"j-a","goal":"g2","terminal_state":"t2"},
+        ],
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[]}],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_plan_journeys_empty_string_field_rejected():
+    bad = {
+        "journeys": [{"id":"j-a","goal":"","terminal_state":"t"}],
+        "items": [{"id":"t-1","category":"api","what":"x","how":"y","tool":"bash",
+                   "risk":"low","depends_on":[]}],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+def test_change_map_impact_radius_truncated_accepted():
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "core/utils.go",
+            "category": "api", "risk": "high", "summary": ".",
+            "impact_radius": ["a.go", "b.go"],
+            "impact_radius_truncated": True,
+        }],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_impact_radius_truncated_must_be_bool():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": [],
+            "impact_radius_truncated": "yes",   # string, not bool
+        }],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
 # --- v0.3.24: impact_radius on ChangeMap hunks ----------------------------
 
 def test_change_map_impact_radius_valid():
@@ -945,9 +1054,10 @@ def test_impact_radius_filters_single_match(tmp_path):
         'package x\n// see also Foo\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert "caller.go" in callers
-    assert "false_pos.go" not in callers
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "caller.go" in result["files"]
+    assert "false_pos.go" not in result["files"]
+    assert result["truncated"] is False
 
 
 def test_impact_radius_excludes_changed_file(tmp_path):
@@ -958,8 +1068,8 @@ def test_impact_radius_excludes_changed_file(tmp_path):
         "package x\nfunc Foo() {}\nfunc bar() { Foo(); Foo(); }\n")
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert "src.go" not in callers
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "src.go" not in result["files"]
 
 
 def test_impact_radius_excludes_test_files(tmp_path):
@@ -974,9 +1084,9 @@ def test_impact_radius_excludes_test_files(tmp_path):
         'package x\nfunc a() { Foo(); Foo(); }\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert "real.go" in callers
-    assert "src_test.go" not in callers
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "real.go" in result["files"]
+    assert "src_test.go" not in result["files"]
 
 
 def test_impact_radius_excludes_vendor_node_modules(tmp_path):
@@ -990,9 +1100,9 @@ def test_impact_radius_excludes_vendor_node_modules(tmp_path):
         'package x\nfunc x() { Foo(); Foo(); }\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert "real.go" in callers
-    assert all("vendor" not in c for c in callers)
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert "real.go" in result["files"]
+    assert all("vendor" not in c for c in result["files"])
 
 
 def test_impact_radius_aggregates_multiple_idents(tmp_path):
@@ -1007,8 +1117,8 @@ def test_impact_radius_aggregates_multiple_idents(tmp_path):
         'package x\nfunc a() { Foo(); Bar(); }\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo", "Bar"], repo=str(tmp_path))
-    assert "caller.go" in callers
+    result = collect_callers("src.go", ["Foo", "Bar"], repo=str(tmp_path))
+    assert "caller.go" in result["files"]
 
 
 def test_impact_radius_ranks_by_count(tmp_path):
@@ -1021,9 +1131,9 @@ def test_impact_radius_ranks_by_count(tmp_path):
         'package x\nfunc a() { Foo(); Foo(); }\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert callers[0] == "heavy.go"
-    assert "light.go" in callers
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert result["files"][0] == "heavy.go"
+    assert "light.go" in result["files"]
 
 
 def test_impact_radius_caps_at_top_n(tmp_path):
@@ -1036,9 +1146,41 @@ def test_impact_radius_caps_at_top_n(tmp_path):
             f'package x\nfunc a() {{ Foo(); Foo(); }}  // {i}\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"],
-                              repo=str(tmp_path), top_n=10)
-    assert len(callers) == 10
+    result = collect_callers("src.go", ["Foo"],
+                             repo=str(tmp_path), top_n=10)
+    assert len(result["files"]) == 10
+    assert result["truncated"] is True   # v0.3.28+: 15 survivors > top_n=10
+
+
+def test_impact_radius_not_truncated_when_under_top_n(tmp_path):
+    """When survivors <= top_n, truncated is False even if there are
+    callers below threshold that were dropped."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    for i in range(5):
+        (tmp_path / f"c{i:02d}.go").write_text(
+            f'package x\nfunc a() {{ Foo(); Foo(); }}  // {i}\n')
+    _commit(tmp_path)
+
+    result = collect_callers("src.go", ["Foo"],
+                             repo=str(tmp_path), top_n=10)
+    assert len(result["files"]) == 5
+    assert result["truncated"] is False
+
+
+def test_impact_radius_truncated_exact_boundary(tmp_path):
+    """Edge case: exactly top_n survivors → NOT truncated."""
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    for i in range(10):
+        (tmp_path / f"c{i:02d}.go").write_text(
+            f'package x\nfunc a() {{ Foo(); Foo(); }}  // {i}\n')
+    _commit(tmp_path)
+
+    result = collect_callers("src.go", ["Foo"],
+                             repo=str(tmp_path), top_n=10)
+    assert len(result["files"]) == 10
+    assert result["truncated"] is False
 
 
 def test_impact_radius_returns_empty_when_no_callers(tmp_path):
@@ -1050,18 +1192,20 @@ def test_impact_radius_returns_empty_when_no_callers(tmp_path):
         'package x\nfunc a() { something(); something(); }\n')
     _commit(tmp_path)
 
-    callers = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
-    assert callers == []
+    result = collect_callers("src.go", ["Foo"], repo=str(tmp_path))
+    assert result["files"] == []
+    assert result["truncated"] is False
 
 
 def test_impact_radius_empty_identifiers_returns_empty(tmp_path):
     """If the analyzer couldn't extract any identifiers, helper
-    returns [] without invoking git."""
+    returns empty result without invoking git."""
     _init_repo(tmp_path)
     (tmp_path / "src.go").write_text("package x\n")
     _commit(tmp_path)
 
-    assert collect_callers("src.go", [], repo=str(tmp_path)) == []
+    result = collect_callers("src.go", [], repo=str(tmp_path))
+    assert result == {"files": [], "truncated": False}
 
 
 # --- v0.3.27: error_type diff-pattern triggers (#4) ----------------------
@@ -1222,5 +1366,5 @@ def test_impact_radius_min_occurrences_tunable(tmp_path):
                                      min_occurrences=2)
     without_threshold = collect_callers("src.go", ["Foo"], repo=str(tmp_path),
                                         min_occurrences=1)
-    assert "single.go" not in with_threshold
-    assert "single.go" in without_threshold
+    assert "single.go" not in with_threshold["files"]
+    assert "single.go" in without_threshold["files"]

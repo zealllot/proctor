@@ -65,17 +65,25 @@ def collect_callers(
     repo: str = ".",
     min_occurrences: int = MIN_OCCURRENCES,
     top_n: int = TOP_N,
-) -> list[str]:
-    """Return caller file paths whose cumulative match count across
-    ``identifiers`` meets ``min_occurrences``, excluding the changed
-    file, test/vendor paths, and PRoctor artifacts.
+) -> dict[str, object]:
+    """Return ``{"files": [...], "truncated": bool}`` — caller paths
+    whose cumulative match count across ``identifiers`` meets
+    ``min_occurrences``, excluding the changed file, test/vendor
+    paths, and PRoctor artifacts.
 
-    Returns ``[]`` when ``identifiers`` is empty, when git is
-    unavailable, or when no caller crosses the threshold. The caller
-    decides whether that means "did not analyze" (omit field) or
-    "looked, nothing meaningful" (emit empty list)."""
+    The ``truncated`` flag (v0.3.28+) is True when MORE survivors
+    crossed the threshold than ``top_n`` — i.e. the returned 10
+    callers do NOT represent the full blast radius. The analyzer
+    propagates this to ``ChangeMap.hunks[i].impact_radius_truncated``
+    so the planner can auto-upgrade risk to ``high`` and plan extra
+    regression items.
+
+    ``{"files": [], "truncated": False}`` when identifiers is empty,
+    git is unavailable, or no caller crosses the threshold. The
+    caller decides whether empty means "did not analyze" (omit
+    field) or "looked, nothing meaningful" (emit empty list)."""
     if not identifiers:
-        return []
+        return {"files": [], "truncated": False}
 
     counts: Counter[str] = Counter()
     # Use the long-form pathspec magic `:(exclude)PATTERN` instead of
@@ -120,7 +128,11 @@ def collect_callers(
 
     survivors = [(p, c) for p, c in counts.items() if c >= min_occurrences]
     survivors.sort(key=lambda pc: (-pc[1], pc[0]))
-    return [p for p, _ in survivors[:top_n]]
+    truncated = len(survivors) > top_n
+    return {
+        "files": [p for p, _ in survivors[:top_n]],
+        "truncated": truncated,
+    }
 
 
 def _main() -> int:
@@ -139,11 +151,15 @@ def _main() -> int:
     args = p.parse_args()
 
     idents = [i for i in args.idents.split() if i]
-    callers = collect_callers(
+    result = collect_callers(
         args.file, idents, repo=args.repo,
         min_occurrences=args.min_occurrences, top_n=args.top,
     )
-    json.dump(callers, sys.stdout)
+    # CLI emits the full dict so the analyzer skill sees the
+    # `truncated` flag without a second round-trip. Pre-v0.3.28
+    # consumers that expected a bare list can pipe through
+    # `jq '.files'` for the old shape.
+    json.dump(result, sys.stdout)
     sys.stdout.write("\n")
     return 0
 
