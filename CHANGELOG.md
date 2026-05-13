@@ -2,6 +2,22 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.12 — 2026-05-13
+
+### Seed script: embed `setup:` block so PRoctor auto-starts the local server
+- **Bug**: v0.3.6–0.3.11's seed script wrote `.pr-test.local.yml` with `base_url` + `auth.accounts` only — no `setup:` block. So `claude /proctor:proctor` against a localhost URL hit 502 (server not running) and asked the dev to start `go run main.go` themselves. Directly contradicted v0.3.3's design goal: "PRoctor auto-manages local server lifecycle, dev only edits code."
+- **Root cause**: the stack-aware `setup:` block was correctly generated into the `.pr-test.local.yml.example` (Section 8b) but the seed script's YAML emission (Section 8c-pre) only wrote auth, no setup. The example file got bypassed because the seed script is the path users actually take.
+- **Fix**: seed script's YAML emission now writes a `setup:` block using the same stack-aware template as the example file. Commands include docker-compose bring-up, pidfile-based kill-and-restart of the previous server, build, nohup launch, and a wait-loop on the login page. Wraps the multiline commands in a single-quoted heredoc so `$i` / `$(seq ...)` / `$(cat ...)` remain literal in the YAML (for PRoctor to expand at runtime, not at seed-script time).
+
+### After this fix, the cycle is
+
+```
+1. claude /proctor:proctor-init           ← generates seed script (once)
+2. ./hack/proctor-seed-local.sh           ← writes .pr-test.local.yml with setup:
+3. claude /proctor:proctor <PR#>          ← PRoctor starts server, logs in, runs tests
+4. edit code → repeat step 3 (no manual go run between iterations)
+```
+
 ## v0.3.11 — 2026-05-13
 
 ### Seed script: bash 3.2 compatible (macOS default `/bin/bash`)
