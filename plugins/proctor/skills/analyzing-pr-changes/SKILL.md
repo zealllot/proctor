@@ -54,10 +54,65 @@ on stdout with no surrounding prose, headings, or code fences.
 
 6. **Apply category directives.** If `pr_context.directives.skip_categories` is non-empty, drop any hunk whose category appears in that list.
 
-7. Compute `categories_present` as the deduplicated set of hunk
+7. **Compute `impact_radius` per non-docs hunk** (v0.3.24+). For each
+   surviving hunk, find the callers of the identifiers it changed so
+   the planner can plan regression coverage proportional to blast
+   radius. Skip this entirely for `category: "docs"` hunks (no
+   importers worth tracing). The procedure:
+
+   a. **Extract candidate identifiers from the hunk's added/modified
+      lines.** Use language-aware heuristics:
+      - **Go**: exported identifiers (capitalized) on lines starting
+        with `func`, `type`, `var`, `const` — including methods
+        (`func (r *Receiver) Name(`). Skip lowercase / unexported.
+      - **TypeScript / JavaScript**: identifiers in `export function`,
+        `export class`, `export const`, `export default function`,
+        `export type`, `export interface`, named exports
+        (`export { Foo, Bar }`). Also default-exports' inferred name.
+      - **Python**: top-level `def NAME(` and `class NAME(` lines —
+        skip names starting with `_` (private convention).
+      - **Ruby**: `def NAME`, `class NAME`, `module NAME`. Skip private
+        sections if you can see a `private` marker above.
+      - **Other languages**: best-effort by file extension; if you
+        cannot reliably extract identifiers, OMIT `impact_radius` for
+        that hunk (it's optional — better than wrong).
+      Cap the candidate list at the top 6 identifiers per hunk to keep
+      grep cost bounded.
+
+   b. **Grep the repo for callers**, excluding the changed file and
+      excluding test files. Use one batched git-grep per identifier
+      (single process, regex-pinned to word boundaries):
+
+      ```bash
+      git grep -l --untracked -e '\bIDENT\b' \
+          -- ':!FILE_THAT_CHANGED' \
+             ':!*_test.go' ':!*.test.ts' ':!*.test.tsx' \
+             ':!*.spec.ts' ':!*.spec.tsx' \
+             ':!tests/' ':!__tests__/' ':!vendor/' ':!node_modules/'
+      ```
+
+      For each identifier, collect the resulting file list. Union them
+      across identifiers per hunk.
+
+   c. **Bound the output.** Sort the union by (count of distinct
+      identifiers referenced) descending, then by path lexicographic
+      ascending for stability. Keep the top **10** entries. Drop the
+      changed file itself (defensive — the exclude pattern should
+      already handle it). Empty list is OK — emit `"impact_radius": []`
+      to record "we looked, found nothing"; omit the field only when
+      step (a) couldn't extract identifiers.
+
+   d. **What this is NOT.** This is a grep, not a compiler-grade import
+      resolver. False positives (an unrelated file using the same
+      identifier name) are accepted in exchange for being cheap and
+      language-agnostic. The planner treats `impact_radius` as a hint
+      ("these files MIGHT regress"), not a fact ("these files WILL
+      regress"). Don't try to be precise here.
+
+8. Compute `categories_present` as the deduplicated set of hunk
    categories (after directive filters in steps 3 and 6).
 
-8. **Cross-cutting**: if both `frontend` and `api` appear among
+9. **Cross-cutting**: if both `frontend` and `api` appear among
    `categories_present`, the `e2e-flow` category will be added by the
    *next* stage (planner), not here. Do not invent it now.
 
@@ -73,9 +128,18 @@ on stdout with no surrounding prose, headings, or code fences.
     "requirement_hints": ["display name max length 100", "rate limit endpoint at 60/min"]
   },
   "hunks": [
-    { "file": "...", "category": "frontend", "risk": "low", "summary": "..." }
+    {
+      "file": "admin/rewards/handler.go",
+      "category": "api",
+      "risk": "high",
+      "summary": "Add type=Image / type=Game branches in CreateReward.",
+      "impact_radius": [
+        "admin/rewards/router.go",
+        "admin/dashboards/rewards_widget.go"
+      ]
+    }
   ],
-  "categories_present": ["frontend"]
+  "categories_present": ["api"]
 }
 ```
 

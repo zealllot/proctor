@@ -75,6 +75,20 @@ def validate_change_map(cm: dict) -> None:
                  f"ChangeMap.hunks[{i}].category {h['category']!r} not in {VALID_CATEGORIES}")
         _require(h["risk"] in VALID_RISK,
                  f"ChangeMap.hunks[{i}].risk {h['risk']!r} not in {VALID_RISK}")
+        # `impact_radius` (v0.3.24+) optional — list of caller files
+        # discovered by grep-based import-graph analysis. Items in the
+        # list are repo-relative paths. Empty list means "analyzed and
+        # found no callers"; omitted means "did not analyze" (e.g. docs
+        # hunk). The planner reads this to add regression items for
+        # high-impact changes.
+        if "impact_radius" in h and h["impact_radius"] is not None:
+            _require(isinstance(h["impact_radius"], list),
+                     f"ChangeMap.hunks[{i}].impact_radius must be a list of file paths")
+            for j, p in enumerate(h["impact_radius"]):
+                _require(isinstance(p, str) and p.strip(),
+                         f"ChangeMap.hunks[{i}].impact_radius[{j}] must be a non-empty string")
+                _require(p != h["file"],
+                         f"ChangeMap.hunks[{i}].impact_radius[{j}] cannot reference the changed file itself")
 
     _require(isinstance(cm["categories_present"], list),
              "ChangeMap.categories_present must be a list")

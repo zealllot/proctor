@@ -631,3 +631,88 @@ def test_plan_item_data_from_must_be_list():
                       "risk":"low","depends_on":[], "data_from":"t-9"}]}
     with pytest.raises(SchemaError):
         validate_test_plan(bad)
+
+
+# --- v0.3.24: impact_radius on ChangeMap hunks ----------------------------
+
+def test_change_map_impact_radius_valid():
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "admin/rewards/handler.go",
+            "category": "api", "risk": "high", "summary": ".",
+            "impact_radius": [
+                "admin/rewards/router.go",
+                "admin/dashboards/rewards_widget.go",
+            ],
+        }],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_impact_radius_empty_list_allowed():
+    # Empty list = "analyzed and found nothing" — distinct from "didn't analyze".
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": [],
+        }],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_impact_radius_null_allowed():
+    # null == omitted (consistent with other optional fields).
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": None,
+        }],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_impact_radius_must_be_list():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": "router.go",
+        }],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
+def test_change_map_impact_radius_self_reference_rejected():
+    # Hunk's own file in its impact_radius is nonsense — the changed
+    # file isn't a caller of itself.
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": ["a.go", "b.go"],
+        }],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
+def test_change_map_impact_radius_empty_string_entry_rejected():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "hunks": [{
+            "file": "a.go", "category": "api", "risk": "low", "summary": ".",
+            "impact_radius": ["b.go", ""],
+        }],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)

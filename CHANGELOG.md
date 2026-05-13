@@ -2,6 +2,38 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.3.24 — 2026-05-13
+
+### `impact_radius` — grep-based caller analysis for regression coverage (#5)
+
+Last of the 6-point planning-quality review. The analyzer now emits an `impact_radius` list per non-docs hunk; the planner reads it to size regression coverage proportional to blast radius.
+
+**Analyzer** (`analyzing-pr-changes/SKILL.md` new Step 7):
+- For each non-docs hunk, extract exported identifiers from added/modified lines (language-aware: Go `func/type/var/const` capitalized, TS/JS `export ...`, Python top-level `def/class` skipping `_*`, Ruby `def/class/module`).
+- `git grep -l --untracked` for each identifier with word-boundary regex, excluding the changed file itself, test files, vendor/node_modules.
+- Union per-identifier hits, sort by reference count desc + path lex asc for stability, cap at top 10. Cap candidates at 6 identifiers per hunk to bound grep cost.
+- Emit per-hunk `impact_radius: ["caller_a.go", "caller_b.go"]`. Empty list = "looked, found nothing". Field absent = "didn't analyze" (docs hunks, languages we can't extract identifiers from).
+- Explicitly NOT a compiler-grade resolver — false positives are fine, the field is a planner HINT, not a fact.
+
+**Planner** (`planning-pr-tests/SKILL.md` new "Impact-aware regression coverage" section):
+- Hunk with 5+ callers → add ONE regression item walking the most user-visible caller. Cite that caller in `rationale`.
+- Hunk with 1–4 callers → optional extra regression item, only if the diff changed signature / return shape / side-effect contract.
+- Empty list or missing field → no regression item.
+- Phrasing convention: prefix `what:` with `REGRESSION: ...` so reviewers can scan.
+- Explicit "don't explode N items per caller" rule — blast-radius signal is fan-out count, not "test every caller individually".
+
+**Schema** (`schema.py:validate_change_map`):
+- Optional `impact_radius` per hunk: list of non-empty strings, or null, or absent.
+- Rejects self-reference (a hunk's own file in its own impact_radius is nonsense).
+- Rejects empty-string entries.
+- Backward compatible — pre-v0.3.24 ChangeMaps without the field still validate.
+
+### Tests
+- 63 → 69 (6 new): valid list, empty-list-allowed, null-allowed, non-list rejected, self-reference rejected, empty-string entry rejected.
+
+### What's next
+- 6/6 planning-quality items from the user's review are now in. Future work shifts to making the analyzer's identifier extraction smarter (currently regex; could become tree-sitter for fewer false positives), and giving the planner a way to surface "this regression item was generated because of impact_radius from <hunk>" in the report rationale automatically.
+
 ## v0.3.23 — 2026-05-13
 
 ### Journey-first planning (#1) + `data_from` cross-item state dependency (#4)

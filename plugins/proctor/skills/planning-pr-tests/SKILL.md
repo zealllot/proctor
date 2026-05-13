@@ -180,6 +180,41 @@ Why journeys: reviewers think about features as "did the create-publish flow wor
 
 How many journeys: **1–3**. More than 3 means you're over-segmenting; the diff probably has fewer cohesive user-facing flows than that. Single-flow PRs (a typo fix, a docs change, an internal refactor) can have ZERO journeys — just a flat item list — that's fine.
 
+## Impact-aware regression coverage (`impact_radius`)
+
+For each hunk the analyzer flags with a non-empty `impact_radius` list,
+that list names files that **import / reference the changed symbol(s)**
+and may regress. Treat these as additional surface to cover, NOT as
+items to test directly:
+
+- **High-impact hunk** (`impact_radius` has 5+ files) → plan ONE
+  regression item that exercises the most likely caller path. Pick the
+  caller that's closest to user-visible behavior (a `handler.go` /
+  `router.go` / `*_screen.tsx` beats an internal `helpers.go`). Cite
+  the caller file in the item's `rationale`.
+- **Medium-impact hunk** (1–4 files) → optional extra item. Add it
+  only if the diff modified the function's signature, return shape, or
+  side-effect contract — not for pure-additive changes.
+- **Empty `impact_radius: []`** (analyzer looked, found nothing) →
+  treat as a leaf change; no regression items needed.
+- **`impact_radius` field missing** (analyzer didn't run, e.g. docs
+  hunk) → treat as legacy; plan as before.
+
+Regression items SHOULD be tagged with `category` matching the caller
+(e.g. caller is `admin/rewards/router.go` → category `api`). Do not
+explode N items per caller — one item that walks the most user-visible
+caller is the goal. The blast-radius signal is "how many fan-out
+files exist", not "test every fan-out file".
+
+Phrase the item's `what:` so a reader sees the regression intent:
+
+> `what: "REGRESSION: dashboard widget that reads CreateReward still renders after Type=Image branch added"`
+
+`impact_radius` is advisory, not authoritative. False positives are
+expected (the grep is identifier-name-based, not type-aware). When you
+see a caller you suspect is a false-positive based on the file name,
+skip it.
+
 ## Item-to-item data dependency (`data_from`)
 
 When item B is meaningful ONLY IF item A succeeded (A creates a record, B edits that record), declare it explicitly:
