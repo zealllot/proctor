@@ -70,19 +70,64 @@ Options:
 
 If user picks "Migrate to v0.4.0":
 
+**Step 1 — preview**: before touching anything, print what WILL move so the user sees it explicitly:
+
+```bash
+echo "About to migrate to v0.4.0 layout:"
+[ -f .pr-test.yml ]                && echo "  git mv .pr-test.yml                → .proctor/config.yml"
+[ -f .pr-test.local.yml.example ]  && echo "  git mv .pr-test.local.yml.example → .proctor/local.yml.example"
+[ -f .pr-test.local.yml ]          && echo "     mv .pr-test.local.yml           → .proctor/local.yml         (gitignored — plain mv)"
+[ -x hack/proctor-seed-local.sh ]  && echo "  git mv hack/proctor-seed-local.sh → .proctor/seed-local.sh"
+echo "  patch .gitignore: drop old PRoctor lines, add .proctor/local.yml + .proctor/runs/"
+echo
+```
+
+**Step 2 — execute** (each `git mv` guarded by `[ -f ]` so re-runs are idempotent — if a file is already in the new place from a prior migration attempt, that line is a no-op instead of an error):
+
 ```bash
 mkdir -p .proctor
-git mv .pr-test.yml .proctor/config.yml
-[ -f .pr-test.local.yml.example ] && git mv .pr-test.local.yml.example .proctor/local.yml.example
-[ -f .pr-test.local.yml ] && mv .pr-test.local.yml .proctor/local.yml  # gitignored — plain mv
-[ -x hack/proctor-seed-local.sh ] && git mv hack/proctor-seed-local.sh .proctor/seed-local.sh
+[ -f .pr-test.yml ]                && git mv .pr-test.yml                .proctor/config.yml
+[ -f .pr-test.local.yml.example ]  && git mv .pr-test.local.yml.example  .proctor/local.yml.example
+[ -f .pr-test.local.yml ]          && mv     .pr-test.local.yml          .proctor/local.yml   # gitignored — plain mv preserves the file content
+[ -x hack/proctor-seed-local.sh ]  && git mv hack/proctor-seed-local.sh  .proctor/seed-local.sh
 
-# Update .gitignore: remove old ignore lines, add new ones
+# .gitignore handling — robust to:
+#   (a) .gitignore not existing yet (rare but possible — touch first)
+#   (b) PRoctor lines already moved to new form (re-run case — grep-guard the appends)
+#   (c) the consumer's other gitignore content (only edit OUR lines)
+touch .gitignore
+# Remove legacy PRoctor-specific lines (exact-match, won't touch consumer's other entries)
 sed -i.bak \
     -e '/^\.pr-test\.local\.yml$/d' \
-    -e '/^\.proctor\/runs/d' \
-    .gitignore && rm .gitignore.bak
-printf '\n# PRoctor (v0.4.0+) layout\n.proctor/local.yml\n.proctor/runs/\n' >> .gitignore
+    -e '/^\.pr-test\.local\.yml\.example$/d' \
+    -e '/^\.proctor\/runs\/\?$/d' \
+    -e '/^hack\/proctor-seed-local\.sh$/d' \
+    -e '/^# PRoctor (.*)$/d' \
+    .gitignore && rm -f .gitignore.bak
+
+# Append the canonical v0.4.0 block, but only the lines that aren't
+# already present (grep -F to treat as fixed string, -q for quiet).
+{
+    grep -qxF '# PRoctor (v0.4.0+) layout' .gitignore || echo '# PRoctor (v0.4.0+) layout'
+    grep -qxF '.proctor/local.yml'         .gitignore || echo '.proctor/local.yml'
+    grep -qxF '.proctor/runs/'             .gitignore || echo '.proctor/runs/'
+} >> .gitignore.tmp
+[ -s .gitignore.tmp ] && {
+    printf '\n' >> .gitignore   # leading newline only when we're appending something
+    cat .gitignore.tmp >> .gitignore
+}
+rm -f .gitignore.tmp
+```
+
+**Step 3 — summary**: print what actually happened so the user sees the result:
+
+```bash
+echo "Migrated:"
+git status --short .proctor/ .gitignore .pr-test.yml hack/ 2>/dev/null | sed 's/^/  /'
+echo
+echo "Run:"
+echo "  git diff .gitignore     # review the gitignore changes"
+echo "  git status              # see the renames git tracked"
 ```
 
 Then continue to normal MODE branching below (re-evaluate the env vars after the migration — `LEGACY_LAYOUT` flips to empty, `NEW_LAYOUT=yes`).

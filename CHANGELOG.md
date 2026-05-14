@@ -2,6 +2,26 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.1 — 2026-05-14
+
+### Tighten the v0.4.0 layout migration in /proctor:proctor-init
+
+v0.4.0 shipped the migration block but the bash was fragile in three ways the user noticed when reviewing:
+
+1. **No `[ -f ]` guard on `git mv .pr-test.yml`** — re-running the wizard after a partial migration would error ("`fatal: bad source, source=.pr-test.yml`"). Now every move is guarded; re-runs are idempotent.
+2. **`sed -i.bak .gitignore` crashes when `.gitignore` doesn't exist** — exotic case but real. Now we `touch .gitignore` first.
+3. **`printf >> .gitignore` always appends** — re-running the migration would duplicate the PRoctor lines. Now each line is `grep -qxF`-guarded before appending; the migration is fully idempotent.
+
+Plus two user-facing improvements:
+
+- **Preview step**: BEFORE moving anything, the wizard echoes the planned `git mv` operations + the `.gitignore` patch. User sees exactly what's about to happen.
+- **Summary step**: AFTER moving, `git status --short` of the affected paths so the user can review the renames before staging / committing.
+
+The `.gitignore` cleanup also drops legacy comment markers (`# PRoctor (...) — DO NOT COMMIT`-style headers) and the `hack/proctor-seed-local.sh` line if the user ever gitignored it (we don't, but defensive).
+
+### Tests
+- 170 unchanged (wizard prose only).
+
 ## v0.4.0 — 2026-05-14
 
 ### Consolidated consumer-side layout — single `.proctor/` directory
