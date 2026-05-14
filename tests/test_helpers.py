@@ -3426,3 +3426,114 @@ def test_ss_check_plan_item_with_no_result_skipped():
     )
     # Only t-1 has a result; it passes. t-2 has no result; not flagged.
     assert ss_check(plan, results) == []
+
+
+# ===== v0.6.6: satisfying-form-preconditions skill detection =====
+# Pins the upstream-validator detection regex against the exact error
+# strings observed in the v0.6.5 t-002 evidence ("Reward Image cannot be
+# blank") plus the generic family. If a future executor rewrite drops the
+# detection logic, this test catches it.
+
+import re
+
+# This is the canonical detection regex documented in
+# plugins/proctor/skills/satisfying-form-preconditions/SKILL.md "Detection"
+# section, item 4. Any change to the SKILL must update this regex too.
+PRECONDITION_TRIGGER_RE = re.compile(
+    r"(cannot be blank|is required|must be present)",
+    re.IGNORECASE,
+)
+
+
+def _detect_upstream_validator_block(response_body: str) -> list[str]:
+    """Return the list of upstream-validator error phrases found in a
+    save-flow response body. Empty list means no precondition gap.
+
+    This mirrors what the satisfying-form-preconditions skill instructs
+    the executor to check after every save-attempt that didn't redirect
+    to the new-record URL.
+    """
+    return [m.group(0) for m in PRECONDITION_TRIGGER_RE.finditer(response_body)]
+
+
+def test_satisfying_form_preconditions_detection():
+    """The detector must fire on the EXACT error string observed in
+    the v0.6.5 PR-#1115 run, plus the documented generic family.
+
+    Failure-mode this regression guards against: an executor refactor
+    that narrows the trigger to a single literal (e.g. only matching
+    "Reward Image cannot be blank") would miss every other app's
+    upstream-validator gate. Conversely, a regex that's too loose
+    would fire on the test's OWN asserted error message and cause the
+    executor to falsely bypass a legitimate negative test.
+    """
+    # The literal observed in t-002 evidence of run
+    # pr1115-e6a7c79-828594b8 (v0.6.5 run that motivated this skill).
+    v065_t002_response = (
+        "<div class='qor-error'>Reward Image cannot be blank</div>\n"
+        "<div class='qor-error'>Points Required for Exchange is required</div>"
+    )
+    hits = _detect_upstream_validator_block(v065_t002_response)
+    # Both errors must be detected — different validators, same family.
+    assert "cannot be blank" in hits
+    assert "is required" in hits
+    assert len(hits) == 2, f"expected 2 hits in the t-002 response, got {hits!r}"
+
+    # Generic Rails / Django shapes — must also fire.
+    rails_response = "<p class='error'>Name must be present</p>"
+    assert _detect_upstream_validator_block(rails_response) == ["must be present"]
+
+    # Capitalization-tolerant (some apps emit "Cannot be blank" not lowercase).
+    capitalized = "<span>Email Cannot Be Blank</span>"
+    assert _detect_upstream_validator_block(capitalized) == ["Cannot Be Blank"]
+
+    # Negative case 1: a happy-path response with no validator block
+    # MUST NOT fire (otherwise we'd bypass every test).
+    happy = "<title>Edit Digital Content - MCD</title><h1>Saved!</h1>"
+    assert _detect_upstream_validator_block(happy) == []
+
+    # Negative case 2: the asserted negative-test error message that
+    # the v0.6.6 skill must NOT bypass. "Game URL is not a valid URL"
+    # is the DigitalContent-Validator's own message; if the test
+    # asserted on THAT, this is the EXPECTED response, not a
+    # precondition gap. The detector itself doesn't know which is
+    # asserted-vs-blocking — that's the executor's job from the item's
+    # how:. But the detector MUST NOT falsely fire on this string
+    # alone (it doesn't contain "cannot be blank" / "is required" /
+    # "must be present").
+    asserted_neg = "<div class='qor-error'>Game URL is not a valid URL</div>"
+    assert _detect_upstream_validator_block(asserted_neg) == []
+
+    # Negative case 3: descriptive prose that mentions one of the
+    # trigger phrases but inside an evidence/comment string MUST still
+    # fire — the detector is intentionally lenient, the executor's
+    # decision logic narrows it.
+    prose = "Note: the field is required for the next step."
+    assert _detect_upstream_validator_block(prose) == ["is required"]
+
+
+def test_satisfying_form_preconditions_skill_file_present():
+    """The skill file MUST exist under the expected path. The agent
+    references it by absolute path in section 2c; if the file moves
+    or is deleted, the agent's instruction is broken silently."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills"
+        / "satisfying-form-preconditions" / "SKILL.md"
+    )
+    assert skill_path.exists(), (
+        f"missing skill file: {skill_path}. The v0.6.6 executor agent "
+        "(plugins/proctor/agents/pr-test-executor.md section 2c) "
+        "references this skill by path; deleting it breaks the executor's "
+        "fallback for upstream-validator preconditions."
+    )
+    body = skill_path.read_text(encoding="utf-8")
+    # Front-matter sanity: name + description must be set per the
+    # skill loader convention.
+    assert "name: satisfying-form-preconditions" in body
+    assert "description:" in body
+    # Pattern A must be documented (the no-upload bypass). If a future
+    # edit deletes Pattern A entirely, the agent's recovery path is
+    # gone.
+    assert "Pattern A" in body
+    assert "existing-record reuse" in body

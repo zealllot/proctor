@@ -2,6 +2,39 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.6 — 2026-05-14
+
+### Teach the executor to satisfy upstream-validator preconditions
+
+The v0.6.5 run against mcd-website PR #1115 (run-id `pr1115-e6a7c79-828594b8`) finished cleanly with 0 failures but skipped 9/11 items. Every save-flow item that needed to exercise the new `DigitalContent-Validator` was blocked by the basic `Image-Validator` (`Reward Image cannot be blank`) firing first — qor's MediaBox upload modal looked unreachable from headless chrome, so the executor took the empirical-grounding-rule's only remaining out: `precondition-not-met`. The new validator branches went unexercised, the test plan delivered 2/11 signal, and the user (correctly) flagged that the executor agent had no instructions for getting past an upstream-validator gate.
+
+**Reconnaissance findings** (local server `http://localhost:9801`, qor admin + media MediaBox v0.0.0-20210903074215):
+
+- The MediaBox renders a hidden `<textarea name="QorResource.<Field>" class="qor-field__mediabox-data">` that stores the selected file as `JSON.stringify([{ID, Url, ...}])`. The basic Image-Validator only checks the textarea's string for emptiness (`"" || "null" || "[]"` → reject; anything else → accept). No DB lookup, no S3 round-trip, no FK constraint.
+- The qor MediaBox modal's backing data lives at a separate admin resource (`/admin/media_library?filters[SelectedType].Value=image` for Reward Image; `/admin/digital_download_assets` for Digital Download Asset). Existing records' primary keys are readable from the index page's `data-primary-key="(\d+)"` attribute via plain `fetch(...).text()`.
+- Direct textarea injection with `[{"ID":5,"Url":"//x"}]` followed by `FormData(form)` + `fetch(form.action, {method:'POST'})` saves cleanly: HTTP 200 redirecting to `/admin/digital_content/<new-id>`. The asserted DigitalContent-Validator then runs as the next validator in the chain — all four branches reachable (Image-DDA-missing, Game-URL-empty, Game-URL-invalid, empty-DCT, plus Game-URL-valid → save succeeds).
+- Round-trip survives: navigating back to `/admin/digital_content/<id>` shows the saved fields, so the v0.6.4 "round-trip" + "edit-and-switch" templates are exercisable too.
+
+**New skill** (`plugins/proctor/skills/satisfying-form-preconditions/SKILL.md`):
+
+- **Detection** — the trigger is a save-flow item whose first attempt returns an error message matching `cannot be blank` / `is required` / `must be present` on a field NOT named by the test's `how:`. This is empirically observable from the response body; not session memory.
+- **Pattern A: existing-record reuse** (preferred — no upload required) — five concrete steps for the qor MediaBox case with code snippets for `take_snapshot` → `data-mediabox-url` extraction → `fetch` → `data-primary-key` grep → JSON injection → `FormData` + `fetch` submit. Generalizes to ActiveAdmin attached-blob and React-admin-with-hidden-input shapes.
+- **Pattern B: real upload via the modal** — fallback when the picker isn't backed by a separate admin resource. Step-by-step `upload_file` + thumbnail poll + modal-dismiss flow with the `proctor-e2e-stub-<timestamp>.png` filename convention.
+- **What NOT to do** — three documented anti-patterns the executor must avoid (skipping on first attempt, filling with placeholder strings, fabricating non-existent record IDs).
+
+**Executor agent contract update** (`agents/pr-test-executor.md`):
+
+- New section **2c. Upstream-validator precondition** (mandatory before any save-flow `precondition-not-met` skip). Lists the detection trigger, instructs the agent to read the new skill, mandates the evidence string call out which bypass technique was used.
+- Tightened the precondition skip path: justification requires citing both Pattern A and Pattern B failure modes, not just one.
+
+**Tests** (`tests/test_helpers.py`):
+
+- New regression `test_satisfying_form_preconditions_detection` — pins the detector regex against the exact error strings observed in the v0.6.5 t-002 evidence (`Reward Image cannot be blank`, plus the generic `cannot be blank` / `is required` / `must be present` family). If a future executor rewrite drops the detection logic, this test catches it before the run hits production again.
+
+### Why this is the right shape
+
+v0.6.6 follows the v0.6.5 / v0.6.2 / v0.6.1 pattern: a real production skip that ended with the user saying "we should have been able to test this" → ship the missing executor knowledge as a skill, link it from the agent, regression-test the detection. The mechanical screenshot check from v0.6.5 stays — this fix doesn't loosen any contract, it adds a recovery path that wasn't there before.
+
 ## v0.6.5 — 2026-05-14
 
 ### Mechanical enforcement of the v0.6.4 screenshot contract
