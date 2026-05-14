@@ -2,6 +2,30 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.4 — 2026-05-14
+
+### Wizard detects missing `.proctor/local.yml` (don't silently fall through to bump-only)
+
+User feedback: "因为 local 有问题，所以我删掉了，但是 init 没有检查重做" — they deleted `.proctor/local.yml` expecting the wizard to detect the gap and regenerate, but the wizard ran in bump-only mode and just bumped the action pin without checking if local.yml existed.
+
+This release adds a new pre-flight detection + AskUserQuestion.
+
+**New detection** (`commands/proctor-init.md`):
+- `HAS_LOCAL_YML` — whether `.proctor/local.yml` exists
+- `NEEDS_LOCAL_REGEN` — fires when seed script exists but local.yml is missing
+
+**New MODE branch** when `NEEDS_LOCAL_REGEN=yes`: AskUserQuestion with three options:
+1. **Regenerate seed-local.sh AND re-run it** (Recommended) — falls into the full Section 7 path so Step 7f setup-command confirmation runs (picks up v0.4.x setup-confirmation improvements + lets user fix the env-source mismatch that probably caused the local.yml problem in the first place). Step 8c-pre regenerates the seed script. Summary tells the user to `./.proctor/seed-local.sh`.
+2. **Just run the existing seed-local.sh** — faster but uses whatever setup commands were baked into the seed script at wizard-time. Wizard's exit summary explicitly lists `./.proctor/seed-local.sh` as next step.
+3. **Skip** — wizard does nothing extra, bump-only continues.
+
+**Why "Regenerate seed-local.sh" is the recommended option**: an existing seed script is wizard-generated and bakes its `setup:` commands at generation time. If those baked commands are stale (e.g. wrong env-source file → server-config mismatch → chacha20poly1305 gRPC handshake failure that the user just hit), running the existing script as-is reproduces the same problem. Re-running Step 7f lets the user confirm the right env-source file + setup commands, and Step 8c-pre rebuilds the seed script with the fresh choices.
+
+**Also fixed**: the "fully set up" branch now requires `HAS_LOCAL_YML=yes` too. Previously it would say "PRoctor is already integrated and up to date" even when local.yml was missing.
+
+### Tests
+- 179 unchanged (wizard prose only).
+
 ## v0.4.3 — 2026-05-14
 
 ### Approval-gate render moved out of AI prose into a deterministic script
