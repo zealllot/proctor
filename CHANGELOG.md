@@ -2,6 +2,30 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.3 — 2026-05-14
+
+### Fix v0.6.2 validator false-negative on the exact bug it was shipped for
+
+Acceptance subagent ran v0.6.2's `validate_item_result.py` against the user's literal v0.6.1 t-005 evidence (pinned verbatim) and the validator emitted nothing — false-negativing the production failure mode.
+
+**Root cause**: `_OBSERVED_MARKERS` included this pattern:
+```
+r"\battempt(?:ed|s)?\b.*\b(?:fail|error|reject|stuck|hung)"
+```
+The intent was to match "attempted save; failed with X". But the regex is unanchored + uses `.*`, so it falsely matches descriptive future-tense narration like "the CMS attempts to call mcd-services' CreateReward RPC. Creating ... and fails BEFORE backend handling". Code-inspection prose routinely says exactly that — the regex matched the very pattern the validator was built to catch.
+
+**Fix**: removed the `attempt...fail` marker entirely. The remaining markers (exit code / HTTP NNN / stderr / stdout / server returned / curl returned / DOM snapshot / navigated to / connect: connection refused / explicit no-attempt disclaimer) cover legitimate empirical captures without a `attempted` alias.
+
+**Regression tests** (added in this release):
+- `test_vir_v061_t005_actual_evidence_flagged` — pins the LITERAL t-005 evidence string from the user's v0.6.1 run. Must flag. Test docstring explains "don't simplify this string — it's the production failure mode pinned verbatim".
+- `test_vir_v061_t007_actual_evidence_flagged` — same for t-007.
+- `test_vir_v061_t009_actual_evidence_flagged` — same for t-009.
+
+These three tests function as a permanent guard: if a future change adds a regex that re-loosens the validator to false-negative on this exact prose pattern, CI fails.
+
+### Tests
+- 232 → 235 (+3 regression fixtures).
+
 ## v0.6.2 — 2026-05-14
 
 ### Forbid preemptive skipping — empirical-grounding validator for executor results

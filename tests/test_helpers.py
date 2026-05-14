@@ -1121,6 +1121,78 @@ def test_vir_precondition_skip_code_inspection_warning():
         assert any(c["id"] in w for w in warnings)
 
 
+def test_vir_v061_t005_actual_evidence_flagged():
+    """REGRESSION: the exact t-005 evidence from the user's v0.6.1
+    run. v0.6.2 first-ship had a `\\battempt...fail` regex that
+    false-negatived this fixture (subagent caught it). v0.6.3 removed
+    that regex; this fixture must now flag. Don't 'simplify' this
+    string — it's the production failure mode pinned verbatim."""
+    item = {
+        "id": "t-005",
+        "status": "skipped",
+        "reason": "precondition-not-met",
+        "evidence": (
+            "precondition-not-met: local dev_env's empty/dev PASETO "
+            "key in pkg/auth blocks the gRPC client's "
+            "chacha20poly1305 token construction when the CMS "
+            "attempts to call mcd-services' CreateReward RPC. "
+            "Creating a Digital Download reward of any type (Image "
+            "or Game) hits this happy-path save and fails BEFORE "
+            "backend handling. Re-run this item against a deployed "
+            "test env (CI mode) where the PASETO key is non-empty."
+        ),
+    }
+    warnings = vir_check(item)
+    assert warnings, (
+        "v0.6.1 t-005 evidence MUST flag — it's pure code-inspection "
+        "with no captured exit code / HTTP / stderr. If this test "
+        "fails, a regex was added that matches descriptive future-"
+        "tense prose ('attempts to call ... fails'). Tighten or remove."
+    )
+    assert "code-inspection" in warnings[0]
+    assert "t-005" in warnings[0]
+
+
+def test_vir_v061_t007_actual_evidence_flagged():
+    """Same pattern as t-005 but for the Game-type happy save."""
+    item = {
+        "id": "t-007",
+        "status": "skipped",
+        "reason": "precondition-not-met",
+        "evidence": (
+            "precondition-not-met: same chacha20poly1305 PASETO "
+            "blocker as t-005. Creating a Digital Download reward "
+            "with type=Game also routes through the gRPC "
+            "CreateReward RPC and fails before backend write."
+        ),
+    }
+    warnings = vir_check(item)
+    assert warnings
+    assert "t-007" in warnings[0]
+
+
+def test_vir_v061_t009_actual_evidence_flagged():
+    """t-009 evidence — describes a require-then-fail chain but no
+    actual attempt. Must flag."""
+    item = {
+        "id": "t-009",
+        "status": "skipped",
+        "reason": "precondition-not-met",
+        "evidence": (
+            "precondition-not-met: editing an existing backfilled "
+            "Digital Download reward requires (a) a row with "
+            "DigitalContentType already populated from the backend's "
+            "deployment-time backfill (per PR description, dirk's "
+            "note), and (b) the gRPC UpdateReward call to succeed "
+            "on save. Both conditions fail in local dev_env (no "
+            "backfilled fixtures + empty PASETO)."
+        ),
+    }
+    warnings = vir_check(item)
+    assert warnings
+    assert "t-009" in warnings[0]
+
+
 def test_vir_explicit_no_attempt_disclaimer_no_warning():
     """An honest 'did not attempt because X' disclaimer in evidence
     is OK — it surfaces the gap explicitly rather than disguising it

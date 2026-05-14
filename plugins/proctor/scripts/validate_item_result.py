@@ -57,7 +57,15 @@ _OBSERVED_MARKERS = [
     r"\bDOM\s+(?:snapshot|state)\b",
     r"\bserver returned\b",
     r"\bcurl\s+returned\b",
-    r"\battempt(?:ed|s)?\b.*\b(?:fail|error|reject|stuck|hung)",
+    # v0.6.3: removed `\battempt(?:ed|s)?\b.*\b(?:fail|error|...)` —
+    # too loose. Code-inspection prose routinely says "X attempts to
+    # call Y and fails BEFORE backend handling" (descriptive future-
+    # tense, NOT a captured attempt). Subagent acceptance test on the
+    # user's actual v0.6.1 t-005 evidence proved this false-negatived
+    # the exact bug we shipped to catch. The other markers above
+    # cover legitimate captures (exit/HTTP/stderr/server returned/
+    # curl returned/DOM snapshot); we don't need a "attempted..."
+    # alias.
     # Explicit "no attempt because..." disclaimer that surfaces the gap
     r"\bno attempt performed\b",
     r"\bnot attempted\b",
