@@ -202,11 +202,18 @@ Exception: the dev server's `go run` / `pnpm dev` MUST run from inside the workt
      bug in the diff under test". Pair with `data-dep-failed` (the
      intra-run sibling) so the reporter can render both as
      non-actionable-skip variants distinct from opt-out skip.
-   - Otherwise dispatch a fresh subagent with the item JSON (with
-     templates already substituted), env, the path to
-     `<logs_dir>/<id>.log`, AND the Chrome context handle for its
-     group. Items without `as_account` set go into the default
+   - **Dispatch policy (v0.7.1+).** Subagents (pr-test-executor) handle ONLY `lint-only` and `bash`/`curl` items. `chrome-devtools` items run **inline in this skill's host session**, against the single chrome-devtools-mcp session that you already logged in for this account group. Don't dispatch chrome-devtools items to subagents — chrome-devtools-mcp uses a single shared profile and concurrent subagent sessions fail with "Use --isolated to run multiple browser instances" (v0.7.0 e2e regression, PR #1126 run `pr1126-75eea89-353a49f0`: 6 chrome subagents tried to spawn in parallel, all hit the lock, executor spent ~2min killing them off + recovering before falling back to inline-in-skill). The inline-in-skill chrome path also makes the screenshot capture trivially correct (the host session writes PNG → `<run-dir>/screenshots/<id>__N__<label>.png` directly via `mcp__chrome-devtools__take_screenshot`), avoiding the v0.6.9 "subagent returns fake screenshot_ref in logs/" failure mode entirely.
+   - For non-chrome items: dispatch a fresh subagent with the item JSON (with
+     templates already substituted), env, and the path to
+     `<logs_dir>/<id>.log`. Items without `as_account` set go into the default
      group (= `auth.accounts[0].name`).
+   - For chrome-devtools items: drive the page inline using
+     `mcp__chrome-devtools__navigate_page`, `take_snapshot`, `click`, `fill`,
+     `evaluate_script`, and call `take_screenshot` AT LEAST the per-item-type
+     minimum from `validate_screenshots_contract.py` (render-check ≥1,
+     negative ≥1, happy-save ≥2, round-trip ≥2, edit-and-switch ≥3). Each
+     screenshot path: `<run-dir>/screenshots/<id>__<N>__<short-label>.png`.
+     Record the assembled result item directly (no subagent round-trip).
    - **Validate producer outputs** (v0.3.25+) on the returned result.
      If the original item declared `produces: ["a", "b"]`, the
      subagent's `outputs` dict MUST contain both keys with non-empty

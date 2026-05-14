@@ -2,6 +2,38 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.1 — 2026-05-14
+
+### Three follow-up fixes from the v0.7.0 e2e against mcd-website PR #1126
+
+The first v0.7.0 e2e (run-id `pr1126-75eea89-353a49f0`) surfaced three issues none of the v0.7.0 fixes caught:
+
+### Fix #1 — Worktree placed outside consumer repo (~1min saved + correctness)
+
+Observed: `go run .` in the worktree fails with `main module (github.com/theplant/mcd-website) does not contain package github.com/theplant/mcd-website/.proctor/runs/<id>/pr-checkout`. Cause: when the consumer repo lives under `$GOPATH/src/`, the v0.7.0 worktree path (`<run_dir>/pr-checkout/` inside the consumer dir) becomes a valid sub-import-path of the consumer module, and Go's module resolver follows the dir path instead of `go.mod`'s module name. The executor recovered by retrying with `go run ./main.go`, but spent a full server-start cycle on the first failure (v0.7.0 criterion E — "no second server restart" — failed because of this).
+
+Fix: `plugins/proctor/scripts/worktree.py` now places worktrees OUTSIDE the consumer repo by default. Default base dir: `$TMPDIR/proctor-worktrees/`; override via `$PROCTOR_WORKTREE_BASE_DIR`. Worktree dir name encodes both the consumer repo name and the run-id (`<consumer>-<run-id>`) so concurrent PRoctor runs don't collide. The marker file `<run-dir>/worktree-path.txt` continues to record the actual path so `teardown()` still finds it.
+
+### Fix #2 — Symlink list now includes `external/assets/mcd` sub-path
+
+Observed: `external/assets` was on v0.7.0's default symlink list, but the symlink silently no-op'd in the mcd-website worktree because `external/assets/` was a TRACKED dir (with `fonts/` + `images/` content committed), so `dst.exists()` was True and the symlink-at-parent path was skipped. The gitignored sub-dir `external/assets/mcd/` (the frontend webpack bundle the qor admin UI needs) never got linked, so the admin UI's form-rendering JS was missing and the chrome items couldn't find the Include/Exclude Consumer Tags inputs.
+
+Fix: `_DEFAULT_GITIGNORED_DIRS_TO_SYMLINK` now lists both `external/assets` (whole-dir variant — for repos where the parent itself is gitignored) AND `external/assets/mcd` (sub-path variant — mcd-website's pattern). The symlink loop tries each entry independently; whichever level is free in the worktree is the one that gets linked.
+
+### Fix #3 — Chrome-devtools items run inline in the executing-pr-tests skill (~2-5min saved + correctness)
+
+Observed: v0.7.0 fix #1 gave the `pr-test-executor` subagent chrome-devtools tools in its frontmatter, so the skill dispatched chrome items to subagents in parallel. But chrome-devtools-mcp uses a single shared chrome profile lock — concurrent subagent sessions all tried to open the same profile and got `The browser is already running for /Users/.../chrome-devtools-mcp/chrome-profile. Use --isolated to run multiple browser instances.` The executor recovered by killing all chrome PIDs and falling back to inline chrome work in the skill, but wasted ~2 minutes on the cleanup-and-recover cycle.
+
+Fix: chrome-devtools work now runs **inline in the host skill session** — the single chrome session that's already logged in for the account group drives every chrome item sequentially. Subagent (`pr-test-executor`) frontmatter strips the chrome-devtools tool list and now declares the v0.7.1 contract: chrome items hitting the subagent get returned as `{status: "skipped", reason: "chrome-handled-by-skill"}` instead of being dispatched. `skills/executing-pr-tests/SKILL.md`'s per-item dispatch policy now branches: lint-only / bash → subagent (parallel-safe); chrome-devtools → inline (sequential, single chrome session). This also fixes the v0.6.9 "subagent returns fake `screenshot_ref` in logs/" failure mode — the skill writes `take_screenshot` output directly to `<run-dir>/screenshots/<id>__N__<label>.png`.
+
+### Tests
+
+284 → 288. New tests cover the four v0.7.1 invariants: worktree placed outside consumer repo, dir name carries consumer + run-id, `$PROCTOR_WORKTREE_BASE_DIR` env honored, and symlink lands at the sub-path level when the parent dir is tracked.
+
+### Migration
+
+Existing `.proctor/runs/<id>/pr-checkout/` dirs from v0.7.0 are NOT touched — `git worktree remove` (via `teardown`) only knows about whatever path the current `worktree.py` writes. If you have stale v0.7.0 worktrees in your consumer repo, clean them with `git worktree list` + `git worktree remove --force` once per run-dir, OR just `rm -rf .proctor/runs/pr*-*` for runs you don't need to inspect.
+
 ## v0.7.0 — 2026-05-14
 
 ### Four performance fixes — typical e2e wall-clock ~37min → ~15min
