@@ -339,6 +339,39 @@ def _run_step(
             validate_test_results(tr)
         except (json.JSONDecodeError, SchemaError) as e:
             return _error(f"test-results.json failed validation: {e}"), state
+        # v0.6.5: enforce per-item-type screenshot minimums against
+        # the v0.6.4 executor contract. Prose discipline alone failed
+        # in production (t-006 shipped with 1 screenshot when the
+        # contract demanded 3); structural enforcement here aborts
+        # the pipeline before report-render so the gap is visible
+        # before "complete". See scripts/validate_screenshots_contract.py.
+        from validate_screenshots_contract import check as _ss_check  # type: ignore[import-not-found]
+        tp_path = run_dir / "test-plan.json"
+        if tp_path.exists():
+            try:
+                tp = json.loads(tp_path.read_text())
+                # v0.6.8: pass run_dir so the identical-negative-
+                # screenshot byte-size lint can resolve files. The
+                # count-based contract is unaffected by run_dir.
+                violations = _ss_check(tp, tr, run_dir=run_dir)
+            except json.JSONDecodeError as e:
+                return _error(
+                    f"test-plan.json could not be parsed for screenshot-"
+                    f"contract validation: {e}"
+                ), state
+            if violations:
+                joined = "\n".join(f"  - {v}" for v in violations)
+                return _error(
+                    "test-results.json failed v0.6.5 screenshot-contract "
+                    "validation. The executor produced fewer screenshots "
+                    "than required for one or more items' item-type "
+                    "bucket:\n" + joined + "\n\n"
+                    "Re-dispatch the executor for the affected items "
+                    "(or hand-add the missing screenshots, then "
+                    "re-validate). See "
+                    "plugins/proctor/agents/pr-test-executor.md for the "
+                    "per-item-type screenshot matrix."
+                ), state
         # Decide if fix is needed.
         fail_count = tr["summary"]["fail"]
         aborted = tr.get("aborted")

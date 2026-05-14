@@ -143,7 +143,19 @@ Why this matters:
 
 When the form's validator rejects values containing `-` or `+` or other punctuation, swap to the closest compliant pattern (e.g. `aitestimagerewardt007`) but keep the `aitest` prefix intact.
 
+2c. **Upstream-validator precondition (v0.6.6+, mandatory before any save-flow skip).** If your first save attempt returns a validator error on a field that is NOT what the test is asserting on — for example the test asserts the new `DigitalContent-Validator` Game branch, but the response contains `Reward Image cannot be blank` (the basic Image-Validator) — STOP before classifying the item as `precondition-not-met`. You're seeing a precondition gap: an UPSTREAM required-field validator (registered before the validator under test) is gating the save path so the asserted validator can never fire.
+
+The detection trigger: error message matches `cannot be blank` / `is required` / `must be present` (or a literal you've seen in the source like `Reward Image cannot be blank`), AND the field named in the error is NOT what the item's `how:` is asserting on, AND `how:` doesn't explicitly instruct you to leave that field empty.
+
+When the trigger fires, read `skills/satisfying-form-preconditions/SKILL.md` and apply Pattern A (existing-record reuse — preferred) or Pattern B (real upload via the modal). The v0.6.5 mcd-website run skipped 9/11 items because this technique was missing — every save was blocked by the basic Image-Validator firing before the PR-new DigitalContent-Validator could be reached. After applying the skill, all four DigitalContent-Validator branches (Image / Game-valid / Game-invalid-URL / empty-type) are reachable from headless chrome with no real file upload.
+
+Your evidence MUST explicitly call out the bypass technique used: "Save succeeded after injecting media_library record ID=N via `textarea[name=\"QorResource.Image\"]` to satisfy the upstream Image-Validator (registered before the asserted DigitalContent-Validator). The asserted behavior — <which branch> — then fired cleanly." That tells the human reviewer (a) the assertion was real and (b) which precondition technique was needed.
+
+If after applying Pattern A AND Pattern B the precondition still can't be satisfied (no existing records, deploy env rejects uploads), THEN — and only then — `status=skipped, reason=precondition-not-met` is justified. The evidence must cite the specific failure mode you observed (e.g. "Pattern A: fetched /admin/media_library, 0 records returned; Pattern B: file upload returned 403").
+
 3. **For chrome-devtools items: screenshots are PROOF, not decoration (v0.6.4+).** A real-run report had t-006 ("edit reward, switch Digital Content Type from Image to Game") with a single post-save screenshot that DIDN'T EVEN SHOW the Digital Content Type field — the screenshot was useless as evidence of what the test claimed. The contract below makes the screenshot count + content match the assertion type, and forbids "scroll-past-the-target" screenshots.
+
+**Mechanical enforcement (v0.6.5+).** `scripts/validate_screenshots_contract.py` runs against the TestPlan + TestResults after the executor stage completes and before report-render. It classifies each chrome-devtools item by its `what:` / `error_type:` into one of the buckets below, then checks the result's screenshot count meets the bucket's minimum. **If any item falls short, `proctor_run.py` aborts the pipeline with an error before the report is generated** — you'll see the violation list and need to re-dispatch the executor for the affected items (or hand-add the missing screenshots) before the run can proceed. The script reads only the result's `screenshots` list (v0.6.4 dict-shape) AND legacy `screenshot_ref` (counted as 1 for backward compat at the minimum-1 floor). Skipped items are exempt — they have no evidence to capture. The mechanical check exists because pre-v0.6.5 prose-only enforcement of this contract demonstrably failed in production.
 
 ### How many screenshots, and what they must show
 
@@ -206,6 +218,26 @@ For single-screenshot items (render-check, negative): set BOTH `screenshots` (wi
 - **Screenshot before scroll-into-view** — the asserted field is below the fold.
 - **Multiple screenshots all identical** — taking the SAME post-save view 3 times doesn't satisfy "before/after"; the test gains no signal.
 - **Screenshot of the success toast WITHOUT the form** — proves something saved, doesn't prove the FIELD VALUE is what the test wanted.
+
+### Negative-test screenshot contract (v0.6.8+, mandatory for error_type items)
+
+For any item the planner marked with `error_type` (validation / permission / network / state-conflict / not-found / auth — the buckets `validate_screenshots_contract.py` calls `negative`), the screenshot must be taken AFTER the rendered error chip is in the DOM — not before. This is a specialization of the v0.6.4 contract triggered by the v0.6.6 mcd-website run on PR #1115: t-007 / t-008 / t-009 each shipped a screenshot that was byte-identical (244252 bytes) to the blank "Add Digital Content" form. Each item's evidence claimed the error chip rendered; the screenshot proved it had not. The HTTP response body contained the error HTML; the browser DOM did not. Root cause: the Pattern A submit step used `fetch(form.action, ...)` — a programmatic POST that reads the response body but does NOT render it into the DOM. The screenshot captured the pre-submit form three times.
+
+**Contract**:
+
+1. **Submit must render the response in the DOM.** Use `form.submit()` (real browser navigation — server's 422 + error HTML renders into the page) or click the actual submit button via `mcp__chrome-devtools__click`. Do NOT use `fetch(form.action, ...)` to drive a negative test — fetch is correct for happy-save (the redirect is the evidence) and wrong for validator-reject (the rendered error is the evidence).
+
+2. **Wait for the rendered error.** After submit, `wait_for` text=[<expected error message>] before screenshotting. If the wait_for times out, the submit did not render an error — debug the submit step.
+
+3. **Verify the error text is in the rendered DOM** before take_screenshot. Read `document.body.innerText` and grep for the expected error string; only screenshot when the grep succeeds.
+
+4. **`screenshots[].focus` must point at the error chip's screen position** — not the form's general region. The reviewer reads `focus:` to find the chip in the captured image.
+
+5. **Evidence must say "error chip rendered in PAGE DOM"** (or equivalent wording that distinguishes DOM from response body) AND quote the actual visible error text from `document.body.innerText`. Saying "response body contains '<err>'" is empirical for the validator firing but NOT for the screenshot — the latter requires DOM render.
+
+Detailed steps with code in `skills/satisfying-form-preconditions/SKILL.md` under "Negative-test screenshot: error must be IN THE DOM, not just response body".
+
+Mechanical enforcement (v0.6.8+): `validate_screenshots_contract.py` now scans all negative items for byte-identical screenshots. If two negative items' primary screenshot is the same file size AND both are above 50KB, the contract flags the pair — that's the empirical signature of "same pre-submit form captured twice". The check is O(n²) over negative items only.
 
 If your assertion is on something a screenshot CAN'T show (e.g. `document.title` is the browser tab, computed styles aren't pixels), say so explicitly in `focus` AND verify via DOM:
 

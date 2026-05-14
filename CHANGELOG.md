@@ -2,6 +2,134 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.9 — 2026-05-14
+
+### Removed `/proctor-drive` — subagent dispatch was a dead-end
+
+The v0.6.1 `/proctor-drive` command theorized that dispatching the pipeline through a Task subagent would bypass the main-AI turn-model stalls. Two production failures since proved otherwise:
+
+1. **Subagents stall at the same turn boundaries** as the main AI (documented in the v0.6.1 entry below but never fully removed from the recommendation).
+2. **Subagent sessions don't register the host plugin's Skills.** When `proctor_run.py` emits `dispatch_skill` envelopes for `proctor:executing-pr-tests` / etc., the subagent's `Skill` tool returns `Unknown skill` because `$CLAUDE_PLUGIN_ROOT` is just an env var — Claude Code's skill loader doesn't enumerate it as a plugin source. Surfaced in the v0.6.8 e2e validation attempt where the pipeline stalled cleanly at `step=approved`, every dispatch_skill rejected.
+
+The right answer is simpler than the v0.6.1 workaround claimed:
+
+| Where | Command | Why |
+|---|---|---|
+| Local interactive | `/proctor:proctor <PR>` (you type it) | Plugin installed in your session — Skills are registered. Stall → type `continue`. |
+| CI | `claude --print "/proctor:proctor <PR>"` (in `github-action/action.yml`) | Non-interactive mode loops on tool calls without turn-model stops. |
+
+**Removed**: `plugins/proctor/commands/proctor-drive.md` (78 lines) + `examples/.pr-test.yml` (37 lines) + the CI step that validated the example. The example file documented the v0.3.x `.pr-test.yml` layout that v0.4.0 replaced with `.proctor/config.yml`; the wizard now generates the current shape so a stale example serves no purpose.
+
+**Updated**:
+- `commands/proctor.md` top section — replaced the misleading "if you stalled use /proctor-drive instead" prose with a scenario table (local / CI) plus an explicit "do not dispatch from subagent" warning.
+- `README.md` — fixed three references from `.pr-test.yml` to `.proctor/config.yml`.
+- `docs/INTEGRATION.md` — removed the dangling `examples/.pr-test.yml` link, point at the wizard instead.
+
+No code change, no test change. 276 tests still pass. Net plugin/docs −115 lines / +12.
+
+## v0.6.8 — 2026-05-14
+
+### Negative-test screenshot contract: error must be rendered in DOM, not just response body
+
+The v0.6.6 e2e run against mcd-website PR #1115 (run-id `pr1115-e6a7c79-v066manual155241`) shipped t-007 / t-008 / t-009 — three negative-test items — with three byte-identical PNGs (244252 bytes each, the blank "Add Digital Content" form). Each item's evidence claimed an error chip rendered (`"Digital Content Type is required"` / `"Game URL is required"` / `"Game URL is not a valid URL"`); the user noticed the screenshots all looked the same and proved otherwise.
+
+**Root cause**: the Pattern A submit step in `satisfying-form-preconditions/SKILL.md` used `fetch(form.action, ...)` — a programmatic POST. The server returns 422 + error HTML, the executor reads `await resp.text()` and observes the expected error string (empirical evidence the validator branch fired), but the **browser DOM never updates** because `fetch` is decoupled from page navigation. `take_screenshot` then captures the pre-submit form. For happy-save items this is fine (the evidence is the redirect URL); for negative items the asserted artifact IS the rendered error, and a fetch-only submit never renders one.
+
+**Fix**:
+
+- **Skill update** (`skills/satisfying-form-preconditions/SKILL.md`): new section *"Negative-test screenshot: error must be IN THE DOM, not just response body"* with the negative-test submit procedure — call `form.submit()` (real browser navigation, server's 422 + error HTML renders into the page) NOT `fetch(form.action, ...)`. Includes seven concrete `evaluate_script` / `wait_for` / `take_screenshot` steps and two named anti-patterns.
+
+- **Executor agent contract update** (`agents/pr-test-executor.md`): new section *"Negative-test screenshot contract (v0.6.8+, mandatory for error_type items)"*. Mandates that for any item with `error_type` set, the screenshot must be taken AFTER the rendered error chip is in DOM (verified via `document.body.innerText` grep), `screenshots[].focus` must point at the chip's screen position, and evidence must explicitly say "rendered in PAGE DOM" (not "response body").
+
+- **Mechanical enforcement** (`scripts/validate_screenshots_contract.py`): new identical-negative-screenshot byte-size lint. After the existing per-bucket count check, scan all negative-classified items pairwise (O(n²); typically n ≤ 5). If two negative items' primary screenshot is the same file size AND both are above 50 KB (heuristic floor to skip legitimate tiny stubs), emit a violation naming both item IDs and the byte size. New `check(plan, results, run_dir=...)` signature; `run_dir` is required for the byte-size lint (count-based contract unaffected when omitted, for backward compatibility).
+
+- **Wired into `proctor_run.py`**: same `_ss_check` call at the EXECUTED→REPORTED boundary now passes `run_dir=run_dir` so the new lint runs in production. Pipeline aborts before report-render if the t-007/008/009 signature is detected.
+
+**Tests** (`tests/test_helpers.py`) +5:
+
+- `test_ss_check_identical_negative_screenshots_warns` — pins the literal v0.6.6 t-007/t-008 signature: two negative items pointing at the same 244252-byte stub, lint emits one violation containing both item IDs and the byte size.
+- `test_ss_check_distinct_negative_screenshots_ok` — two distinct files of different sizes: zero violations.
+- `test_ss_check_identical_below_floor_not_flagged` — same tiny file under the 50 KB floor: zero violations (legitimate sentinels exempt).
+- `test_ss_check_identical_happy_save_screenshots_ok` — two happy-save items sharing a screenshot: zero violations (lint targets negative items only).
+- `test_ss_check_identical_no_run_dir_skipped` — without run_dir, byte-size lint is silently skipped; count-based contract still runs. Backward compatibility preserved.
+
+Tests 271 → 276.
+
+### Why this is the right shape
+
+Same v0.6.5 / v0.6.6 pattern: a real production bug ends with the user identifying it visually → ship the missing executor knowledge as skill + agent doc, regression-test the detection, mechanically enforce so prose alone isn't relied on. The fetch() vs form.submit() distinction is the surgical fix; the byte-size lint is the safety net that catches future regressions of the same shape.
+
+## v0.6.7 — 2026-05-14
+
+### Classifier: round-trip items no longer misclassified as edit-and-switch
+
+The v0.6.6 e2e run against mcd-website PR #1115 exposed a regex ordering bug in `validate_screenshots_contract.py`. Item t-006b's `what` read:
+
+> "HAPPY: re-open the just-edited reward — switched DigitalContentType, GameUrl, CTA labels all persist after hard reload"
+
+The `_EDIT_AND_SWITCH_RE` (`\bedit\b.*\bswitch\b`) matched on "just-edited" + "switched" (past-tense verbs describing prior history, NOT the action under test in this item). Result: t-006b was bucketed as `edit-and-switch` (requires 3 screenshots) when it's actually a `round-trip` re-open verification (requires 2). The executor had to add a third screenshot purely to satisfy the false-positive classification.
+
+**Fix**: re-order `classify_item` so `_ROUND_TRIP_RE` is checked first. Re-open / hard-reload phrasing is unambiguous — no save action happens inside such an item — so when it matches, the bucket is round-trip regardless of whether edit/switch verbs are present in past-tense context.
+
+Pinned with `test_ss_classify_round_trip_after_edit_not_misclassified_as_edit_switch` (the literal t-006b plan-item text). Tests 270 → 271.
+
+## v0.6.6 — 2026-05-14
+
+### Teach the executor to satisfy upstream-validator preconditions
+
+The v0.6.5 run against mcd-website PR #1115 (run-id `pr1115-e6a7c79-828594b8`) finished cleanly with 0 failures but skipped 9/11 items. Every save-flow item that needed to exercise the new `DigitalContent-Validator` was blocked by the basic `Image-Validator` (`Reward Image cannot be blank`) firing first — qor's MediaBox upload modal looked unreachable from headless chrome, so the executor took the empirical-grounding-rule's only remaining out: `precondition-not-met`. The new validator branches went unexercised, the test plan delivered 2/11 signal, and the user (correctly) flagged that the executor agent had no instructions for getting past an upstream-validator gate.
+
+**Reconnaissance findings** (local server `http://localhost:9801`, qor admin + media MediaBox v0.0.0-20210903074215):
+
+- The MediaBox renders a hidden `<textarea name="QorResource.<Field>" class="qor-field__mediabox-data">` that stores the selected file as `JSON.stringify([{ID, Url, ...}])`. The basic Image-Validator only checks the textarea's string for emptiness (`"" || "null" || "[]"` → reject; anything else → accept). No DB lookup, no S3 round-trip, no FK constraint.
+- The qor MediaBox modal's backing data lives at a separate admin resource (`/admin/media_library?filters[SelectedType].Value=image` for Reward Image; `/admin/digital_download_assets` for Digital Download Asset). Existing records' primary keys are readable from the index page's `data-primary-key="(\d+)"` attribute via plain `fetch(...).text()`.
+- Direct textarea injection with `[{"ID":5,"Url":"//x"}]` followed by `FormData(form)` + `fetch(form.action, {method:'POST'})` saves cleanly: HTTP 200 redirecting to `/admin/digital_content/<new-id>`. The asserted DigitalContent-Validator then runs as the next validator in the chain — all four branches reachable (Image-DDA-missing, Game-URL-empty, Game-URL-invalid, empty-DCT, plus Game-URL-valid → save succeeds).
+- Round-trip survives: navigating back to `/admin/digital_content/<id>` shows the saved fields, so the v0.6.4 "round-trip" + "edit-and-switch" templates are exercisable too.
+
+**New skill** (`plugins/proctor/skills/satisfying-form-preconditions/SKILL.md`):
+
+- **Detection** — the trigger is a save-flow item whose first attempt returns an error message matching `cannot be blank` / `is required` / `must be present` on a field NOT named by the test's `how:`. This is empirically observable from the response body; not session memory.
+- **Pattern A: existing-record reuse** (preferred — no upload required) — five concrete steps for the qor MediaBox case with code snippets for `take_snapshot` → `data-mediabox-url` extraction → `fetch` → `data-primary-key` grep → JSON injection → `FormData` + `fetch` submit. Generalizes to ActiveAdmin attached-blob and React-admin-with-hidden-input shapes.
+- **Pattern B: real upload via the modal** — fallback when the picker isn't backed by a separate admin resource. Step-by-step `upload_file` + thumbnail poll + modal-dismiss flow with the `proctor-e2e-stub-<timestamp>.png` filename convention.
+- **What NOT to do** — three documented anti-patterns the executor must avoid (skipping on first attempt, filling with placeholder strings, fabricating non-existent record IDs).
+
+**Executor agent contract update** (`agents/pr-test-executor.md`):
+
+- New section **2c. Upstream-validator precondition** (mandatory before any save-flow `precondition-not-met` skip). Lists the detection trigger, instructs the agent to read the new skill, mandates the evidence string call out which bypass technique was used.
+- Tightened the precondition skip path: justification requires citing both Pattern A and Pattern B failure modes, not just one.
+
+**Tests** (`tests/test_helpers.py`):
+
+- New regression `test_satisfying_form_preconditions_detection` — pins the detector regex against the exact error strings observed in the v0.6.5 t-002 evidence (`Reward Image cannot be blank`, plus the generic `cannot be blank` / `is required` / `must be present` family). If a future executor rewrite drops the detection logic, this test catches it before the run hits production again.
+
+### Why this is the right shape
+
+v0.6.6 follows the v0.6.5 / v0.6.2 / v0.6.1 pattern: a real production skip that ended with the user saying "we should have been able to test this" → ship the missing executor knowledge as a skill, link it from the agent, regression-test the detection. The mechanical screenshot check from v0.6.5 stays — this fix doesn't loosen any contract, it adds a recovery path that wasn't there before.
+
+## v0.6.5 — 2026-05-14
+
+### Mechanical enforcement of the v0.6.4 screenshot contract
+
+v0.6.4 introduced the per-item-type screenshot-count contract (render 1, negative 1, happy-save 2, round-trip 2, edit-and-switch 3) as prose discipline on the executor agent. e2e-driver run against PR-1115 confirmed prose alone is insufficient: pre-v0.6.4 production runs shipped t-006 ("edit reward, switch Digital Content Type from Image to Game") with one screenshot whose contents didn't even show the field being asserted on. The contract needs a structural backstop.
+
+**New script** (`plugins/proctor/scripts/validate_screenshots_contract.py`):
+- `classify_item(item)` — pure-function classifier that maps a TestPlan item to one of `{not-chrome-devtools, render-check, negative, happy-save, round-trip, edit-and-switch}`. Reads `tool`, `error_type`, `what:`, `how:`. Documented heuristic order so reviewers can read a plan and predict which items will be screenshot-enforced.
+- `check(plan, results)` — returns a list of violation strings, one per item whose result has fewer screenshots than its bucket's minimum. Counts both the new `screenshots: [{path, label, focus}]` list (valid entries only) and the legacy `screenshot_ref` (as 1, for the render-check / negative floor). Skipped items exempt — they have no evidence to capture. CLI mode emits violations to stdout + exits non-zero.
+
+**Pipeline wiring** (`plugins/proctor/scripts/proctor_run.py`):
+- `_STEP_APPROVED` (executor finished, transitioning to fix/report decision) now runs `validate_screenshots_contract.check()` against the run's TestPlan + TestResults after schema validation passes.
+- On violation: emit an `error` envelope with the full violation list. Pipeline aborts before report-render; the developer sees the gap before the run is "complete" rather than discovering useless screenshots in the published report.
+
+**Agent prose update** (`plugins/proctor/agents/pr-test-executor.md`):
+- New paragraph under the v0.6.4 "Screenshots are PROOF" section calling out the v0.6.5 mechanical check and what aborting looks like. The agent still describes the contract in detail; the mechanical check is the floor, not the ceiling.
+
+### Tests
+- 243 → 268 (+25): classifier round-trips on each bucket; check returns empty on satisfied minimums; check flags every minimum-violation case; legacy `screenshot_ref` counts toward render-check floor but not happy-save (preserves backward-compat without raising the ceiling); non-chrome-devtools items exempt; skipped items exempt; plan/results-drift items silently skipped; pinned regression case mirroring the actual pre-v0.6.4 t-002/t-003/t-006 result shape against a representative PR-#1115 plan — all three flagged.
+
+### Why this is structural
+
+v0.6.4 belongs to the family of "make the LLM behave better via better prose". v0.6.5 belongs to the family of "make the LLM's mistakes loudly visible at validation time so they cannot ship unnoticed". The same delineation as v0.6.1 (pipeline state machine over prose loop discipline) and v0.6.2 (`validate_item_result.py` over executor agent prose forbidding preemptive skip). The pattern: when prose enforcement of a rule produces a real production failure, ship a mechanical check that fires before the artifact is finalized.
+
 ## v0.6.4 — 2026-05-14
 
 ### Screenshots as proof — per-item-type contract for evidence

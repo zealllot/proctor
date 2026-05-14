@@ -3050,3 +3050,679 @@ def test_impact_radius_min_occurrences_tunable(tmp_path):
                                         min_occurrences=1)
     assert "single.go" not in with_threshold["files"]
     assert "single.go" in without_threshold["files"]
+
+
+# --- v0.6.5: per-item-type screenshot-contract validator ------------------
+
+from plugins.proctor.scripts.validate_screenshots_contract import (
+    classify_item,
+    check as ss_check,
+)
+
+
+# classify_item: each bucket has one canonical input pattern.
+
+def test_ss_classify_non_chrome_devtools_exempt():
+    assert classify_item({"tool": "bash", "what": "anything"}) == "not-chrome-devtools"
+    assert classify_item({"tool": "lint-only", "what": "anything"}) == "not-chrome-devtools"
+    assert classify_item({"tool": "curl", "what": "anything"}) == "not-chrome-devtools"
+
+
+def test_ss_classify_negative_via_error_type():
+    """error_type set ⇒ this is a validator-reject test (≥1)."""
+    item = {"tool": "chrome-devtools",
+            "what": "Reject blank Game URL",
+            "error_type": "validation"}
+    assert classify_item(item) == "negative"
+
+
+def test_ss_classify_edit_and_switch_via_what():
+    """The literal v0.6.4-doc anti-pattern wording must match."""
+    item = {"tool": "chrome-devtools",
+            "what": "edit reward, switch Digital Content Type from Image to Game",
+            "how": "..."}
+    assert classify_item(item) == "edit-and-switch"
+
+
+def test_ss_classify_edit_and_switch_via_change_type_from_to():
+    item = {"tool": "chrome-devtools",
+            "what": "Change Digital Content Type from Image to Game",
+            "how": "..."}
+    assert classify_item(item) == "edit-and-switch"
+
+
+def test_ss_classify_round_trip_via_hard_reload():
+    item = {"tool": "chrome-devtools",
+            "what": "Re-open saved Image reward; fields hard-reload to "
+                    "same values",
+            "how": "Navigate, hard-reload, verify."}
+    assert classify_item(item) == "round-trip"
+
+
+def test_ss_classify_round_trip_after_edit_not_misclassified_as_edit_switch():
+    """v0.6.7 regression: t-006b in the PR-1115 e2e run had
+    `what="HAPPY: re-open the just-edited reward — switched
+    DigitalContentType, GameUrl, CTA labels all persist after hard
+    reload"` and was misclassified as edit-and-switch because the
+    regex saw "edited" + "switched". A re-open verification is a
+    round-trip (2 screenshots), not an edit-and-switch (3) — no
+    save action happens in this item. Reorder check so unambiguous
+    re-open phrasing wins."""
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: re-open the just-edited reward — "
+                    "switched DigitalContentType, GameUrl, CTA "
+                    "labels all persist after hard reload",
+            "how": "Navigate to /edit page; hard-reload; assert "
+                   "DigitalContentType=Game and GameUrl value "
+                   "matches what was saved."}
+    assert classify_item(item) == "round-trip"
+
+
+def test_ss_classify_round_trip_via_round_trip_phrase():
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: re-open saved Image reward — DigitalContentType "
+                    "and asset round-trip correctly through the read path",
+            "how": "..."}
+    # Matches both happy AND round-trip; collapsed to round-trip per
+    # classifier ordering. Both demand 2, so no functional difference.
+    assert classify_item(item) == "round-trip"
+
+
+def test_ss_classify_happy_save_via_happy_prefix():
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: create Digital Download reward with type=Image "
+                    "and asset uploaded — save succeeds",
+            "how": "..."}
+    assert classify_item(item) == "happy-save"
+
+
+def test_ss_classify_render_check_default():
+    item = {"tool": "chrome-devtools",
+            "what": "Digital Download new-form renders new fields",
+            "how": "Navigate to /new; assert fields visible."}
+    assert classify_item(item) == "render-check"
+
+
+# check(): violations are produced when result has too few screenshots.
+
+def _make_plan_results(plan_items, result_items):
+    plan = {"items": plan_items}
+    statuses = [i.get("status", "pass") for i in result_items]
+    summary = {
+        "total": len(result_items),
+        "pass": statuses.count("pass"),
+        "fail": statuses.count("fail"),
+        "skipped": statuses.count("skipped"),
+    }
+    results = {"items": result_items, "summary": summary}
+    return plan, results
+
+
+def test_ss_check_render_check_one_screenshot_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "x.png", "label": "form", "focus": "fields"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_render_check_zero_screenshots_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-1" in violations[0]
+    assert ">=1" in violations[0]
+    assert "render-check" in violations[0]
+
+
+def test_ss_check_happy_save_two_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "filled", "focus": "form"},
+              {"path": "b.png", "label": "saved", "focus": "toast"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_happy_save_one_screenshot_flagged():
+    """The exact pre-v0.6.4 bug pattern: save items shipped with one
+    screenshot."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshot_ref": ".proctor/runs/x/t-2.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-2" in violations[0]
+    assert ">=2" in violations[0]
+    assert "happy-save" in violations[0]
+
+
+def test_ss_check_edit_and_switch_three_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-6", "tool": "chrome-devtools",
+          "what": "edit reward, switch Digital Content Type from Image to Game",
+          "how": "...", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-6", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "1.png", "label": "before", "focus": "Image"},
+              {"path": "2.png", "label": "after-change", "focus": "Game"},
+              {"path": "3.png", "label": "persisted", "focus": "reload"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_edit_and_switch_one_screenshot_flagged_the_t006_bug():
+    """The literal t-006 production bug the v0.6.4 contract was
+    introduced to prevent: 1 screenshot of a post-save detail page
+    when the test asserted on a form-state switch. v0.6.4 prose
+    contract failed to prevent it; v0.6.5 mechanical check catches
+    it before report render."""
+    plan, results = _make_plan_results(
+        [{"id": "t-006", "tool": "chrome-devtools",
+          "what": "edit reward, switch Digital Content Type from Image to Game",
+          "how": "Navigate to detail; change select; save; reload.",
+          "category": "api", "risk": "high", "depends_on": []}],
+        [{"id": "t-006", "status": "pass",
+          "evidence": "Reloaded; type=Game.",
+          "screenshot_ref": ".proctor/runs/x/t-006.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-006" in violations[0]
+    assert ">=3" in violations[0]
+    assert "edit-and-switch" in violations[0]
+
+
+def test_ss_check_round_trip_two_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-3", "tool": "chrome-devtools",
+          "what": "HAPPY: re-open saved Image reward — fields round-trip",
+          "how": "navigate + hard-reload", "category": "api",
+          "risk": "high", "depends_on": []}],
+        [{"id": "t-3", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "before-reload", "focus": "f1"},
+              {"path": "b.png", "label": "after-reload", "focus": "f1"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_round_trip_one_screenshot_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-3", "tool": "chrome-devtools",
+          "what": "HAPPY: re-open saved Image reward — fields round-trip",
+          "how": "navigate + hard-reload", "category": "api",
+          "risk": "high", "depends_on": []}],
+        [{"id": "t-3", "status": "pass", "evidence": "ok",
+          "screenshot_ref": "x.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "round-trip" in violations[0]
+    assert ">=2" in violations[0]
+
+
+def test_ss_check_negative_one_screenshot_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-7", "tool": "chrome-devtools",
+          "what": "Reject blank Game URL",
+          "how": "fill+save", "category": "api", "risk": "medium",
+          "depends_on": [], "error_type": "validation"}],
+        [{"id": "t-7", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "e.png", "label": "err", "focus": "field+toast"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_negative_zero_screenshots_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-7", "tool": "chrome-devtools",
+          "what": "Reject blank Game URL",
+          "how": "fill+save", "category": "api", "risk": "medium",
+          "depends_on": [], "error_type": "validation"}],
+        [{"id": "t-7", "status": "pass", "evidence": "ok"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "negative" in violations[0]
+    assert ">=1" in violations[0]
+
+
+def test_ss_check_non_chrome_devtools_item_not_enforced():
+    """Bash/lint/curl items aren't screenshot-bearing; the validator
+    must not demand screenshots from them."""
+    plan, results = _make_plan_results(
+        [{"id": "t-10", "tool": "bash",
+          "what": "verify protobuf tags",
+          "how": "grep", "category": "schema", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-10", "status": "pass", "evidence": "ok",
+          "screenshot_ref": None}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_skipped_item_exempt():
+    """A skipped item didn't run, can't have a screenshot — the
+    empirical-grounding validator is the right tool for those."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "skipped",
+          "reason": "precondition-not-met",
+          "evidence": "server returned HTTP 503"}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_legacy_screenshot_ref_counted_for_render_check():
+    """v0.6.3-and-earlier results may legitimately set only the
+    legacy `screenshot_ref` field. For render-check (min 1) that
+    is sufficient; for happy-save (min 2) it is not. Backward
+    compatibility preserved at the floor, not above it."""
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshot_ref": ".proctor/runs/x/t-1.png"}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_screenshots_entry_missing_focus_not_counted():
+    """A `screenshots` list entry that omits the required `focus`
+    field is not a valid screenshot per schema — and so cannot
+    count toward the minimum, even though the file exists."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "filled", "focus": "form"},
+              {"path": "b.png", "label": "saved"},  # focus missing
+          ]}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert ">=2" in violations[0]
+
+
+def test_ss_check_pinned_pre_v064_run_flagged_top_to_bottom():
+    """Pin the literal pre-v0.6.4 t-002/t-003/t-005/t-006 result-
+    shape (single legacy screenshot_ref, no list) against a plan
+    representative of the PR-#1115 plan. Without v0.6.5 every
+    happy-save / round-trip / edit-and-switch item would render in
+    a report with insufficient evidence — v0.6.5 flags every one
+    so the gap is visible BEFORE report render."""
+    plan_items = [
+        {"id": "t-002", "tool": "chrome-devtools",
+         "what": "HAPPY: create Digital Download reward with type=Image — save succeeds",
+         "how": "...", "category": "api", "risk": "high", "depends_on": []},
+        {"id": "t-003", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open saved Image reward — fields round-trip",
+         "how": "navigate + hard-reload", "category": "api",
+         "risk": "high", "depends_on": []},
+        {"id": "t-006", "tool": "chrome-devtools",
+         "what": "edit reward, switch Digital Content Type from Image to Game",
+         "how": "...", "category": "api", "risk": "high", "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-002", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-002.png"},
+        {"id": "t-003", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-003.png"},
+        {"id": "t-006", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-006.png"},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results)
+    # All three flagged.
+    assert len(violations) == 3
+    ids = "\n".join(violations)
+    assert "t-002" in ids and "happy-save" in ids
+    assert "t-003" in ids and "round-trip" in ids
+    assert "t-006" in ids and "edit-and-switch" in ids
+
+
+def test_ss_check_results_with_unmatched_plan_id_skipped():
+    """An item present in results but absent from plan is silently
+    skipped — that's planner/executor drift, not this script's
+    concern."""
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [
+            {"id": "t-1", "status": "pass", "evidence": "ok",
+             "screenshots": [{"path": "x.png", "label": "f", "focus": "fl"}]},
+            {"id": "t-999-orphan", "status": "pass", "evidence": "ok"},
+        ],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_plan_item_with_no_result_skipped():
+    """Conversely, a plan item with no matching result is also out
+    of scope — that's an execution-completeness check elsewhere."""
+    plan, results = _make_plan_results(
+        [
+            {"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+             "how": "navigate", "category": "frontend", "risk": "low",
+             "depends_on": []},
+            {"id": "t-2", "tool": "chrome-devtools",
+             "what": "HAPPY: create reward — save succeeds",
+             "how": "...", "category": "api", "risk": "high",
+             "depends_on": []},
+        ],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshots": [{"path": "x.png", "label": "f", "focus": "fl"}]}],
+    )
+    # Only t-1 has a result; it passes. t-2 has no result; not flagged.
+    assert ss_check(plan, results) == []
+
+
+# --- v0.6.8: identical-negative-screenshot byte-size lint -----------------
+# The v0.6.6 mcd-website run shipped t-007/t-008/t-009 with three
+# byte-identical 244252-byte PNGs (the blank Add-Digital-Content form).
+# Each evidence string claimed an error chip rendered; the screenshots
+# proved it had not. Root cause: Pattern A submit used fetch() — server
+# returned 422 + error HTML but the browser DOM did not re-render. The
+# lint catches that pattern mechanically by comparing primary-screenshot
+# byte sizes across negative items.
+
+def test_ss_check_identical_negative_screenshots_warns(tmp_path):
+    """Synthesize two negative items pointing at the SAME 100KB+ stub
+    file; check returns a violation containing both item IDs and the
+    byte size. This is the literal v0.6.6 t-007/t-008 signature
+    (244252-byte PNG used as both screenshots)."""
+    # Write a single 100KB+ stub file the two items will reference.
+    stub = tmp_path / "screenshots" / "shared-blank-form.png"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"\x89PNG\r\n\x1a\n" + b"x" * 244244  # 244252 bytes, the t-006 signature
+    stub.write_bytes(payload)
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject blank Game URL",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject DCT empty",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared-blank-form.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared-blank-form.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    # Exactly one violation — the (t-7, t-8) pair.
+    assert len(violations) == 1
+    msg = violations[0]
+    assert "t-7" in msg and "t-8" in msg
+    assert str(len(payload)) in msg  # the byte size is reported
+    assert "identical" in msg.lower()
+
+
+def test_ss_check_distinct_negative_screenshots_ok(tmp_path):
+    """Two negative items pointing at different files of different
+    sizes return 0 violations."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    # Two distinct stubs at different sizes, both above the 50KB floor.
+    (ss_dir / "err-dct-required.png").write_bytes(b"\x89PNG" + b"a" * 120000)
+    (ss_dir / "err-gameurl-required.png").write_bytes(b"\x89PNG" + b"b" * 130000)
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "err-dct-required.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "err-gameurl-required.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_below_floor_not_flagged(tmp_path):
+    """Two negative items pointing at the SAME tiny stub (e.g. an
+    empty sentinel under the 50KB floor) are NOT flagged. The floor
+    exists so legitimate tiny stubs don't trip the check."""
+    stub = tmp_path / "screenshots" / "tiny-sentinel.png"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_bytes(b"\x89PNG" + b"x" * 100)  # ~100 bytes, well below floor
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "tiny-sentinel.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "tiny-sentinel.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_happy_save_screenshots_ok(tmp_path):
+    """The lint targets NEGATIVE items only. Two happy-save items
+    legitimately sharing a 'before' screenshot (e.g. they both
+    start from the same blank form) must NOT be flagged — only
+    negatives are checked, because for negatives the asserted
+    artifact IS the rendered error."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "shared-form.png").write_bytes(b"\x89PNG" + b"x" * 200000)
+    plan_items = [
+        {"id": "t-2", "tool": "chrome-devtools",
+         "what": "HAPPY: create Image reward — save succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-4", "tool": "chrome-devtools",
+         "what": "HAPPY: create Game reward — save succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-2", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+         ]},
+        {"id": "t-4", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+         ]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    # No violations — the lint only flags identical NEGATIVE
+    # screenshots, and these are happy-save items.
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_no_run_dir_skipped(tmp_path):
+    """Without a run_dir, the lint can't resolve files to bytes, so it
+    skips silently (rather than emit false negatives). The count-based
+    contract still runs."""
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "x.png", "label": "e", "focus": "c"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "x.png", "label": "e", "focus": "c"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    # Even though they reference the same path, without run_dir the
+    # byte-size lint is skipped. Both items satisfy the count
+    # contract (negative needs >=1) so 0 violations.
+    assert ss_check(plan, results) == []
+
+
+# ===== v0.6.6: satisfying-form-preconditions skill detection =====
+# Pins the upstream-validator detection regex against the exact error
+# strings observed in the v0.6.5 t-002 evidence ("Reward Image cannot be
+# blank") plus the generic family. If a future executor rewrite drops the
+# detection logic, this test catches it.
+
+import re
+
+# This is the canonical detection regex documented in
+# plugins/proctor/skills/satisfying-form-preconditions/SKILL.md "Detection"
+# section, item 4. Any change to the SKILL must update this regex too.
+PRECONDITION_TRIGGER_RE = re.compile(
+    r"(cannot be blank|is required|must be present)",
+    re.IGNORECASE,
+)
+
+
+def _detect_upstream_validator_block(response_body: str) -> list[str]:
+    """Return the list of upstream-validator error phrases found in a
+    save-flow response body. Empty list means no precondition gap.
+
+    This mirrors what the satisfying-form-preconditions skill instructs
+    the executor to check after every save-attempt that didn't redirect
+    to the new-record URL.
+    """
+    return [m.group(0) for m in PRECONDITION_TRIGGER_RE.finditer(response_body)]
+
+
+def test_satisfying_form_preconditions_detection():
+    """The detector must fire on the EXACT error string observed in
+    the v0.6.5 PR-#1115 run, plus the documented generic family.
+
+    Failure-mode this regression guards against: an executor refactor
+    that narrows the trigger to a single literal (e.g. only matching
+    "Reward Image cannot be blank") would miss every other app's
+    upstream-validator gate. Conversely, a regex that's too loose
+    would fire on the test's OWN asserted error message and cause the
+    executor to falsely bypass a legitimate negative test.
+    """
+    # The literal observed in t-002 evidence of run
+    # pr1115-e6a7c79-828594b8 (v0.6.5 run that motivated this skill).
+    v065_t002_response = (
+        "<div class='qor-error'>Reward Image cannot be blank</div>\n"
+        "<div class='qor-error'>Points Required for Exchange is required</div>"
+    )
+    hits = _detect_upstream_validator_block(v065_t002_response)
+    # Both errors must be detected — different validators, same family.
+    assert "cannot be blank" in hits
+    assert "is required" in hits
+    assert len(hits) == 2, f"expected 2 hits in the t-002 response, got {hits!r}"
+
+    # Generic Rails / Django shapes — must also fire.
+    rails_response = "<p class='error'>Name must be present</p>"
+    assert _detect_upstream_validator_block(rails_response) == ["must be present"]
+
+    # Capitalization-tolerant (some apps emit "Cannot be blank" not lowercase).
+    capitalized = "<span>Email Cannot Be Blank</span>"
+    assert _detect_upstream_validator_block(capitalized) == ["Cannot Be Blank"]
+
+    # Negative case 1: a happy-path response with no validator block
+    # MUST NOT fire (otherwise we'd bypass every test).
+    happy = "<title>Edit Digital Content - MCD</title><h1>Saved!</h1>"
+    assert _detect_upstream_validator_block(happy) == []
+
+    # Negative case 2: the asserted negative-test error message that
+    # the v0.6.6 skill must NOT bypass. "Game URL is not a valid URL"
+    # is the DigitalContent-Validator's own message; if the test
+    # asserted on THAT, this is the EXPECTED response, not a
+    # precondition gap. The detector itself doesn't know which is
+    # asserted-vs-blocking — that's the executor's job from the item's
+    # how:. But the detector MUST NOT falsely fire on this string
+    # alone (it doesn't contain "cannot be blank" / "is required" /
+    # "must be present").
+    asserted_neg = "<div class='qor-error'>Game URL is not a valid URL</div>"
+    assert _detect_upstream_validator_block(asserted_neg) == []
+
+    # Negative case 3: descriptive prose that mentions one of the
+    # trigger phrases but inside an evidence/comment string MUST still
+    # fire — the detector is intentionally lenient, the executor's
+    # decision logic narrows it.
+    prose = "Note: the field is required for the next step."
+    assert _detect_upstream_validator_block(prose) == ["is required"]
+
+
+def test_satisfying_form_preconditions_skill_file_present():
+    """The skill file MUST exist under the expected path. The agent
+    references it by absolute path in section 2c; if the file moves
+    or is deleted, the agent's instruction is broken silently."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills"
+        / "satisfying-form-preconditions" / "SKILL.md"
+    )
+    assert skill_path.exists(), (
+        f"missing skill file: {skill_path}. The v0.6.6 executor agent "
+        "(plugins/proctor/agents/pr-test-executor.md section 2c) "
+        "references this skill by path; deleting it breaks the executor's "
+        "fallback for upstream-validator preconditions."
+    )
+    body = skill_path.read_text(encoding="utf-8")
+    # Front-matter sanity: name + description must be set per the
+    # skill loader convention.
+    assert "name: satisfying-form-preconditions" in body
+    assert "description:" in body
+    # Pattern A must be documented (the no-upload bypass). If a future
+    # edit deletes Pattern A entirely, the agent's recovery path is
+    # gone.
+    assert "Pattern A" in body
+    assert "existing-record reuse" in body

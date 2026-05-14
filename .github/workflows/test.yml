@@ -26,6 +26,3 @@ jobs:
 
       - name: Validate Action manifest
         run: python -c "import yaml; yaml.safe_load(open('github-action/action.yml'))"
-
-      - name: Validate example config
-        run: python -c "import yaml; yaml.safe_load(open('examples/.pr-test.yml'))"
