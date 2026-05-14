@@ -445,6 +445,20 @@ def validate_pr_test_config(cfg: dict) -> None:
     feedback instead of a silent misconfiguration mid-run."""
     _require(isinstance(cfg, dict), ".proctor/config.yml: must be a mapping")
 
+    # worktree_symlink_dirs (v0.7.0+) — optional list of repo-relative
+    # dirs to symlink from the main checkout into the PR-aligned
+    # worktree so the dev server doesn't have to rebuild gitignored
+    # runtime artifacts (e.g. `external/assets`, `node_modules`). When
+    # unset, `worktree.py` uses its built-in default list; when set to
+    # `[]`, all symlinking is skipped.
+    if "worktree_symlink_dirs" in cfg and cfg["worktree_symlink_dirs"] is not None:
+        wsd = cfg["worktree_symlink_dirs"]
+        _require(isinstance(wsd, list),
+                 ".proctor/config.yml.worktree_symlink_dirs must be a list if set")
+        for i, d in enumerate(wsd):
+            _require(isinstance(d, str) and d.strip(),
+                     f".proctor/config.yml.worktree_symlink_dirs[{i}] must be a non-empty string")
+
     auth = cfg.get("auth")
     if auth is None:
         return  # legacy mode, nothing more to check at config level

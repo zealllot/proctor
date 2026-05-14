@@ -2,6 +2,42 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.0 — 2026-05-14
+
+### Four performance fixes — typical e2e wall-clock ~37min → ~15min
+
+The v0.6.9 e2e against mcd-website PR #1126 (run-id `pr1126-75eea89-b7a2689b`) finished cleanly but spent ~37min wall-clock on work that, on inspection, was avoidable rework: chrome MCP tools the executor never loaded, bash paths broken by a stray `cd`, missing gitignored build dirs the orchestrator had to symlink by hand after a server restart, and three sequential Python startups for impact-radius analysis. This release lands four surgical fixes against those observations.
+
+### Fix #1 — Executor agent must actually use chrome-devtools (~10min saved)
+
+Observed: the pr-test-executor subagent ran for 6m38s / 52 tool uses but ALL chrome work was HTTP fetches. Items t-007..t-011 had `screenshot_ref` pointing at fake placeholder paths under `logs/` (wrong dir). After the subagent returned, the v0.6.5 screenshot-contract lint caught the gap and the orchestrator had to re-capture 8 screenshots manually — doubling the chrome work.
+
+Root cause: `tools: ..., mcp__chrome-devtools__*, mcp__claude-in-chrome__*` in the agent frontmatter uses the glob form, but in this Claude Code session MCP tools are deferred-loaded and the glob doesn't trigger `ToolSearch`. The agent sees the tools listed but they're empty stubs and falls back to HTTP.
+
+Fix: `plugins/proctor/agents/pr-test-executor.md` frontmatter now lists the explicit chrome-devtools tool names plus `ToolSearch`. New "### 0. Tool pre-flight (v0.7.0+)" section at the top of the procedure mandates a single `ToolSearch(query="select:mcp__chrome-devtools__...")` call BEFORE any test decision, and an explicit anti-pattern forbids writing `screenshot_ref` to a path under `logs/` instead of `screenshots/`.
+
+### Fix #2 — Lint/bash paths from consumer root (~5min saved)
+
+Observed: the SKILL drove inline lint items with `WT=.proctor/runs/.../pr-checkout` then ran commands like `cd $WT && grep $WT/path` — cwd-after-cd left worktree-anchored paths broken. Trace shows 6+ retries with `ugrep: warning: ... No such file or directory` before the orchestrator settled on "always from consumer repo root using worktree-relative path".
+
+Fix: `plugins/proctor/skills/executing-pr-tests/SKILL.md` gains a new mandatory "Working directory contract (v0.7.0+)" subsection BEFORE the per-item dispatch loop. All inline lint/bash items now run from the CONSUMER REPO ROOT with worktree-relative paths (`grep "$WT/path/to/file.go"`, never `cd "$WT" && grep path/to/file.go`). The dev-server-startup exception (`go run` / `pnpm dev`) is called out explicitly.
+
+### Fix #3 — worktree.py auto-symlinks runtime build dirs (~3min saved)
+
+Observed: server started from worktree but `external/assets/mcd/` (gitignored frontend build output) was missing inside the worktree, so the server returned blank pages. Orchestrator killed server, manually symlinked the dir, restarted. Cost ~3min on the restart cycle.
+
+Fix: `plugins/proctor/scripts/worktree.py` `setup()` now accepts `symlink_dirs: list[str] | None`. Default list covers the common gitignored runtime-built dirs (`external/assets`, `node_modules`, `dist`, `build`, `.next`, `vendor`); each is symlinked from the main checkout into the worktree only if the source exists and the worktree path is free (won't overwrite tracked dirs). New `--symlink-dirs` CLI flag exposes the override (comma-separated; empty string skips all). `schema.py` recognizes a new optional `worktree_symlink_dirs: list[str]` field in `.proctor/config.yml`, and `skills/executing-pr-tests/SKILL.md` plumbs it through.
+
+### Fix #4 — impact_radius batch mode (~1min saved)
+
+Observed: Stage 1 (analyze) calls `impact_radius.py --file X` once per changed file. PR #1126 had 3 files → 3 sequential Python startups (each ~300-500ms for the import + grep + walk).
+
+Fix: `plugins/proctor/scripts/impact_radius.py` accepts repeatable `--file` (also spelled `--files`). With one file passed, output shape is preserved (`{files, truncated}`) for backward compatibility. With two or more, output is a JSON object keyed by file path, and `collect_callers` runs in a `ThreadPoolExecutor(max_workers=3)` since each invocation is IO-bound on `git grep`. `skills/analyzing-pr-changes/SKILL.md` documents the new batch invocation as the preferred shape when two or more hunks need impact analysis.
+
+### Tests
+
+276 → 284. New tests pin the symlink behavior (default-runtime-dirs linked, absent source skipped, `symlink_dirs=[]` skips all, custom override list, schema accept/reject) and the batch-mode CLI shape (multi-file emits dict keyed by path, single-file preserves the v0.3.26 raw shape).
+
 ## v0.6.9 — 2026-05-14
 
 ### Removed `/proctor-drive` — subagent dispatch was a dead-end
