@@ -1024,6 +1024,152 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.4.5: wizard_decide_mode deterministic MODE picker ---------------
+
+from plugins.proctor.scripts.wizard_decide_mode import (
+    detect_state as wdm_state,
+    decide_mode as wdm_decide,
+)
+
+
+def _make_v04_repo(tmp_path, *, has_local_yml=False, pin="v0.4.3",
+                   has_seed_script=True):
+    """Build a v0.4.0-layout consumer repo fixture under tmp_path."""
+    (tmp_path / ".proctor").mkdir()
+    (tmp_path / ".proctor" / "config.yml").write_text(
+        "base_url: http://localhost:9801\n"
+        "auth:\n"
+        "  type: form_with_totp\n"
+        "  login_url: /auth/login\n"
+        "  selectors: {email: i, password: i, totp: i, submit: b}\n"
+        "  accounts:\n"
+        "    - name: developer\n"
+        "      email: x\n"
+        "      password: y\n"
+        "      totp_seed: JBSWY3DPEHPK3PXP\n"
+    )
+    if has_seed_script:
+        seed = tmp_path / ".proctor" / "seed-local.sh"
+        seed.write_text("#!/usr/bin/env bash\necho ok\n")
+        seed.chmod(0o755)
+    if has_local_yml:
+        (tmp_path / ".proctor" / "local.yml").write_text("base_url: x\n")
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "workflows").mkdir()
+    (tmp_path / ".github" / "workflows" / "proctor.yml").write_text(
+        f"uses: zealllot/proctor/github-action@{pin}\n"
+    )
+    return tmp_path
+
+
+def test_wdm_fresh_install_with_nothing_present(tmp_path):
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "fresh"
+    assert d["ask_user"] is None
+
+
+def test_wdm_legacy_layout_detected(tmp_path):
+    (tmp_path / ".pr-test.yml").write_text("base_url: x\n")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "legacy-migration"
+    assert d["ask_user"] is not None
+    assert "v0.4.0" in d["ask_user"]["question"]
+
+
+def test_wdm_needs_local_regen_fires_on_user_scenario(tmp_path):
+    """The EXACT scenario the user hit: v0.4.0 layout, seed script
+    present, local.yml MISSING, pin out of date. Must pick
+    needs-local-regen (NOT bump-only)."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.3")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "needs-local-regen"
+    assert d["ask_user"] is not None
+    assert "Regenerate seed-local.sh AND re-run it" in d["ask_user"]["options"][0]["label"]
+
+
+def test_wdm_bump_only_when_local_yml_present_and_pin_old(tmp_path):
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.3")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "bump-only"
+    assert d["ask_user"] is None
+
+
+def test_wdm_current_when_pin_matches_and_local_present(tmp_path):
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.4")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "current"
+    assert d["ask_user"] is None
+
+
+def test_wdm_bump_only_with_seed_when_seed_script_missing(tmp_path):
+    _make_v04_repo(tmp_path, has_local_yml=False, has_seed_script=False)
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    # Seed script missing but auth block present → regenerate seed
+    # script via Step 8c-pre (no user input needed).
+    assert d["mode"] == "bump-only-with-seed"
+    assert d["ask_user"] is None
+
+
+def test_wdm_migrate_when_no_auth_block(tmp_path):
+    (tmp_path / ".proctor").mkdir()
+    (tmp_path / ".proctor" / "config.yml").write_text(
+        "base_url: x\nsetup: [echo hi]\n"
+    )
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "workflows").mkdir()
+    (tmp_path / ".github" / "workflows" / "proctor.yml").write_text(
+        "uses: zealllot/proctor/github-action@v0.2.5\n"
+    )
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.4.4")
+    assert d["mode"] == "migrate"
+    assert d["ask_user"] is not None
+
+
+def test_wdm_current_tag_missing_does_not_force_bump_only(tmp_path):
+    """When current-tag lookup fails (gh release view failed), don't
+    fire spurious bump-only — just report 'current'."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.4")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag=None)
+    assert d["mode"] == "current"
+
+
+def test_wdm_state_detects_pin(tmp_path):
+    _make_v04_repo(tmp_path, pin="v0.4.3", has_local_yml=True)
+    state = wdm_state(tmp_path)
+    assert state["current_pin"] == "v0.4.3"
+
+
+def test_wdm_state_pin_none_when_workflow_missing(tmp_path):
+    state = wdm_state(tmp_path)
+    assert state["current_pin"] is None
+
+
+def test_wdm_cli_outputs_valid_json(tmp_path):
+    import subprocess
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.3")
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts"
+                 / "wizard_decide_mode.py")
+    result = subprocess.run(
+        ["python3", script, "--current-tag", "v0.4.4",
+         "--repo-root", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert data["mode"] == "needs-local-regen"
+    assert data["state"]["has_local_yml"] is False
+    assert data["ask_user"] is not None
+
+
 # --- v0.4.3: render_plan_table for the approval-gate ---------------------
 
 from plugins.proctor.scripts.render_plan_table import render as render_table

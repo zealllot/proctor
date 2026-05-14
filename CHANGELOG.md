@@ -2,6 +2,54 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.5 — 2026-05-14
+
+### Wizard MODE decision moved into a deterministic script — fixes silent NEEDS_LOCAL_REGEN skip
+
+v0.4.4 added a NEEDS_LOCAL_REGEN branch to the wizard so it would AskUserQuestion when `.proctor/local.yml` was missing. The user's real run on v0.4.4 silently skipped that branch and went bump-only anyway. Subagent diagnosis: the AI walked the MODE-detection prose bullets, found a later "bump-only by pin age" bullet keyed on directly-observable file facts (`grep workflow for current pin`), matched it, and never re-evaluated whether the earlier NEEDS_LOCAL_REGEN bullet — keyed on a detection-block-computed variable — should have fired first.
+
+This is the same class of failure mode as v0.4.3 fixed for the approval-gate render: prose-driven AI control flow with multiple plausible branches doesn't reliably pick the right branch. The structural fix is the same: move the decision out of prose into a deterministic script.
+
+**New helper** (`plugins/proctor/scripts/wizard_decide_mode.py`):
+- Reads the consumer repo's actual file state (config.yml, local.yml, seed script, workflow pin, auth block).
+- Walks priority-ordered rules and prints a single JSON object: `{state, mode, next_action, ask_user}`.
+- `mode` is one of: `fresh`, `legacy-migration`, `needs-local-regen`, `bump-only-with-seed`, `migrate`, `bump-only`, `current`.
+- `ask_user` is `null` (no input needed) or a `{header, question, options[]}` AskUserQuestion spec.
+- The priority ordering encodes which scenarios "win" when multiple are technically true: legacy-migration first (must migrate before evaluating anything else), then needs-local-regen, then seed-script regeneration, then v0.2→v0.3 migrate, then pin bump, then current. The NEEDS_LOCAL_REGEN case can no longer be swallowed by a later bump-only rule because the script returns a single answer.
+
+**Wizard** (`commands/proctor-init.md` Section 0.5):
+- New "v0.4.5+ deterministic decision (REQUIRED FIRST STEP)" block at the top of MODE detection.
+- AI's procedure: (1) run the script, (2) read the `mode` field — THAT is the branch, (3) if `ask_user` is non-null, immediately AskUserQuestion with that spec.
+- The existing prose bullets are demoted from "decision tree" to "MODE reference look-up table". Section header changed from "Branch on what's there" to "MODE reference (script picked one of these — look up the action; do NOT re-evaluate against these conditions)".
+- MODE summary table gained rows for `legacy-migration`, `needs-local-regen`, `bump-only-with-seed`, `current` (previously only `fresh`/`migrate`/`bump-only` were covered).
+
+### Why this is the right fix (and what's still TODO)
+
+The script removes the AI's discretion at the decision point. Once the right `mode` is in JSON, the AI's remaining job is mechanical: dispatch the AskUserQuestion. This pattern — moving deterministic decisions out of AI prose — is the same one v0.4.3 used for the approval-gate render. The lesson: every place the AI has prose-driven discretion between "I observed state X" and "I should take action Y", a script is a more reliable bridge than a bulleted list.
+
+Still TODO (separate ship): the wizard ALSO stalls between sequential steps (the user typed "继续" three times during the v0.4.4 run, after commit, after push, after seed). The decision script doesn't address that — it's a different pattern (sequential-procedure stall vs. branching-decision stall). v0.5 territory.
+
+### Tests
+- 179 → 190 (+11): scenario coverage for every rule branch — fresh install, legacy layout, needs-local-regen on the exact user scenario (the test case is literally "the bug the user hit on v0.4.4"), bump-only when local.yml present + pin old, current when pin matches + local present, bump-only-with-seed when seed script missing, migrate when no auth block, current-tag missing doesn't force bump-only, pin extraction, pin-none when workflow missing, CLI emits valid JSON.
+
+### How to use
+
+```bash
+claude plugins remove proctor
+claude plugins marketplace remove zealllot-proctor
+claude plugins marketplace add zealllot/proctor
+claude plugins install proctor@zealllot-proctor
+
+cd <repo>
+claude
+/proctor:proctor-init
+# Wizard runs the decision script first thing.
+# For the missing-local-yml scenario: AskUserQuestion fires with 3
+# options. Pick "Regenerate seed-local.sh AND re-run it (Recommended)"
+# to walk Step 7f setup-confirmation (catches wrong env-source which
+# is what likely produced the chacha20poly1305 errors earlier).
+```
+
 ## v0.4.4 — 2026-05-14
 
 ### Wizard detects missing `.proctor/local.yml` (don't silently fall through to bump-only)

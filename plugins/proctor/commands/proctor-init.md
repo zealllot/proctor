@@ -145,7 +145,28 @@ echo "  git status              # see the renames git tracked"
 
 Then continue to normal MODE branching below (re-evaluate the env vars after the migration — `LEGACY_LAYOUT` flips to empty, `NEW_LAYOUT=yes`).
 
-Branch on what's there:
+**v0.4.5+ deterministic decision (REQUIRED FIRST STEP)**
+
+Before reading the prose bullets below, **run the decision script** to get an unambiguous MODE pick. The bullets are documentation of what each MODE means; the script is the source of truth for which MODE to use. The v0.3-and-earlier "AI walks bullets, picks first match" flow failed in production because the AI silently skipped bullets keyed on detection-block-computed variables. The script removes that failure mode.
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_decide_mode.py \
+    --current-tag "$CURRENT_TAG" \
+    --repo-root .
+```
+
+Output is JSON with shape `{state, mode, next_action, ask_user}`:
+- `mode` is one of: `fresh`, `legacy-migration`, `needs-local-regen`, `bump-only-with-seed`, `migrate`, `bump-only`, `current`
+- `ask_user` is either `null` (no user input needed; execute `next_action` directly) or an object with `{header, question, options[]}` — surface as an AskUserQuestion call.
+
+**You MUST**:
+1. Run the script.
+2. Read the `mode` field. THAT is the branch — do not re-derive from the file facts below.
+3. If `ask_user` is non-null, immediately call AskUserQuestion with those options; otherwise execute the `next_action` for the chosen mode.
+
+The bullets below describe what each MODE does. Use them to look up the action — NOT to pick the mode (the script already picked).
+
+MODE reference (script picked one of these — look up the action; do NOT re-evaluate against these conditions):
 
 - **Neither file exists** → fresh install. Set `MODE=fresh`. Continue to Step 1.
 - **`NEEDS_LOCAL_REGEN=yes`** (v0.4.4+) → seed script exists but `.proctor/local.yml` is missing. Developer either never ran the seed script, or deleted local.yml because it was broken and expects regeneration. AskUserQuestion:
@@ -182,9 +203,12 @@ Branch on what's there:
 | MODE | Skip Step 1–6 | Run Section 7 | Run Step 8c-pre (seed script) | Apply via |
 |---|---|---|---|---|
 | `fresh` | — | — | always | Step 1 onward |
+| `legacy-migration` | yes | — | — | Section 0.5 migration block, then re-evaluate via the script |
+| `needs-local-regen` | depends on the option the user picked | option-1: yes (re-runs Section 7) | option-1: yes; option-2/3: no | After AskUserQuestion: option-1 maps to `migrate` semantics; option-2 just emits the run-the-seed-script hint; option-3 falls through to bump-only |
 | `migrate` | yes | yes | always | Section 7 + Section 8 patcher |
 | `bump-only` (full v0.3) | yes | — | — | Section 8 patcher (version only) |
-| `bump-only` + `NEEDS_SEED_SCRIPT=yes` | yes | — | yes | Section 8 patcher + Step 8c-pre only |
+| `bump-only-with-seed` | yes | — | yes | Section 8 patcher + Step 8c-pre only |
+| `current` | — | — | — | Print "PRoctor is already integrated and up to date" and stop |
 
 For `migrate` and `bump-only`, **do NOT call out to Sections 1–6**; they're CI-bring-up flow only.
 
