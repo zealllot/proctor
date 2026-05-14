@@ -37,9 +37,9 @@ git clone https://github.com/zealllot/proctor /path/to/proctor
 claude plugin add /path/to/proctor/plugins/proctor
 ```
 
-### 2. Add `.pr-test.yml` to your repo
+### 2. Add `.proctor/config.yml` to your repo
 
-Drop this at the repo root and edit for your stack. See `examples/.pr-test.yml` in this repo for an annotated reference.
+The easiest path is `claude /proctor:proctor-init` — the wizard generates this file for you. Or drop the snippet below at `.proctor/config.yml` and edit for your stack.
 
 ```yaml
 setup:

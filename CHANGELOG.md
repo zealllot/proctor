@@ -18,11 +18,14 @@ The right answer is simpler than the v0.6.1 workaround claimed:
 | Local interactive | `/proctor:proctor <PR>` (you type it) | Plugin installed in your session — Skills are registered. Stall → type `continue`. |
 | CI | `claude --print "/proctor:proctor <PR>"` (in `github-action/action.yml`) | Non-interactive mode loops on tool calls without turn-model stops. |
 
-**Removed**: `plugins/proctor/commands/proctor-drive.md`.
+**Removed**: `plugins/proctor/commands/proctor-drive.md` (78 lines) + `examples/.pr-test.yml` (37 lines) + the CI step that validated the example. The example file documented the v0.3.x `.pr-test.yml` layout that v0.4.0 replaced with `.proctor/config.yml`; the wizard now generates the current shape so a stale example serves no purpose.
 
-**Updated**: `commands/proctor.md` top section. Replaced the misleading "if you stalled use /proctor-drive instead" prose with the scenario table above, plus an explicit "do not dispatch from subagent" warning.
+**Updated**:
+- `commands/proctor.md` top section — replaced the misleading "if you stalled use /proctor-drive instead" prose with a scenario table (local / CI) plus an explicit "do not dispatch from subagent" warning.
+- `README.md` — fixed three references from `.pr-test.yml` to `.proctor/config.yml`.
+- `docs/INTEGRATION.md` — removed the dangling `examples/.pr-test.yml` link, point at the wizard instead.
 
-No code change, no test change. Plugin shrinks 78 lines.
+No code change, no test change. 276 tests still pass. Net plugin/docs −115 lines / +12.
 
 ## v0.6.8 — 2026-05-14
 
