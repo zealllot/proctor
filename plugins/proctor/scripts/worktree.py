@@ -49,31 +49,61 @@ from pathlib import Path
 # Add other paths here if a wider class of repos needs them.
 _GITIGNORED_FILES_TO_COPY = [".proctor/local.yml"]
 
-# Common gitignored runtime-built directories worth symlinking from the
-# main repo into the worktree so the dev server doesn't have to rebuild
-# them. Each entry must exist at the main repo root to be linked.
-# Override via .proctor/config.yml's `worktree_symlink_dirs` field.
-#
-# v0.7.1 — entries can be sub-paths (e.g. ``external/assets/mcd``) when
-# the parent dir is tracked but a gitignored sub-dir inside it carries
-# the runtime artifact. The original ``external/assets`` entry didn't
-# work for the mcd-website repo because ``external/assets/`` itself is
-# tracked (with ``fonts/`` + ``images/``) — only ``external/assets/mcd``
-# (the frontend webpack bundle) is gitignored, so the symlink-the-
-# parent strategy from v0.7.0 silently no-op'd. We now list both:
-# the parent (for repos where the whole dir is gitignored) AND the
-# sub-path (for repos where only one sub-dir is gitignored). worktree.py
-# tries each entry independently and links whichever exists at the repo
-# root but doesn't yet exist in the worktree.
-_DEFAULT_GITIGNORED_DIRS_TO_SYMLINK = [
-    "external/assets",       # whole-dir variant (some consumer repos)
-    "external/assets/mcd",   # sub-path variant (mcd-website: parent is tracked, mcd/ is gitignored)
-    "node_modules",          # JS deps
-    "dist",                  # generic build output
-    "build",                 # generic build output
-    ".next",                 # Next.js
-    "vendor",                # Go vendoring (rare with go.mod, but...)
-]
+# Directories we NEVER symlink into the worktree even when they're
+# gitignored. ``.git/`` is structural to git itself; ``.proctor/`` is
+# PRoctor-owned (the worktree's `.proctor/runs/<id>/` is where this very
+# run lives — symlinking the consumer's `.proctor/` would create a
+# self-reference loop).
+_NEVER_SYMLINK = frozenset({".git", ".proctor"})
+
+
+def _discover_gitignored_dirs(repo_root: Path) -> list[str]:
+    """Ask git which directories are gitignored at this repo root.
+
+    Returns a list of repo-root-relative paths (no trailing slash). Each
+    path is a directory that:
+      - Is matched by ``.gitignore`` / ``.git/info/exclude`` / global
+        excludes (i.e. ``git check-ignore`` would mark it ignored), AND
+      - Exists on disk right now, AND
+      - Is not in ``_NEVER_SYMLINK``.
+
+    Implementation: ``git ls-files --others --ignored
+    --exclude-standard --directory`` enumerates every gitignored path,
+    and ``--directory`` collapses each fully-ignored directory to its
+    top-most path (so ``node_modules/`` appears as one entry rather
+    than every file inside). When a directory is tracked but a sub-dir
+    inside is ignored (e.g. ``external/assets/`` tracked + ``external/
+    assets/mcd/`` ignored), git surfaces the ignored sub-path directly.
+
+    The result list is what worktree.py's symlinking step iterates over
+    when ``symlink_dirs`` is not explicitly overridden. Pure git-driven
+    — no hardcoded project knowledge.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files",
+             "--others", "--ignored", "--exclude-standard", "--directory"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        # Not a git repo, or git command unavailable. Fall back to
+        # an empty list — nothing gets symlinked, dev server has to
+        # rebuild from scratch (the safe degradation).
+        return []
+    dirs: list[str] = []
+    for line in out.splitlines():
+        # ``--directory`` marks directory entries with a trailing slash.
+        # Everything else is a single ignored file; we don't symlink
+        # individual files (use ``_GITIGNORED_FILES_TO_COPY`` for those).
+        if not line.endswith("/"):
+            continue
+        rel = line.rstrip("/")
+        # Skip protected paths and anything nested under them.
+        top = rel.split("/", 1)[0]
+        if top in _NEVER_SYMLINK:
+            continue
+        dirs.append(rel)
+    return dirs
 
 
 def _default_worktree_path(repo_root: Path, run_dir: Path) -> Path:
@@ -86,7 +116,7 @@ def _default_worktree_path(repo_root: Path, run_dir: Path) -> Path:
     Go reads as a sub-package import that doesn't exist in the parent
     module, and ``go run`` fails with::
 
-        main module (github.com/.../mcd-website) does not contain
+        main module (github.com/.../<consumer-module>) does not contain
         package github.com/.../.proctor/runs/<id>/pr-checkout
 
     v0.7.1 places worktrees OUTSIDE the consumer repo by default, at
@@ -209,12 +239,15 @@ def setup(
 
     # Symlink gitignored runtime-built directories from the main repo
     # into the worktree so the dev server doesn't have to rebuild them
-    # (v0.7.0+). Default list covers `external/assets`, `node_modules`,
-    # `dist`, `build`, `.next`, `vendor`; override via the
-    # `symlink_dirs` parameter (CLI: `--symlink-dirs`).
+    # (v0.7.0+). v0.7.2: when caller doesn't override, ask git directly
+    # via ``--others --ignored --exclude-standard --directory`` instead
+    # of using a hardcoded list — works for any project without leaking
+    # project-specific paths into the plugin defaults. Explicit override
+    # via ``symlink_dirs`` parameter (CLI: ``--symlink-dirs``) still
+    # honored for consumers that want exact control.
     dirs_to_link = (
         symlink_dirs if symlink_dirs is not None
-        else _DEFAULT_GITIGNORED_DIRS_TO_SYMLINK
+        else _discover_gitignored_dirs(repo_root)
     )
     for d in dirs_to_link:
         src = repo_root / d

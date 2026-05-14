@@ -2331,100 +2331,233 @@ def test_worktree_setup_recreates_when_sha_differs(_isolated_worktree_base, tmp_
     assert head == pr_sha
 
 
-# --- v0.7.0: worktree.py auto-symlinks gitignored runtime build dirs -----
+# --- v0.7.2: worktree.py auto-detects gitignored runtime dirs via git ----
+# (replaces v0.7.0/v0.7.1 hardcoded list which leaked project-specific
+# paths like ``external/assets/mcd`` into plugin defaults.)
 
-def test_worktree_setup_symlinks_default_runtime_dirs(_isolated_worktree_base, tmp_path):
-    """When the main repo has gitignored runtime build dirs (e.g.
-    `external/assets`, `node_modules`), worktree.setup() symlinks them
-    into the worktree so the dev server doesn't have to rebuild.
-    Source: v0.6.9 e2e against PR #1126 (run `pr1126-75eea89-b7a2689b`)
-    — server started from worktree but `external/assets/mcd/` was
-    missing, blank pages, manual symlink + restart cost ~3min."""
+def test_worktree_setup_symlinks_gitignored_dirs_discovered_via_git(_isolated_worktree_base, tmp_path):
+    """v0.7.2: worktree.setup() asks git which directories are gitignored
+    at the consumer repo root, then symlinks them into the worktree so
+    the dev server doesn't have to rebuild. Pure git-driven discovery
+    — no hardcoded project paths in the plugin.
+
+    Source: v0.7.0/v0.7.1 had a hardcoded list including the leak
+    ``external/assets/mcd`` (mcd-website-specific sub-path). User
+    flagged: "PRoctor 要应对无数项目, 必须抽象出来". v0.7.2 replaces the
+    list with ``git ls-files --others --ignored --exclude-standard
+    --directory`` so the trigger is the consumer's .gitignore — works
+    for any project shape."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
-    # Drop two of the default-symlinked dirs at the main repo root.
-    (repo / "external" / "assets").mkdir(parents=True)
-    (repo / "external" / "assets" / "mcd.bundle.js").write_text("// built\n")
-    (repo / "node_modules").mkdir()
-    (repo / "node_modules" / ".bin").mkdir()
+    # Add a .gitignore declaring two runtime build dirs as ignored.
+    # (Different repos use different names — that's the whole point;
+    # the plugin shouldn't know any of them.)
+    (repo / ".gitignore").write_text(
+        "weird_build_dir/\nthirdparty_runtime/\n"
+    )
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "gitignore"], cwd=repo, check=True)
+    # Materialize the ignored dirs at the repo root.
+    (repo / "weird_build_dir").mkdir()
+    (repo / "weird_build_dir" / "bundle.js").write_text("// built\n")
+    (repo / "thirdparty_runtime").mkdir()
+    (repo / "thirdparty_runtime" / ".bin").mkdir()
     run_dir = repo / ".proctor" / "runs" / "test-run"
 
     wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
                        repo_root=repo)
 
-    linked_assets = wt_path / "external" / "assets"
-    linked_nm = wt_path / "node_modules"
-    assert linked_assets.is_symlink()
-    assert linked_nm.is_symlink()
+    linked_build = wt_path / "weird_build_dir"
+    linked_thirdparty = wt_path / "thirdparty_runtime"
+    assert linked_build.is_symlink()
+    assert linked_thirdparty.is_symlink()
     # Symlink target points back at the main checkout so the dev server
     # picks up the existing build output instead of rebuilding.
-    assert linked_assets.resolve() == (repo / "external" / "assets").resolve()
+    assert linked_build.resolve() == (repo / "weird_build_dir").resolve()
     # And the file is reachable through the symlink.
-    assert (linked_assets / "mcd.bundle.js").read_text() == "// built\n"
+    assert (linked_build / "bundle.js").read_text() == "// built\n"
 
 
-def test_worktree_setup_skips_symlink_when_source_absent(_isolated_worktree_base, tmp_path):
-    """Default symlink list contains common gitignored runtime dirs
-    (`dist`, `.next`, `vendor`, ...) that not every repo has. Missing
-    sources are silently skipped — no broken symlinks created."""
+def test_worktree_setup_skips_non_gitignored_dirs(_isolated_worktree_base, tmp_path):
+    """A directory that EXISTS at the repo root but is NOT gitignored
+    must NOT be symlinked. v0.7.2's discovery is gitignore-driven —
+    tracked source dirs (or untracked-but-not-ignored dirs) stay
+    inside the worktree's own checkout, not symlinked from main."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
+    # No .gitignore. Create a runtime-looking dir at the repo root —
+    # it's untracked but NOT gitignored.
+    (repo / "looks_like_build").mkdir()
+    (repo / "looks_like_build" / "out.txt").write_text("hi\n")
     run_dir = repo / ".proctor" / "runs" / "test-run"
 
     wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
                        repo_root=repo)
 
-    # None of the defaults exist in the main repo, so none of them
-    # should appear in the worktree.
-    for d in ("external/assets", "node_modules", "dist", "build",
-              ".next", "vendor"):
-        assert not (wt_path / d).exists(), f"unexpected {d} in worktree"
-        assert not (wt_path / d).is_symlink(), f"broken symlink at {d}"
+    # The dir must NOT be in the worktree — neither as symlink nor
+    # as real dir (the worktree starts from the SHA's tree, which
+    # doesn't include this untracked dir).
+    assert not (wt_path / "looks_like_build").exists()
+    assert not (wt_path / "looks_like_build").is_symlink()
+
+
+def test_worktree_setup_never_symlinks_proctor_or_git(_isolated_worktree_base, tmp_path):
+    """``.proctor/`` is PRoctor-owned (the worktree's own
+    ``.proctor/runs/<id>/`` is where the active run lives — symlinking
+    the consumer's ``.proctor/`` would create a self-reference loop).
+    ``.git/`` is structural. Both must NEVER be auto-symlinked even
+    when they appear in the consumer's gitignore."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # Gitignore `.proctor/` (the normal consumer setup) and create it.
+    (repo / ".gitignore").write_text(".proctor/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "gitignore"], cwd=repo, check=True)
+    (repo / ".proctor").mkdir()
+    (repo / ".proctor" / "config.yml").write_text("base_url: http://x\n")
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+
+    # `.proctor/` in the worktree must not be a symlink to the main
+    # repo's `.proctor/`. (worktree-path.txt lives inside run_dir, and
+    # `git worktree add` creates a real `.proctor/` dir inside the
+    # worktree if needed — but it must NOT be a symlink.)
+    if (wt_path / ".proctor").exists():
+        assert not (wt_path / ".proctor").is_symlink()
+
+
+def test_worktree_setup_skips_symlinks_when_no_gitignore(_isolated_worktree_base, tmp_path):
+    """Repo without any .gitignore → discovery returns empty list →
+    no symlinks created → no failures. Safe degradation: the dev
+    server in the worktree will have to rebuild runtime artifacts
+    from scratch (slower but correct)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # No .gitignore. Create dirs that LOOK like runtime artifacts
+    # but aren't declared ignored anywhere.
+    (repo / "node_modules").mkdir()
+    (repo / "dist").mkdir()
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+
+    # Setup succeeds with no errors.
+    assert wt_path.exists()
+    # And nothing is symlinked because nothing was declared gitignored.
+    assert not (wt_path / "node_modules").is_symlink()
+    assert not (wt_path / "dist").is_symlink()
 
 
 def test_worktree_setup_symlink_dirs_empty_list_skips_all(_isolated_worktree_base, tmp_path):
     """Passing `symlink_dirs=[]` explicitly opts out of all symlinking,
-    even when default sources are present (consumer-level escape hatch
-    via `.proctor/config.yml.worktree_symlink_dirs: []`)."""
+    even when the consumer's gitignore would otherwise trigger autosymlink
+    (consumer-level escape hatch via `.proctor/config.yml.worktree_symlink_dirs: []`)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
-    # Default-symlinked source exists, but we override with [] to skip.
-    (repo / "external" / "assets").mkdir(parents=True)
-    (repo / "node_modules").mkdir()
+    (repo / ".gitignore").write_text("would_be_symlinked/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "gitignore"], cwd=repo, check=True)
+    (repo / "would_be_symlinked").mkdir()
     run_dir = repo / ".proctor" / "runs" / "test-run"
 
     wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
                        repo_root=repo, symlink_dirs=[])
 
-    assert not (wt_path / "external" / "assets").exists()
-    assert not (wt_path / "external" / "assets").is_symlink()
-    assert not (wt_path / "node_modules").exists()
-    assert not (wt_path / "node_modules").is_symlink()
+    # Discovery would have linked it; explicit [] override skips.
+    assert not (wt_path / "would_be_symlinked").is_symlink()
 
 
-def test_worktree_setup_symlink_dirs_custom_list(_isolated_worktree_base, tmp_path):
-    """A consumer-provided override list — only the named dirs are
-    symlinked, even if other defaults exist at the main repo root."""
+def test_worktree_setup_symlink_dirs_custom_list_overrides_discovery(_isolated_worktree_base, tmp_path):
+    """A consumer-provided override list takes precedence over git-
+    discovered defaults. Only the named dirs are symlinked, even if
+    other gitignored dirs exist at the repo root."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
-    (repo / "external" / "assets").mkdir(parents=True)
-    (repo / "custom_cache").mkdir()
-    (repo / "custom_cache" / "marker").write_text("present\n")
+    (repo / ".gitignore").write_text(
+        "ignored_a/\nignored_b/\n"
+    )
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "gitignore"], cwd=repo, check=True)
+    (repo / "ignored_a").mkdir()
+    (repo / "ignored_b").mkdir()
+    (repo / "ignored_b" / "marker").write_text("present\n")
     run_dir = repo / ".proctor" / "runs" / "test-run"
 
     wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
                        repo_root=repo,
-                       symlink_dirs=["custom_cache"])
+                       symlink_dirs=["ignored_b"])
 
-    # Custom dir linked.
-    assert (wt_path / "custom_cache").is_symlink()
-    assert (wt_path / "custom_cache" / "marker").read_text() == "present\n"
-    # Default `external/assets` NOT linked (override replaced defaults).
-    assert not (wt_path / "external" / "assets").is_symlink()
+    # Custom-listed dir linked.
+    assert (wt_path / "ignored_b").is_symlink()
+    assert (wt_path / "ignored_b" / "marker").read_text() == "present\n"
+    # Other gitignored dir NOT linked (override replaced discovery).
+    assert not (wt_path / "ignored_a").is_symlink()
+
+
+def test_worktree_setup_discovers_gitignored_subpath_under_tracked_parent(_isolated_worktree_base, tmp_path):
+    """A gitignored sub-directory inside a tracked parent must be
+    discovered and symlinked at the right level. ``git ls-files
+    --others --ignored --exclude-standard --directory`` surfaces the
+    ignored sub-path directly (not the tracked parent), so the
+    symlinking step lands at the right depth.
+
+    This is the v0.7.0/v0.7.1 mcd-website scenario abstracted: the
+    project's frontend bundle lived at ``external/assets/<app>/``
+    while ``external/assets/`` itself was tracked with fonts +
+    images. The v0.7.0 hardcoded ``external/assets`` entry silently
+    no-op'd because the parent was tracked. v0.7.2's discovery
+    handles ANY such shape without hardcoded project knowledge."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # Create a tracked parent dir with tracked content, then declare
+    # a sub-dir of the parent as gitignored.
+    (repo / "tracked_parent").mkdir()
+    (repo / "tracked_parent" / "tracked_file.txt").write_text("kept in git\n")
+    (repo / ".gitignore").write_text("tracked_parent/ignored_sub/\n")
+    subprocess.run(["git", "add", "tracked_parent/tracked_file.txt", ".gitignore"],
+                   cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "parent+ignore"], cwd=repo, check=True)
+    pr_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    # Materialize the ignored sub-dir at the repo root.
+    (repo / "tracked_parent" / "ignored_sub").mkdir()
+    (repo / "tracked_parent" / "ignored_sub" / "build.out").write_text("built\n")
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+
+    # The parent dir is checked out by `git worktree add` (it's tracked)
+    # — it must remain a real dir, NOT a symlink.
+    assert (wt_path / "tracked_parent").is_dir()
+    assert not (wt_path / "tracked_parent").is_symlink()
+    # The tracked content is present from the worktree checkout.
+    assert (wt_path / "tracked_parent" / "tracked_file.txt").read_text() == "kept in git\n"
+    # The gitignored sub-dir IS symlinked at the sub-path.
+    assert (wt_path / "tracked_parent" / "ignored_sub").is_symlink()
+    assert (
+        wt_path / "tracked_parent" / "ignored_sub" / "build.out"
+    ).read_text() == "built\n"
+
+
+def test_discover_gitignored_dirs_no_git_returns_empty(tmp_path):
+    """If the caller's repo_root isn't a git repo at all (e.g. a freshly
+    extracted tarball), discovery returns an empty list rather than
+    raising. The safe degradation path."""
+    from plugins.proctor.scripts.worktree import _discover_gitignored_dirs
+    # tmp_path is NOT a git repo.
+    assert _discover_gitignored_dirs(tmp_path) == []
 
 
 # --- v0.7.1: worktree placed outside consumer repo (Go-module fix) -------
@@ -2490,58 +2623,11 @@ def test_worktree_setup_honors_proctor_worktree_base_dir_env(tmp_path, monkeypat
     assert custom_base.resolve() in wt_path.parents
 
 
-def test_worktree_setup_symlinks_subpath_when_parent_tracked(_isolated_worktree_base, tmp_path):
-    """v0.7.0's `external/assets` symlink silently no-op'd when the
-    parent dir was tracked (with `fonts/`, `images/`) while only the
-    gitignored sub-dir `external/assets/mcd/` needed symlinking — that
-    sub-dir got nothing because `dst.exists()` short-circuited the
-    symlink for the parent. v0.7.1's default list now ALSO includes
-    `external/assets/mcd` (the sub-path variant) so the symlink lands
-    at the right level. Source: v0.7.0 e2e regression."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    # Build a custom repo: initial + tracked-external-assets + pr commit.
-    sp = subprocess
-    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
-    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
-    sp.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
-    (repo / "file.txt").write_text("initial\n")
-    (repo / "external" / "assets").mkdir(parents=True)
-    (repo / "external" / "assets" / "tracked.txt").write_text("tracked\n")
-    sp.run(["git", "add", "."], cwd=repo, check=True)
-    sp.run(["git", "commit", "-q", "-m", "initial+tracked external/assets"],
-           cwd=repo, check=True)
-    (repo / "file.txt").write_text("pr content\n")
-    sp.run(["git", "add", "."], cwd=repo, check=True)
-    sp.run(["git", "commit", "-q", "-m", "pr commit"], cwd=repo, check=True)
-    pr_sha = sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    # Drop the gitignored mcd subdir AFTER both commits (stays untracked).
-    (repo / "external" / "assets" / "mcd").mkdir()
-    (repo / "external" / "assets" / "mcd" / "bundle.js").write_text(
-        "// runtime build output\n")
-    run_dir = repo / ".proctor" / "runs" / "test-run"
-
-    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
-                       repo_root=repo)
-    # The whole `external/assets` is tracked → checkout already created
-    # it as a real dir, NOT a symlink. That's expected and OK.
-    assert (wt_path / "external" / "assets").is_dir()
-    assert not (wt_path / "external" / "assets").is_symlink()
-    # The sub-path `external/assets/mcd` was the gap. v0.7.1 default
-    # list now contains it AND the parent, and the sub-path landed
-    # successfully because at the sub-path's level the dst didn't exist
-    # in the worktree (gitignored).
-    assert (wt_path / "external" / "assets" / "mcd").is_symlink(), (
-        "v0.7.1: external/assets/mcd should be symlinked even when "
-        "the parent dir is tracked"
-    )
-    # And the runtime build output is reachable through the symlink.
-    assert (wt_path / "external" / "assets" / "mcd" / "bundle.js").read_text() \
-        == "// runtime build output\n"
+# v0.7.1's hardcoded-sub-path test was removed in v0.7.2 — the abstract
+# "gitignored sub-dir under tracked parent" case is now covered by
+# test_worktree_setup_discovers_gitignored_subpath_under_tracked_parent
+# (above), which exercises the SAME shape with project-neutral names
+# (tracked_parent/ignored_sub instead of external/assets/mcd).
 
 
 # --- v0.7.0: schema accepts worktree_symlink_dirs in .proctor/config.yml --

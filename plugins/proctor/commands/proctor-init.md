@@ -690,11 +690,13 @@ For each form `<input>` you read, capture the `name=` attribute and classify by 
 
 Same for the TOTP/2FA page if it's a separate URL — look for a single short-numeric input on whatever page comes AFTER successful email+password.
 
-For mcd-website specifically the wizard should find:
+Example: applying the rules above to mcd-website's login template (the project that originally surfaced the rule) yields:
 - `name="email"` → role: email
 - `name="password"` → role: password
 - `name="passcode"` (qor/auth's totp provider standard) → role: totp
 - `<button type="submit">` → role: submit
+
+A repo using a different framework or different field naming will land on different exact strings — the table above is the actual rule. Don't hardcode any of these literal `name=...` values; always read the consumer's actual template.
 
 Record the detected values as `SELECTORS = {email, password, totp, submit, login_url}`. The `login_url` comes from how the form's `<form action="...">` is set, or you can keep `/auth/login` as a sane default if the form doesn't have an explicit action and the URL is what the user lands on.
 
@@ -863,10 +865,10 @@ In `MODE=migrate`: if the existing `.proctor/config.yml` already has `base_url`,
 In `MODE=fresh`: ask via AskUserQuestion:
 
 > "What URL is the deployed test environment at?"
-Free-text input. Pre-fill examples: `https://cms.<your-app>.theplant-dev.com`. Validate:
+Free-text input. Pre-fill example shape: `https://<service>.<env>.<your-org-dev-domain>` (e.g. `https://cms.example-app.acme-dev.com`). Validate:
 
 - Must start with `https?://` (case-insensitive).
-- If the URL contains any of `prod.`, `.qorcommerce.com`, `www.<consumer-real-domain>.<tld>`, REFUSE and re-ask. Hard refusal — not a warning.
+- REFUSE and re-ask (hard refusal — not a warning) when the URL contains any of: `prod.` / `production.` / `live.` (case-insensitive substring); or `www.<consumer-real-domain>.<tld>` (try to infer the production domain from `git remote get-url origin` — strip `.git`, take the org-or-repo hostname guess).
 - Emit a notice that the wizard cannot be 100% certain whether a URL is prod and the user is responsible for not pointing PRoctor at production.
 
 Save as `BASE_URL`.
@@ -1048,7 +1050,7 @@ For **Go modules**:
   - bash -c 'set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
 ```
 
-If the repo has a `dev_env` file (mcd-website convention), source it before `go run` to pick up the right ports / DB creds. Skip sourcing silently if no such file.
+If the repo has a `dev_env` (or `.env`, `dev_env_local`, `.envrc`) file at the root, source it before `go run` to pick up the right ports / DB creds. Sources are tried in that order; the first one that exists wins. Skip sourcing silently if none exist.
 
 For **GOPATH-era Go** (no go.mod):
 ```yaml
@@ -1069,7 +1071,7 @@ For **Python / Django / FastAPI / Rails / etc.** — emit a TODO placeholder:
   - bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:<APP_PORT>/<HEALTH_PATH> >/dev/null 2>&1 && break; sleep 1; done || { echo "server failed to come up"; tail -50 /tmp/proctor-<REPO_NAME>.log; exit 1; }'
 ```
 
-`HEALTH_PATH` = `auth.login_url` rewritten without leading slash (it's a route the app actually serves, so this both verifies the binary booted AND that templates render). For mcd-website with `/auth/login`, this becomes `auth/login`.
+`HEALTH_PATH` = `auth.login_url` rewritten without leading slash (it's a route the app actually serves, so this both verifies the binary booted AND that templates render). E.g. `auth.login_url: /auth/login` becomes `auth/login`.
 
 **5. Append a comment block reminding the dev about the iteration cycle**:
 ```yaml
@@ -1203,20 +1205,20 @@ Don't leave SQL as a TODO. Read the codebase, figure out the schema, generate th
      local email="$1" plain_password="$2" role="$3" totp_seed="$4"
      local hashed
      hashed="$(gen_hash "$plain_password")"
-     PGPASSWORD="$MCD_DB_PASSWORD" psql -h "$MCD_DB_HOST" -p "$MCD_DB_PORT" \
-       -U "$MCD_DB_USER" -d "$MCD_DB_NAME" <<SQL
-       INSERT INTO admin_users (email, encrypted_password, role, totp_secret, created_at, updated_at)
+     PGPASSWORD="$<DB_PASSWORD_VAR>" psql -h "$<DB_HOST_VAR>" -p "$<DB_PORT_VAR>" \
+       -U "$<DB_USER_VAR>" -d "$<DB_NAME_VAR>" <<SQL
+       INSERT INTO <users_table> (<email_col>, <password_col>, <role_col>, <totp_col>, created_at, updated_at)
        VALUES ('$email', '$hashed', '$role', '$totp_seed', now(), now())
-       ON CONFLICT (email) DO UPDATE
-         SET encrypted_password = EXCLUDED.encrypted_password,
-             role = EXCLUDED.role,
-             totp_secret = EXCLUDED.totp_secret,
-             updated_at = now();
+       ON CONFLICT (<email_col>) DO UPDATE
+         SET <password_col> = EXCLUDED.<password_col>,
+             <role_col>     = EXCLUDED.<role_col>,
+             <totp_col>     = EXCLUDED.<totp_col>,
+             updated_at     = now();
    SQL
    }
    ```
 
-   With actual table / column names substituted by what Steps 1-2 found, and the right env var names from `dev_env` (for mcd-website that's `MCD_DB_*`).
+   Substitute `<users_table>`, `<email_col>`, `<password_col>`, `<role_col>`, `<totp_col>` with what Steps 1-2 found in the consumer repo. Substitute `<DB_*_VAR>` with the actual env var names from the consumer's `dev_env` / `.env` (e.g. `MCD_DB_*` / `POSTGRES_*` / `DB_*` — whatever the project uses).
 
 7. **If anything in steps 1-4 is ambiguous** (multiple candidate user models, both TOTPSecret and OTPSecret columns, no migration to verify against), do NOT silently pick one. Present the candidates via AskUserQuestion:
 
@@ -1248,7 +1250,7 @@ git log --pretty='%ae' -200 2>/dev/null | sort -u | grep -vE 'github|noreply' | 
 gh repo view --json owner --jq '.owner.login' 2>/dev/null
 ```
 
-From whatever surfaces, derive `EMAIL_DOMAIN` — pick the most-common-suffix (e.g. multiple `@theplant.jp` matches → `theplant.jp`). Show it to the user via AskUserQuestion:
+From whatever surfaces, derive `EMAIL_DOMAIN` — pick the most-common-suffix found across the consumer's existing user fixtures (e.g. if grep finds multiple `@example-corp.com` matches → `example-corp.com`). Show it to the user via AskUserQuestion:
 
 > "I'll create test accounts as `ai-tester-<role>@<EMAIL_DOMAIN>`. Use `<DETECTED_DOMAIN>`?"
 - **Use `<DETECTED_DOMAIN>`** (Recommended)
@@ -1399,7 +1401,7 @@ echo
 echo "Next: claude /proctor:proctor <PR#>"
 ```
 
-Substitute the wizard's discovered values for `<ACCOUNTS[i].name>`, `<APP_PORT>`, and the database env names (mcd-website: `MCD_DB_*`). When generating the loop body, emit one line per role (don't leave a literal `<for each>` block).
+Substitute the wizard's discovered values for `<ACCOUNTS[i].name>`, `<APP_PORT>`, and the database env names (project-specific — e.g. `MCD_DB_*`, `POSTGRES_*`, `DB_*` — read from the consumer's `dev_env` / `.env` / docker-compose). When generating the loop body, emit one line per role (don't leave a literal `<for each>` block).
 
 Make the script executable: `chmod +x <path-to-script>`.
 
@@ -1421,16 +1423,21 @@ These commands go INSIDE the seed script's heredoc (each preceded by `echo "  - 
 To make that bulletproof, generate the setup commands as a single quoted heredoc'd block:
 
 ```bash
-SETUP_BLOCK=$(cat <<'YAML'
+# REPO_NAME, APP_PORT, AUTH_LOGIN_URL, DB_PORT come from the wizard's
+# earlier discovery; substitute them BEFORE feeding to the heredoc so
+# the literal values land in the emitted YAML.
+SETUP_BLOCK=$(cat <<YAML
   - docker compose -f docker-compose.yml up -d
-  - bash -c 'for i in $(seq 1 30); do nc -z localhost 6512 && break; sleep 1; done'
-  - bash -c '[ -f /tmp/proctor-mcd-website.pid ] && kill "$(cat /tmp/proctor-mcd-website.pid)" 2>/dev/null; true'
+  - bash -c 'for i in \$(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'
+  - bash -c '[ -f /tmp/proctor-${REPO_NAME}.pid ] && kill "\$(cat /tmp/proctor-${REPO_NAME}.pid)" 2>/dev/null; true'
   - go mod download
-  - bash -c 'set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-mcd-website.log 2>&1 & echo $! > /tmp/proctor-mcd-website.pid'
-  - bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:9801/auth/login >/dev/null 2>&1 && break; sleep 1; done || { tail -50 /tmp/proctor-mcd-website.log; exit 1; }'
+  - bash -c 'set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-${REPO_NAME}.log 2>&1 & echo \$! > /tmp/proctor-${REPO_NAME}.pid'
+  - bash -c 'for i in \$(seq 1 60); do curl -fsS http://localhost:${APP_PORT}${AUTH_LOGIN_URL} >/dev/null 2>&1 && break; sleep 1; done || { tail -50 /tmp/proctor-${REPO_NAME}.log; exit 1; }'
 YAML
 )
 ```
+
+`${REPO_NAME}` / `${APP_PORT}` / `${AUTH_LOGIN_URL}` / `<DB_PORT>` are placeholders — the wizard substitutes them at generation time. The `\$` escapes preserve `$i`, `$(seq ...)`, `$(cat ...)` as literal text inside the emitted YAML so PRoctor's executor can run them later.
 
 Then in the YAML emission section: `echo "$SETUP_BLOCK"` to dump it verbatim. The single-quoted heredoc preserves `$i`, `$(seq ...)`, `$(cat ...)` as literal text.
 

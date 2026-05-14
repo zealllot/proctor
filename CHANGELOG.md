@@ -2,6 +2,46 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.2 — 2026-05-14
+
+### Auto-detect gitignored runtime dirs (replaces hardcoded project-leak list)
+
+v0.7.0 and v0.7.1 shipped `_DEFAULT_GITIGNORED_DIRS_TO_SYMLINK` — a fixed list of `external/assets`, `external/assets/mcd`, `node_modules`, `dist`, `build`, `.next`, `vendor`. The `external/assets/mcd` entry was added in v0.7.1 specifically for the mcd-website case (parent dir tracked, sub-dir gitignored). User flagged this as a project-specific leak: PRoctor needs to work for arbitrary projects without knowing any of their paths upfront.
+
+**Fix**: replace the hardcoded list with `_discover_gitignored_dirs(repo_root)` — calls `git ls-files --others --ignored --exclude-standard --directory`. git itself surfaces every gitignored directory at the right depth (sub-paths under tracked parents land directly without needing a hardcoded list of two-level variants). Plugin defaults now carry zero project knowledge.
+
+`_NEVER_SYMLINK = {".git", ".proctor"}` blocks the two structural paths even when they appear in the consumer's gitignore (`.proctor/` IS in most consumers' gitignore; symlinking it from the consumer's checkout into the worktree would create a self-reference loop since the worktree's own `.proctor/runs/<id>/` is where the current run lives).
+
+`worktree_symlink_dirs` config field + `--symlink-dirs` CLI still honored as explicit override for consumers who want exact control. Default behavior (auto-discovery) is now project-agnostic.
+
+### Other project-leak cleanups in proctor-init.md
+
+User audit caught several spots where prose read as "instructions for mcd-website specifically" rather than abstract rules with mcd-website as an example. Reframed:
+
+- Login template selectors example — now labeled "Example: applying the rules above to mcd-website's login template yields..." instead of "For mcd-website specifically the wizard should find...".
+- `dev_env` reference — was framed as "mcd-website convention"; now lists `dev_env` / `.env` / `dev_env_local` / `.envrc` as the search order, no specific project owner.
+- SQL upsert example — was using `$MCD_DB_PASSWORD` / `$MCD_DB_HOST` literally; now uses `$<DB_PASSWORD_VAR>` / `$<DB_HOST_VAR>` placeholders.
+- `auth.login_url` example — was "For mcd-website with `/auth/login`..."; now generic "E.g. `auth.login_url: /auth/login` becomes `auth/login`".
+- Base URL placeholder — was `https://cms.<your-app>.theplant-dev.com`; now `https://<service>.<env>.<your-org-dev-domain>` with example `https://cms.example-app.acme-dev.com`.
+- Prod-URL refuse list — dropped the hardcoded `.qorcommerce.com` entry; refusal now driven by case-insensitive `prod.` / `production.` / `live.` substrings + a derived-from-git-remote production-domain check.
+- `worktree.py` docstring's Go error example — `mcd-website` literal replaced with `<consumer-module>` placeholder.
+
+### Tests
+
+7 new tests cover the abstraction:
+- Git-driven discovery finds whatever is in the consumer's gitignore (test uses neutral names `weird_build_dir/` and `thirdparty_runtime/`).
+- Non-gitignored dirs at repo root → not symlinked.
+- `.proctor/` and `.git/` never symlinked even if gitignored.
+- Repo without any .gitignore → empty discovery → no symlinks, no failures.
+- `symlink_dirs=[]` opt-out still honored.
+- `symlink_dirs=[explicit list]` override still honored.
+- Gitignored sub-path under tracked parent (the v0.7.1 scenario, project-neutral names).
+- `_discover_gitignored_dirs` returns `[]` when called on a non-git directory.
+
+The two v0.7.0/v0.7.1 tests that asserted the hardcoded list shape are removed — the abstract case is covered by the new test using project-neutral path names.
+
+Tests 288 → 291.
+
 ## v0.7.1 — 2026-05-14
 
 ### Three follow-up fixes from the v0.7.0 e2e against mcd-website PR #1126
