@@ -2,6 +2,42 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.3 — 2026-05-14
+
+### Approval-gate render moved out of AI prose into a deterministic script
+
+Six releases of prose-tightening on the Stage 2 → approval-gate transition (v0.3.x: 4-substep gate, then 5-substep gate w/ hard-gate lint, then back to 4-substep, then v0.4.2's "no JSON dump + no thinking pause" warnings) all failed in production: the AI kept dumping the test-plan JSON to chat before rendering the table, consuming its own context budget and stalling for 3-5 minutes (`Churned for 4m 32s` on the v0.4.2 trace).
+
+The pattern is structural: any time the AI has discretion between "I just generated/validated something" and "I need to take the next step", the show-work compulsion fires and burns context that the next-step intent needed. Prose can ask the AI nicely; it doesn't reliably comply.
+
+This release removes the AI's discretion entirely for the approval-gate render.
+
+**New script** (`plugins/proctor/scripts/render_plan_table.py`):
+- Reads test-plan.json from stdin.
+- Emits the markdown approval-gate block to stdout: header `## Plan for PR #<num> — <total> items`, the items table (one row per item, `id / Cat / Risk / Tool / As / What`), an `**Estimated:**` line summing per-tool runtime (`lint-only ≈ 5s`, `bash ≈ 30s`, `chrome-devtools ≈ 60s`) + dollar cost.
+- Optionally surfaces `plan-smells.txt` residual warnings (when the planning skill exhausted its 2 regen attempts at self-audit) as a `### Plan smells (still present after 2 regen attempts)` section below the estimate, each warning a `⚠` bullet. Omitted when the file is absent or empty.
+- Truncates over-long `what:` fields at 100 chars with `…` and collapses multi-line whitespace into single lines for clean table rendering.
+
+**Orchestrator** (`commands/proctor.md` step 6):
+- Approval gate is now TWO tool calls instead of four substeps:
+  - **6a**: Bash invocation of `render_plan_table.py` — stdout goes to chat verbatim.
+  - **6b**: AskUserQuestion with three options (Run all / Drop items / Cancel).
+- Explicit "Do NOT hand-render the table" added to the forbidden-list — historical context from why this design was needed.
+- Same response, no AI text between 6a and 6b.
+
+### Why this is the right fix
+
+The AI was never the right component for rendering deterministic markdown — table formatting is a pure function of the JSON. Doing it in a script means:
+- Zero "show work" temptation: AI doesn't see the table being built, so it can't dump pre-render artifacts.
+- Zero context cost: AI's working memory only holds "run script then ask question", not 13 rows of plan items.
+- Deterministic output: every run renders identically for the same plan. Tests can pin format.
+- Faster: bash script is milliseconds; AI rendering took 3-5 minutes including stalls.
+
+The lesson generalizes: prose-tightening hits diminishing returns once the AI's prior compulsions overwhelm the rule. Moving the work to a script is the structural answer.
+
+### Tests
+- 170 → 179 (+9): header + row count, estimate format under/over a minute, long-`what` truncation, smells residual rendering when file present / absent / empty, multi-line `what` whitespace collapse, CLI stdin reading.
+
 ## v0.4.2 — 2026-05-14
 
 ### Re-tighten "no JSON dump + no thinking pause" on Stage 1→2 and Stage 2→approval transitions

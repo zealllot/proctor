@@ -1024,6 +1024,107 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.4.3: render_plan_table for the approval-gate ---------------------
+
+from plugins.proctor.scripts.render_plan_table import render as render_table
+
+
+def test_render_plan_table_header_and_row_count():
+    plan = {"items": [
+        {"id": "t-001", "category": "api", "risk": "low", "tool": "lint-only",
+         "what": "proto enum declared", "depends_on": []},
+        {"id": "t-002", "category": "api", "risk": "high", "tool": "chrome-devtools",
+         "what": "HAPPY: save reward", "depends_on": [], "as_account": "developer"},
+    ]}
+    out = render_table(plan, pr_number=1115)
+    assert "## Plan for PR #1115 — 2 items" in out
+    assert "| t-001 | api | low | lint-only | — | proto enum declared |" in out
+    assert "| t-002 | api | high | chrome-devtools | developer | HAPPY: save reward |" in out
+
+
+def test_render_plan_table_estimate_includes_seconds_under_minute():
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only", "what": "x", "depends_on": []}]}
+    out = render_table(plan, pr_number=1)
+    assert "**Estimated:** ~5s" in out
+
+
+def test_render_plan_table_estimate_minutes_above_minute():
+    # 2 chrome-devtools items = 120s = ~2.0 min
+    plan = {"items": [
+        {"id": "t-1", "category": "api", "risk": "high", "tool": "chrome-devtools",
+         "what": "x", "depends_on": []},
+        {"id": "t-2", "category": "api", "risk": "high", "tool": "chrome-devtools",
+         "what": "y", "depends_on": []},
+    ]}
+    out = render_table(plan, pr_number=1)
+    assert "~2.0 min" in out
+
+
+def test_render_plan_table_truncates_long_what():
+    very_long = "x" * 200
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only", "what": very_long, "depends_on": []}]}
+    out = render_table(plan, pr_number=1)
+    # The very-long string shouldn't appear in full — truncated with ellipsis.
+    assert very_long not in out
+    assert "…" in out
+
+
+def test_render_plan_table_omits_smells_section_when_no_file(tmp_path):
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only", "what": "x", "depends_on": []}]}
+    out = render_table(plan, pr_number=1, run_dir=tmp_path)
+    assert "Plan smells" not in out
+
+
+def test_render_plan_table_renders_residual_smells_when_file_exists(tmp_path):
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only", "what": "x", "depends_on": []}]}
+    (tmp_path / "plan-smells.txt").write_text(
+        "t-008: write action has no sibling item asserting round-trip data loading\n"
+        "t-009: combines happy and negative phrasing\n"
+    )
+    out = render_table(plan, pr_number=1, run_dir=tmp_path)
+    assert "### Plan smells (still present after 2 regen attempts)" in out
+    assert "⚠ t-008: write action has no sibling item asserting round-trip data loading" in out
+    assert "⚠ t-009: combines happy and negative phrasing" in out
+
+
+def test_render_plan_table_omits_smells_section_when_file_is_empty(tmp_path):
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only", "what": "x", "depends_on": []}]}
+    (tmp_path / "plan-smells.txt").write_text("")
+    out = render_table(plan, pr_number=1, run_dir=tmp_path)
+    assert "Plan smells" not in out
+
+
+def test_render_plan_table_collapses_whitespace_in_what():
+    plan = {"items": [{"id": "t-1", "category": "api", "risk": "low",
+                       "tool": "lint-only",
+                       "what": "save\n  with\n  newlines and  multiple  spaces",
+                       "depends_on": []}]}
+    out = render_table(plan, pr_number=1)
+    assert "save with newlines and multiple spaces" in out
+
+
+def test_render_plan_table_cli_reads_stdin(tmp_path):
+    import subprocess
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts" / "render_plan_table.py")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({"items": [
+        {"id": "t-1", "category": "api", "risk": "low", "tool": "lint-only",
+         "what": "x", "depends_on": []},
+    ]}))
+    result = subprocess.run(
+        ["python3", script, "--pr-number", "42"],
+        stdin=open(plan_file), capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "## Plan for PR #42 — 1 items" in result.stdout
+
+
 # --- v0.3.37: worktree-based PR-head alignment ---------------------------
 
 from plugins.proctor.scripts.worktree import setup as wt_setup, teardown as wt_teardown

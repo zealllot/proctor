@@ -155,42 +155,34 @@ Then **proceed to the approval gate in this SAME response** — emit the 4 subst
 
 ### 6. Approval gate
 
-**FOUR sub-steps.** All four MUST run in this turn, in order, with no stop between them.
+**TWO tool calls.** That's the whole gate (v0.4.3+).
 
-The planning skill (Stage 2) already runs `plan_smells.py --strict` as its final self-audit step (v0.3.35+) and only returns to the orchestrator with a clean plan (or after exhausting 2 regen attempts and logging the residual warnings to `.proctor/runs/<run-id>/plan-smells.txt`). **Do NOT** re-run plan_smells here. The v0.3.32/v0.3.33 "hard-gate at step 6d" design was deprecated in v0.3.38 because the duplicate gate caused the orchestrator AI to stall ("I already ran this lint as the last step of the planning skill — why am I running it again?"). Trust the skill's self-audit.
+The v0.4.0-and-earlier design had the AI hand-render the markdown table (header + 13-row table + estimate) in chat, then call AskUserQuestion. That hand-rendering proved unreliable across SIX releases of prose-tightening — the AI kept dumping the test-plan JSON to chat before/instead of the table, consuming context and stalling for 3-5 minutes. v0.4.3 takes the render out of the AI's hands.
 
-**6a.** Emit a markdown header line: `## Plan for PR #<num> — <total> items` (as part of your assistant message — do NOT use the Write tool for this; it goes to chat).
+**6a — Bash**: run the deterministic renderer. Its stdout goes straight to chat:
 
-**6b.** Emit the plan items as a markdown table (in the SAME assistant message, immediately below 6a's header). Format below. Every column populated for every row.
-
-**6c.** Emit one summary line below the table: `Estimated: ~<N> min, ~$<cost>`. Best-effort estimate (rough: lint-only ≈ 5s/$0.001, bash ≈ 30s/$0.005, chrome-devtools ≈ 60s/$0.05 per item).
-
-**6c-warn** (rare path, v0.3.38+): if `.proctor/runs/<run-id>/plan-smells.txt` exists AND is non-empty (the planning skill exhausted its 2 regen attempts and surfaced residual warnings instead of regen'ing more), render those warnings as a `### Plan smells (still present after 2 regen attempts)` section immediately below 6c. Each warning is a bullet starting with `⚠`. This tells the human reviewer that the planning skill couldn't fix the issue itself — they should choose "Cancel — let me edit the plan first" at 6d. If the file is absent or empty, render nothing.
-
-**6d.** Call AskUserQuestion with exactly THREE options (see below). Do not skip the AskUserQuestion call — that IS the gate; without it, the run is stuck.
-
-**Do NOT** skip the table (6a–6c) and jump straight to AskUserQuestion (6d) — the question is unanswerable without context. **Do NOT** re-run `plan_smells.py` at this stage; the planning skill already did. **Do NOT** print the test-plan JSON instead of the table. **Do NOT** collapse to "3 lint + 5 ui — run?".
-
-Required format for the table:
-
-```markdown
-## Plan for PR #<num> — <total> items
-
-| # | Cat | Risk | Tool | As | What |
-|---|---|---|---|---|---|
-| t-001 | api | low | lint-only | dev | <one-sentence summary of item 1's what:> |
-| t-002 | api | low | lint-only | dev | <one-sentence summary of item 2's what:> |
-| t-003 | api | medium | bash | dev | <one-sentence summary of item 3's what:> |
-| t-004 | api | high | chrome-devtools | dev | <one-sentence summary of item 4's what:> |
-| t-005 | api | high | chrome-devtools | dev | <one-sentence summary of item 5's what:> |
-| ... |
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_plan_table.py \
+    --pr-number <num> \
+    --run-dir .proctor/runs/<run-id> \
+    < .proctor/runs/<run-id>/test-plan.json
 ```
 
-Render EVERY item's `id` / `category` / `risk` / `tool` / `as_account` (or "—" if unset) / a *concise* version of `what` (one sentence; if the original is longer, summarize — but keep accuracy). Don't truncate; let it wrap.
+The script outputs:
+- `## Plan for PR #<num> — <total> items`
+- The markdown table (`| # | Cat | Risk | Tool | As | What |` — one row per item).
+- An `**Estimated:**` line summing per-tool seconds + dollars.
+- IF `plan-smells.txt` exists and is non-empty (the planning skill exhausted its 2 regen attempts), a `### Plan smells (still present after 2 regen attempts)` section with each warning as a `⚠` bullet.
 
-Below the table, render the cost / time estimate if you can compute one (rough: lint-only ≈ 5s each, bash ≈ 30s, chrome-devtools ≈ 60s each; total time is one line, dollar cost is `~$0.05 × runtime_items`).
+You do NOT format anything yourself. No prefacing text. No JSON. No "let me show you the plan" wrapper. The bash output IS the chat content for the approval gate.
 
-THEN call AskUserQuestion with simple, decisive options:
+**6b — AskUserQuestion**: exactly three options (see below). Same response as 6a — no thinking pause between them.
+
+The planning skill (Stage 2) already ran `plan_smells.py --strict` as its self-audit (v0.3.35+) and only returned with a clean plan or a `plan-smells.txt` residual file. **Do NOT** re-run plan_smells here — the renderer surfaces residuals.
+
+**Do NOT** skip 6a and jump to AskUserQuestion. **Do NOT** print the test-plan JSON before 6a. **Do NOT** hand-render the table — the renderer does it deterministically. **Do NOT** insert chat text between 6a's bash output and 6b's AskUserQuestion.
+
+Required AskUserQuestion options:
 - **Run all <N> items** (Recommended)
 - **Drop specific items** — opens a follow-up free-text question for the IDs to skip (`t-002 t-007`)
 - **Cancel — let me edit the plan first** — abort run; user can hand-edit `.proctor/runs/<run-id>/test-plan.json` and re-invoke `/proctor:proctor`
