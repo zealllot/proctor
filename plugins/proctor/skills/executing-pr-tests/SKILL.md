@@ -33,10 +33,21 @@ Output: a single `TestResults` JSON object.
    if [ "$cur_head" = "$pr_head" ]; then
        WORKTREE_DIR="$(pwd)"   # already aligned, no worktree needed
    else
+       # Read .proctor/config.yml.worktree_symlink_dirs (a list of dirs
+       # to symlink from the main checkout into the worktree so the dev
+       # server doesn't have to rebuild gitignored runtime artifacts).
+       # If unset → omit --symlink-dirs so worktree.py uses its built-in
+       # default list. If set to [] → pass empty string to skip all.
+       # If set to a list → join with commas.
+       SYMLINK_ARGS=()
+       if [ -n "${PROCTOR_WORKTREE_SYMLINK_DIRS+x}" ]; then
+           SYMLINK_ARGS=(--symlink-dirs "$PROCTOR_WORKTREE_SYMLINK_DIRS")
+       fi
        WORKTREE_DIR=$(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/worktree.py setup \
            --run-dir .proctor/runs/<run-id> \
            --pr-number <pr.number> \
-           --head-sha "$pr_head")
+           --head-sha "$pr_head" \
+           "${SYMLINK_ARGS[@]}")
    fi
    ```
 
@@ -111,6 +122,26 @@ Output: a single `TestResults` JSON object.
 
    For runs WITHOUT `auth:` (legacy mode): skip 3a–d entirely. Items
    dispatch as before, no account grouping.
+
+#### Working directory contract (v0.7.0+, mandatory)
+
+**All inline lint/bash items run from the CONSUMER REPO ROOT** (the dir from which `/proctor:proctor` was invoked). Use the worktree-relative path explicitly:
+
+```bash
+WT=".proctor/runs/$RUN_ID/pr-checkout"   # relative to consumer repo root
+grep -nE 'pattern' "$WT/path/to/file.go"  # works
+```
+
+Do NOT cd into the worktree:
+
+```bash
+cd "$WT" && grep -nE 'pattern' path/to/file.go  # breaks log paths
+cd "$WT" && grep -nE 'pattern' "$WT/file.go"    # double-prefix
+```
+
+The latter is the v0.6.9 e2e failure mode (PR #1126 run `pr1126-75eea89-b7a2689b`) — `cd` into worktree, then references to `$LOGS` (anchored at consumer repo root) resolve relative to the new cwd and break. Bash failed 6+ times with `ugrep: warning: ... No such file or directory` until the orchestrator switched to absolute-paths-from-consumer-root.
+
+Exception: the dev server's `go run` / `pnpm dev` MUST run from inside the worktree (so it compiles PR-head code, not main). For server startup specifically, cd into worktree, source dev_env, exec `go run . &`, then return to consumer repo root for everything else.
 
 4. For each item (within its group's authed context):
    - **Check `data_from` first** (v0.3.23+). If the item declares

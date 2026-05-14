@@ -49,12 +49,26 @@ from pathlib import Path
 # Add other paths here if a wider class of repos needs them.
 _GITIGNORED_FILES_TO_COPY = [".proctor/local.yml"]
 
+# Common gitignored runtime-built directories worth symlinking from the
+# main repo into the worktree so the dev server doesn't have to rebuild
+# them. Each entry must exist at the main repo root to be linked.
+# Override via .proctor/config.yml's `worktree_symlink_dirs` field.
+_DEFAULT_GITIGNORED_DIRS_TO_SYMLINK = [
+    "external/assets",       # frontend bundle output (mcd-website pattern)
+    "node_modules",          # JS deps
+    "dist",                  # generic build output
+    "build",                 # generic build output
+    ".next",                 # Next.js
+    "vendor",                # Go vendoring (rare with go.mod, but...)
+]
+
 
 def setup(
     run_dir: Path,
     pr_number: int,
     head_sha: str,
     repo_root: Path | None = None,
+    symlink_dirs: list[str] | None = None,
 ) -> Path:
     """Ensure a worktree at ``head_sha`` exists under ``run_dir``.
 
@@ -137,6 +151,27 @@ def setup(
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
+    # Symlink gitignored runtime-built directories from the main repo
+    # into the worktree so the dev server doesn't have to rebuild them
+    # (v0.7.0+). Default list covers `external/assets`, `node_modules`,
+    # `dist`, `build`, `.next`, `vendor`; override via the
+    # `symlink_dirs` parameter (CLI: `--symlink-dirs`).
+    dirs_to_link = (
+        symlink_dirs if symlink_dirs is not None
+        else _DEFAULT_GITIGNORED_DIRS_TO_SYMLINK
+    )
+    for d in dirs_to_link:
+        src = repo_root / d
+        if not src.is_dir():
+            continue
+        dst = worktree_path / d
+        # Don't overwrite tracked dirs (the worktree already created
+        # them via checkout) or an existing symlink from a prior run.
+        if dst.exists() or dst.is_symlink():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.symlink_to(src.resolve())
+
     marker.write_text(str(worktree_path) + "\n")
     return worktree_path
 
@@ -177,6 +212,11 @@ def _main() -> int:
     sp.add_argument("--head-sha", required=True)
     sp.add_argument("--repo-root", default=None,
                     help="Defaults to current working directory.")
+    sp.add_argument("--symlink-dirs", default=None,
+                    help="Comma-separated dirs (relative to repo root) to "
+                         "symlink from main checkout into the worktree. "
+                         "Defaults to a built-in list of common gitignored "
+                         "runtime-built dirs. Pass empty string to skip.")
 
     sp = sub.add_parser("teardown", help="Remove the PR-aligned worktree.")
     sp.add_argument("--run-dir", required=True)
@@ -186,8 +226,19 @@ def _main() -> int:
 
     repo_root = Path(args.repo_root) if args.repo_root else None
     if args.cmd == "setup":
+        # Empty string -> []  (explicit "skip all symlinks").
+        # None (flag not passed) -> None (use built-in defaults).
+        # Any other value -> split on comma, strip whitespace, drop empties.
+        sd_arg = args.symlink_dirs
+        if sd_arg is None:
+            symlink_dirs: list[str] | None = None
+        elif sd_arg == "":
+            symlink_dirs = []
+        else:
+            symlink_dirs = [s.strip() for s in sd_arg.split(",") if s.strip()]
         path = setup(
             Path(args.run_dir), args.pr_number, args.head_sha, repo_root,
+            symlink_dirs=symlink_dirs,
         )
         print(str(path))
     else:

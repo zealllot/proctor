@@ -83,7 +83,29 @@ on stdout with no surrounding prose, headings, or code fences.
       Don't hand-roll the aggregation — call the dedicated script
       which has tested filter rules (single-match files dropped, test
       / vendor / build paths excluded, sorted by descending count,
-      capped at top 10):
+      capped at top 10).
+
+      **Batch mode (v0.7.0+, preferred).** When two or more hunks need
+      `impact_radius`, invoke the script ONCE with all changed-file
+      paths instead of N times — amortizes Python startup (~300-500ms
+      each) and runs the per-file `git grep` work in a small thread
+      pool inside one process:
+
+      ```bash
+      python3 ${CLAUDE_PLUGIN_ROOT}/scripts/impact_radius.py \
+          --file path/to/changed_a.go \
+          --file path/to/changed_b.go \
+          --idents "Ident1 Ident2 Ident3" \
+          --repo .
+      ```
+
+      With multiple `--file` flags the output becomes a JSON object
+      keyed by path: `{"path/to/a.go": {"files": [...], "truncated":
+      <bool>}, "path/to/b.go": {...}}`. Plug each value into the
+      corresponding hunk's `impact_radius` / `impact_radius_truncated`
+      fields as below.
+
+      **Single-file invocation** (v0.3.26 shape, still supported):
 
       ```bash
       python3 ${CLAUDE_PLUGIN_ROOT}/scripts/impact_radius.py \

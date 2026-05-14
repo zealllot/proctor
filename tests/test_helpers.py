@@ -1,6 +1,7 @@
 import json
 import pathlib
 import subprocess
+import sys
 import pytest
 from unittest import mock
 from plugins.proctor.scripts.schema import (
@@ -2317,6 +2318,127 @@ def test_worktree_setup_recreates_when_sha_differs(tmp_path):
     assert head == pr_sha
 
 
+# --- v0.7.0: worktree.py auto-symlinks gitignored runtime build dirs -----
+
+def test_worktree_setup_symlinks_default_runtime_dirs(tmp_path):
+    """When the main repo has gitignored runtime build dirs (e.g.
+    `external/assets`, `node_modules`), worktree.setup() symlinks them
+    into the worktree so the dev server doesn't have to rebuild.
+    Source: v0.6.9 e2e against PR #1126 (run `pr1126-75eea89-b7a2689b`)
+    — server started from worktree but `external/assets/mcd/` was
+    missing, blank pages, manual symlink + restart cost ~3min."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # Drop two of the default-symlinked dirs at the main repo root.
+    (repo / "external" / "assets").mkdir(parents=True)
+    (repo / "external" / "assets" / "mcd.bundle.js").write_text("// built\n")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / ".bin").mkdir()
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+
+    linked_assets = wt_path / "external" / "assets"
+    linked_nm = wt_path / "node_modules"
+    assert linked_assets.is_symlink()
+    assert linked_nm.is_symlink()
+    # Symlink target points back at the main checkout so the dev server
+    # picks up the existing build output instead of rebuilding.
+    assert linked_assets.resolve() == (repo / "external" / "assets").resolve()
+    # And the file is reachable through the symlink.
+    assert (linked_assets / "mcd.bundle.js").read_text() == "// built\n"
+
+
+def test_worktree_setup_skips_symlink_when_source_absent(tmp_path):
+    """Default symlink list contains common gitignored runtime dirs
+    (`dist`, `.next`, `vendor`, ...) that not every repo has. Missing
+    sources are silently skipped — no broken symlinks created."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+
+    # None of the defaults exist in the main repo, so none of them
+    # should appear in the worktree.
+    for d in ("external/assets", "node_modules", "dist", "build",
+              ".next", "vendor"):
+        assert not (wt_path / d).exists(), f"unexpected {d} in worktree"
+        assert not (wt_path / d).is_symlink(), f"broken symlink at {d}"
+
+
+def test_worktree_setup_symlink_dirs_empty_list_skips_all(tmp_path):
+    """Passing `symlink_dirs=[]` explicitly opts out of all symlinking,
+    even when default sources are present (consumer-level escape hatch
+    via `.proctor/config.yml.worktree_symlink_dirs: []`)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    # Default-symlinked source exists, but we override with [] to skip.
+    (repo / "external" / "assets").mkdir(parents=True)
+    (repo / "node_modules").mkdir()
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo, symlink_dirs=[])
+
+    assert not (wt_path / "external" / "assets").exists()
+    assert not (wt_path / "external" / "assets").is_symlink()
+    assert not (wt_path / "node_modules").exists()
+    assert not (wt_path / "node_modules").is_symlink()
+
+
+def test_worktree_setup_symlink_dirs_custom_list(tmp_path):
+    """A consumer-provided override list — only the named dirs are
+    symlinked, even if other defaults exist at the main repo root."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    (repo / "external" / "assets").mkdir(parents=True)
+    (repo / "custom_cache").mkdir()
+    (repo / "custom_cache" / "marker").write_text("present\n")
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo,
+                       symlink_dirs=["custom_cache"])
+
+    # Custom dir linked.
+    assert (wt_path / "custom_cache").is_symlink()
+    assert (wt_path / "custom_cache" / "marker").read_text() == "present\n"
+    # Default `external/assets` NOT linked (override replaced defaults).
+    assert not (wt_path / "external" / "assets").is_symlink()
+
+
+# --- v0.7.0: schema accepts worktree_symlink_dirs in .proctor/config.yml --
+
+from plugins.proctor.scripts.schema import validate_pr_test_config
+
+
+def test_pr_test_config_worktree_symlink_dirs_accepted():
+    """`.proctor/config.yml.worktree_symlink_dirs` (v0.7.0+) is an
+    optional list of repo-relative paths the worktree helper symlinks
+    from the main checkout. Validator accepts a list of non-empty
+    strings; an empty list is valid (means "skip all symlinking")."""
+    validate_pr_test_config({
+        "worktree_symlink_dirs": ["external/assets", "node_modules"],
+    })
+    validate_pr_test_config({"worktree_symlink_dirs": []})
+    # null also accepted (legacy / unset).
+    validate_pr_test_config({"worktree_symlink_dirs": None})
+
+
+def test_pr_test_config_worktree_symlink_dirs_rejects_non_list():
+    with pytest.raises(SchemaError):
+        validate_pr_test_config({"worktree_symlink_dirs": "external/assets"})
+    with pytest.raises(SchemaError):
+        validate_pr_test_config({"worktree_symlink_dirs": ["", "external/assets"]})
+
+
 def test_plan_smells_warnings_sorted_for_stability():
     plan = {"items": [
         {"id": "t-005", "category": "api", "tool": "chrome-devtools",
@@ -3050,6 +3172,74 @@ def test_impact_radius_min_occurrences_tunable(tmp_path):
                                         min_occurrences=1)
     assert "single.go" not in with_threshold["files"]
     assert "single.go" in without_threshold["files"]
+
+
+# --- v0.7.0: impact_radius batch mode -------------------------------------
+
+def test_impact_radius_cli_batch_multiple_files(tmp_path):
+    """v0.7.0+: passing multiple --file flags in ONE invocation emits
+    a JSON object keyed by file path, so the analyzer can amortize one
+    Python startup (~300-500ms) across all changed files. PR #1126
+    e2e had 3 files → 3 sequential subprocesses; this collapses them."""
+    import json as _json
+    _init_repo(tmp_path)
+    # Two distinct changed files with different identifiers.
+    (tmp_path / "a.go").write_text("package x\nfunc Apple() {}\n")
+    (tmp_path / "b.go").write_text("package x\nfunc Banana() {}\n")
+    # A caller for each.
+    (tmp_path / "consumer_a.go").write_text(
+        'package x\nfunc ca() { Apple(); Apple(); }\n')
+    (tmp_path / "consumer_b.go").write_text(
+        'package x\nfunc cb() { Banana(); Banana(); }\n')
+    _commit(tmp_path)
+
+    script = (
+        "/Users/zealllot/go/src/github.com/zealllot/proctor/"
+        "plugins/proctor/scripts/impact_radius.py"
+    )
+    proc = subprocess.run(
+        [sys.executable, script,
+         "--file", "a.go", "--file", "b.go",
+         "--idents", "Apple Banana",
+         "--repo", str(tmp_path)],
+        capture_output=True, text=True, check=True,
+    )
+    out = _json.loads(proc.stdout)
+    # Multi-file shape: dict keyed by file path.
+    assert set(out.keys()) == {"a.go", "b.go"}
+    assert "consumer_a.go" in out["a.go"]["files"]
+    assert "consumer_b.go" in out["b.go"]["files"]
+    # Each entry still carries the truncated flag.
+    assert out["a.go"]["truncated"] is False
+    assert out["b.go"]["truncated"] is False
+
+
+def test_impact_radius_cli_single_file_backward_compatible(tmp_path):
+    """Single-file invocation (pre-v0.7.0 shape) emits the raw
+    `{files, truncated}` dict directly, so existing v0.3.26 callers
+    don't need to change."""
+    import json as _json
+    _init_repo(tmp_path)
+    (tmp_path / "src.go").write_text("package x\nfunc Foo() {}\n")
+    (tmp_path / "caller.go").write_text(
+        'package x\nfunc a() { Foo(); Foo(); }\n')
+    _commit(tmp_path)
+
+    script = (
+        "/Users/zealllot/go/src/github.com/zealllot/proctor/"
+        "plugins/proctor/scripts/impact_radius.py"
+    )
+    proc = subprocess.run(
+        [sys.executable, script,
+         "--file", "src.go",
+         "--idents", "Foo",
+         "--repo", str(tmp_path)],
+        capture_output=True, text=True, check=True,
+    )
+    out = _json.loads(proc.stdout)
+    # Single-file shape: raw dict (no per-path wrapping).
+    assert "files" in out and "truncated" in out
+    assert "caller.go" in out["files"]
 
 
 # --- v0.6.5: per-item-type screenshot-contract validator ------------------

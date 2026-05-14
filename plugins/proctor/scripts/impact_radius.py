@@ -28,6 +28,7 @@ Invoked by analyzing-pr-changes; safe to call standalone for debugging:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import re
 import subprocess
@@ -137,8 +138,15 @@ def collect_callers(
 
 def _main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--file", required=True,
-                   help="The changed file (excluded from results).")
+    # --file is repeatable (v0.7.0+). --files is the preferred plural
+    # spelling. Either flag accumulates into the same list so the
+    # analyzer can amortize one Python startup over all changed files.
+    p.add_argument("--file", "--files", dest="files", action="append",
+                   default=None,
+                   help="The changed file (excluded from results). May "
+                        "be passed multiple times (v0.7.0+); when more "
+                        "than one file is supplied the output shape "
+                        "becomes a JSON object keyed by file path.")
     p.add_argument("--idents", required=True,
                    help="Space-separated identifier list.")
     p.add_argument("--min-occurrences", type=int, default=MIN_OCCURRENCES,
@@ -150,16 +158,38 @@ def _main() -> int:
                    help="Repo root for git grep (default cwd).")
     args = p.parse_args()
 
+    if not args.files:
+        p.error("at least one --file / --files argument is required")
+
     idents = [i for i in args.idents.split() if i]
-    result = collect_callers(
-        args.file, idents, repo=args.repo,
-        min_occurrences=args.min_occurrences, top_n=args.top,
-    )
-    # CLI emits the full dict so the analyzer skill sees the
-    # `truncated` flag without a second round-trip. Pre-v0.3.28
-    # consumers that expected a bare list can pipe through
-    # `jq '.files'` for the old shape.
-    json.dump(result, sys.stdout)
+
+    # Single-file: emit the result dict directly (backward-compatible
+    # with v0.3.26 — pre-v0.7.0 consumers parse this shape).
+    if len(args.files) == 1:
+        result = collect_callers(
+            args.files[0], idents, repo=args.repo,
+            min_occurrences=args.min_occurrences, top_n=args.top,
+        )
+        json.dump(result, sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+
+    # Multi-file (v0.7.0+): run collect_callers in parallel threads
+    # since each invocation shells out to `git grep` (IO-bound) and the
+    # work is fully independent per file. Emit a JSON object keyed by
+    # file path so the analyzer can substitute results in one round-trip.
+    results: dict[str, dict[str, object]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {
+            ex.submit(
+                collect_callers, f, idents, repo=args.repo,
+                min_occurrences=args.min_occurrences, top_n=args.top,
+            ): f
+            for f in args.files
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            results[futures[fut]] = fut.result()
+    json.dump(results, sys.stdout)
     sys.stdout.write("\n")
     return 0
 

@@ -1,7 +1,7 @@
 ---
 name: pr-test-executor
 description: Execute a single PRoctor test item and return a structured pass/fail result. Invoked once per test item by the executing-pr-tests skill. Should not push, comment, or modify the test plan.
-tools: Bash, Read, Grep, Glob, mcp__chrome-devtools__*, mcp__claude-in-chrome__*
+tools: Bash, Read, Grep, Glob, mcp__chrome-devtools__take_snapshot, mcp__chrome-devtools__take_screenshot, mcp__chrome-devtools__evaluate_script, mcp__chrome-devtools__navigate_page, mcp__chrome-devtools__list_pages, mcp__chrome-devtools__new_page, mcp__chrome-devtools__select_page, mcp__chrome-devtools__click, mcp__chrome-devtools__fill, mcp__chrome-devtools__fill_form, mcp__chrome-devtools__wait_for, mcp__chrome-devtools__press_key, mcp__chrome-devtools__upload_file, mcp__chrome-devtools__hover, mcp__chrome-devtools__type_text, mcp__chrome-devtools__close_page, ToolSearch
 ---
 
 # pr-test-executor
@@ -24,6 +24,18 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
 (write your stdout/stderr there).
 
 ## Procedure
+
+### 0. Tool pre-flight (v0.7.0+)
+
+For chrome-devtools items, the MCP tools are deferred-loaded in this Claude Code session. BEFORE making any decisions about how to run the test, invoke ToolSearch ONCE with:
+
+```
+ToolSearch(query="select:mcp__chrome-devtools__take_snapshot,mcp__chrome-devtools__take_screenshot,mcp__chrome-devtools__evaluate_script,mcp__chrome-devtools__navigate_page,mcp__chrome-devtools__list_pages,mcp__chrome-devtools__new_page,mcp__chrome-devtools__select_page,mcp__chrome-devtools__click,mcp__chrome-devtools__fill,mcp__chrome-devtools__wait_for,mcp__chrome-devtools__press_key,mcp__chrome-devtools__upload_file,mcp__chrome-devtools__hover")
+```
+
+If your test items include chrome-devtools, the tools MUST be loaded this way before driving the browser. Falling back to HTTP fetches violates the screenshot contract — v0.6.5 lint will reject the run.
+
+**Do NOT** verify chrome-devtools items via authenticated HTTP fetch + fake `screenshot_ref`. The v0.6.5 screenshot-contract lint rejects any chrome-devtools item missing real PNGs at the v0.6.4 per-type-count minimum. If you find yourself writing `screenshot_ref` to a path in `logs/` instead of `screenshots/`, STOP — that's the v0.6.9 e2e failure mode (PR #1126 run `pr1126-75eea89-b7a2689b`): the subagent ran 6m38s / 52 tool uses but ALL chrome work was HTTP fetches, `screenshot_ref` pointed at placeholder paths under `logs/`, and the orchestrator had to re-capture 8 screenshots manually after the lint caught the gap — doubling the chrome work.
 
 1. Decide concrete steps that satisfy `how:`. Use the tool indicated by
    `tool:`.
