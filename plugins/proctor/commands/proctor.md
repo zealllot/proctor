@@ -124,31 +124,34 @@ and exit 0. Set a Bash trap to release the lock on exit.
 Apply skill `analyzing-pr-changes`. Save output to
 `.proctor/runs/<run-id>/change-map.json`. Validate with `schema.py`.
 
-**DO NOT print the ChangeMap JSON to chat.** The JSON file is the
-artifact; chat is for humans. The ONLY chat output this step produces
-is a one-line status:
+**DO NOT print the ChangeMap JSON to chat.** Not the full object. Not a pretty-printed excerpt. Not the hunks array with summaries. None of it. The JSON file is the artifact; the next stage reads it from disk. The ONLY chat output this step produces is one line:
 
 ```
 [proctor:analyze] done — <N> hunks, categories: <list>
 ```
 
-**Then immediately proceed to Stage 2.**
+Then **invoke `Skill(planning-pr-tests)` as your next tool call**. Same response, no AskUserQuestion, no "let me verify the file" preamble, no JSON echo, no `cat change-map.json`. Just emit the one-line status and dispatch the next skill.
+
+If you find yourself wanting to "show the user what was analyzed" — STOP. That's the failure mode every prior trace hit: dumping the JSON consumes the AI's context budget, and 3+ minutes of `Cogitated for ...` follows because the model can no longer hold the next-step intent. The user sees the JSON in `.proctor/runs/<run-id>/change-map.json` if they want it; the report at the end summarizes what changed. Mid-pipeline chat is not the place.
+
+**Concretely**: your next assistant turn after writing change-map.json must contain EITHER:
+- The one-line status + a `Skill` tool call for `planning-pr-tests`, OR
+- An abort if validation failed.
+
+NOT a JSON code block. NOT a hunks summary. NOT a thinking pause. If the previous turn ended without invoking `Skill(planning-pr-tests)`, your CURRENT turn does it now — don't re-validate, don't re-read the file, just dispatch.
 
 ### 5. Stage 2 — plan
 
 Apply skill `planning-pr-tests`. Save output to
 `.proctor/runs/<run-id>/test-plan.json`. Validate with `schema.py`.
 
-**DO NOT print the test-plan JSON to chat.** Same reason as Stage 1 —
-JSON is for the validator + the next stage, not a wall of text for
-the human. The ONLY chat output here is:
+**DO NOT print the test-plan JSON to chat.** Same reason as Stage 1: dumping the JSON consumes context, the model loses the next-step intent, and you'll spend 3+ minutes in `Cogitated for ...` instead of proceeding. The ONLY chat output here is one line:
 
 ```
 [proctor:plan] done — <N> items planned
 ```
 
-**Then immediately proceed to the approval gate, where the plan gets
-rendered as a human-readable table.**
+Then **proceed to the approval gate in this SAME response** — emit the 4 substeps (6a header / 6b table / 6c estimate / 6d AskUserQuestion) without a thinking pause between Stage 2's status line and 6a's header. Do not "verify the plan", do not "let me look at what was generated" — the planning skill already self-audited via plan_smells. Your next assistant turn must contain BOTH the status line AND the approval gate (4 substeps), in one response.
 
 ### 6. Approval gate
 

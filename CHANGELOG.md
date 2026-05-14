@@ -2,6 +2,23 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.2 — 2026-05-14
+
+### Re-tighten "no JSON dump + no thinking pause" on Stage 1→2 and Stage 2→approval transitions
+
+User trace on v0.4.1 against PR #1115: AI completed Stage 1 (ChangeMap written + validated correctly), emitted the `[proctor:analyze] done` status line as instructed, THEN dumped the full ChangeMap JSON to chat anyway, THEN `Cogitated for 3m 29s` without invoking `Skill(planning-pr-tests)`. User had to type "continue" to unstick. Same failure mode seen earlier on Stage 2 → approval gate transitions.
+
+Diagnosis: the rule "DO NOT print the JSON" existed but wasn't loud enough. The AI's compulsion to "show its work" overrode the prose ban. Once the JSON was in chat, the model's context budget couldn't hold the next-step intent and it stalled.
+
+`commands/proctor.md` Stage 1 and Stage 2 transitions get explicit, surgical re-tightening:
+
+- **Stage 1 (analyze)**: spelled out what specifically NOT to emit (full object / pretty excerpt / hunks-array-with-summaries / `cat change-map.json`). Added an explicit "your next assistant turn must contain EITHER (a) one-line status + Skill(planning-pr-tests) dispatch OR (b) an abort — NOT a JSON code block, NOT a thinking pause". Cites the exact failure mode (the "3+ minutes Cogitated" the user just hit) so future versions of the AI see the consequence of the rule, not just the rule.
+
+- **Stage 2 (plan)**: same tightening. Emit the one-line status AND the 4 approval-gate substeps in the same response — no pause between status line and 6a header. The planning skill already self-audited; no "verify what was generated" preamble.
+
+### Tests
+- 170 unchanged (orchestrator prose only).
+
 ## v0.4.1 — 2026-05-14
 
 ### Tighten the v0.4.0 layout migration in /proctor:proctor-init
