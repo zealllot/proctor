@@ -143,29 +143,75 @@ Why this matters:
 
 When the form's validator rejects values containing `-` or `+` or other punctuation, swap to the closest compliant pattern (e.g. `aitestimagerewardt007`) but keep the `aitest` prefix intact.
 
-3. **For chrome-devtools items**: capture a screenshot at the assertion
-   point (after the page is rendered, before returning). Save it to
-   `<logs_dir>/screenshots/<id>.png` via the chrome-devtools MCP's
-   `take_screenshot` tool with `format: "png"`, `fullPage: true`. Set
-   `screenshot_ref` in your result to that exact path.
+3. **For chrome-devtools items: screenshots are PROOF, not decoration (v0.6.4+).** A real-run report had t-006 ("edit reward, switch Digital Content Type from Image to Game") with a single post-save screenshot that DIDN'T EVEN SHOW the Digital Content Type field — the screenshot was useless as evidence of what the test claimed. The contract below makes the screenshot count + content match the assertion type, and forbids "scroll-past-the-target" screenshots.
 
-   **Also set `screenshot_focus`** — a one-sentence pointer telling the
-   human reader WHERE in the screenshot to look to verify your evidence.
-   Examples:
-   - "Top-left of the nav bar shows 'PRoctor Fixtures Admin'."
-   - "Three pill-shaped status badges are visible in the table column."
-   - "Button at center of viewport with lock icon at left of 'Sign in' text."
+### How many screenshots, and what they must show
 
-   If your assertion is on something the screenshot CAN'T show
-   (e.g. `document.title` is the browser tab; computed styles aren't
-   visible pixels), say so explicitly:
-   - "Evidence is on `document.title`, which is in the browser tab and not visible in this page screenshot — verified via DOM only."
+Match your item's category to one of the templates below. Use the multi-screenshot `screenshots: [{path, label, focus}, ...]` field on the result (v0.6.4+ schema); fall back to the single-screenshot `screenshot_ref` + `screenshot_focus` only for the simplest case.
 
-   The point is to force you (and the human reading the report) to
-   confirm the screenshot actually corroborates the evidence. If you
-   write the focus and realize the screenshot doesn't show what you
-   claim — change the assertion (test something visible) or change
-   the screenshot (capture the right region).
+| Item category | # screenshots | What each must contain |
+|---|---|---|
+| **Render-check** (form-renders, new fields appear, page-load test) | 1 | The new field(s) **in frame with their labels visible**. Not "the form" — the SPECIFIC fields the test asserts. |
+| **Negative / validator-reject** | 1 | The **inline error message** AND the **field it relates to** in the same frame. Not just the page; the error chip + field together. |
+| **Happy save** (HAPPY: create/save) | 2 | (a) **Form filled, pre-submit** — every required input visibly populated with valid values. (b) **Post-save success state** — detail page URL bar OR success toast, with the created record's identifying field (title/slug/ID) visible. |
+| **Round-trip** (re-open saved record) | 2 | (a) **Navigated to detail page** before hard-reload — fields visibly populated. (b) **After hard-reload** — same fields, same values, proving server-side persistence (NOT cached form state). |
+| **Edit-and-switch** (change a field value on existing record, save) | 3 | (a) **Form with ORIGINAL field value** before the change. (b) **Form with NEW field value** just before clicking save (the asserted change visible). (c) **Post-save / re-opened** detail page with the NEW value persisted. |
+| **Multi-step flow** (Save Draft → Publish, login → action) | 1 per logical step | Each step's screenshot frames the affordance / state for THAT step. The post-final-step screenshot shows the terminal state. |
+
+### Pre-screenshot requirements (every screenshot, every time)
+
+1. **Scroll the asserted target into view.** Long admin forms put fields off-screen. Before `take_screenshot`, do:
+   ```javascript
+   document.querySelector('<selector for the asserted field>')
+     .scrollIntoView({block: 'center', behavior: 'instant'});
+   ```
+   via `evaluate_script`. The field's label + value must be visible in the captured image.
+
+2. **Take a `take_snapshot` first** to confirm the field is on the page and find its DOM node. If the field isn't in the snapshot, the test premise is wrong — fail with `reason: "missing"` and cite which field the form lacks. Don't take a screenshot of an absent field.
+
+3. **Format: PNG, fullPage: false** (viewport-cropped). FullPage screenshots make the asserted target tiny — viewport-cropped after scroll-into-view keeps the target large enough for the reviewer to actually see.
+
+4. **Save each screenshot under `<logs_dir>/screenshots/<id>__<n>__<short-label>.png`** where `<n>` is the 1-based ordinal. E.g. `t-006__1__form-image-original.png`, `t-006__2__form-game-changed.png`, `t-006__3__detail-game-persisted.png`. The label makes the filename self-documenting.
+
+### Result-field shape (v0.6.4+)
+
+For multi-screenshot items use `screenshots`:
+
+```jsonc
+"screenshots": [
+  {
+    "path": ".proctor/runs/<run-id>/screenshots/t-006__1__form-image-original.png",
+    "label": "Before: form shows DigitalContentType=Image",
+    "focus": "Top center of form: 'Digital Content Type' select shows 'Image' (the original state being changed)."
+  },
+  {
+    "path": ".proctor/runs/<run-id>/screenshots/t-006__2__form-game-changed.png",
+    "label": "Changed: select switched to Game, GameUrl filled",
+    "focus": "Same select now shows 'Game'; Game URL input directly below shows 'https://ai-test.example.invalid/edit-t006'."
+  },
+  {
+    "path": ".proctor/runs/<run-id>/screenshots/t-006__3__detail-game-persisted.png",
+    "label": "After hard-reload of detail page: change persisted",
+    "focus": "After F5, Digital Content Type still reads 'Game' and Game URL still shows the saved value — proves the switch round-tripped through the server."
+  }
+]
+```
+
+For single-screenshot items (render-check, negative): set BOTH `screenshots` (with one entry) AND the legacy `screenshot_ref` + `screenshot_focus` fields. Reporter prefers `screenshots` when present; legacy fields are read for v0.6.3-and-earlier results.
+
+### Anti-patterns (real ones we've seen)
+
+- **Post-save detail page when the test asserted on a form-state change** — t-006 in the v0.6.3 run. The screenshot showed the saved record's summary, NOT the form field that was switched. Useless as evidence.
+- **One full-page screenshot of a 20-section admin form** — the asserted field is 30 pixels tall in a 4000-pixel-tall image. Reviewer can't see it.
+- **Screenshot before scroll-into-view** — the asserted field is below the fold.
+- **Multiple screenshots all identical** — taking the SAME post-save view 3 times doesn't satisfy "before/after"; the test gains no signal.
+- **Screenshot of the success toast WITHOUT the form** — proves something saved, doesn't prove the FIELD VALUE is what the test wanted.
+
+If your assertion is on something a screenshot CAN'T show (e.g. `document.title` is the browser tab, computed styles aren't pixels), say so explicitly in `focus` AND verify via DOM:
+
+> "Evidence is on `document.title`, which is in the browser tab and not visible in this page screenshot — verified via DOM-only."
+
+In that case ONE screenshot of the relevant page is still required (so the reviewer sees the test was on the right page), but the focus explicitly notes the assertion isn't visual.
 
 4. Return EXACTLY ONE JSON object. Include as many of the optional
    fields as you can — they're what the report uses to give the human

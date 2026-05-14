@@ -2,6 +2,42 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.4 — 2026-05-14
+
+### Screenshots as proof — per-item-type contract for evidence
+
+User's v0.6.3 run report had t-006 ("edit reward, switch Digital Content Type from Image to Game") with a single post-save screenshot that DIDN'T EVEN SHOW the Digital Content Type field. Useless as evidence — the screenshot was a different page than what the test was asserting on. v0.3.40 had a generic "set screenshot_focus so the screenshot corroborates the evidence" rule; in production the executor took ONE screenshot at the assertion point regardless of whether one frame could carry the proof.
+
+**Schema** (`scripts/schema.py`):
+- New optional `screenshots: [{path, label, focus}]` field on test-result items.
+- Coexists with legacy `screenshot_ref` + `screenshot_focus` (reporter prefers the list; falls back to single-shot for v0.6.3-and-earlier results).
+- Each entry's three fields are required + non-empty.
+
+**Executor agent contract** (`agents/pr-test-executor.md`):
+- New "Screenshots are PROOF, not decoration" section.
+- Per-item-type screenshot count + content matrix:
+  - **Render-check**: 1 — new field(s) with labels visibly in frame.
+  - **Negative**: 1 — inline error message AND the field together.
+  - **Happy save**: 2 — (a) form filled, (b) post-save success state.
+  - **Round-trip**: 2 — (a) detail page initial, (b) post-hard-reload same fields.
+  - **Edit-and-switch**: 3 — original / changed / persisted.
+  - **Multi-step flow**: 1 per logical step.
+- Pre-screenshot requirements:
+  - Must `take_snapshot` first to confirm field is on the page.
+  - Must scroll the asserted field into view via `evaluate_script('document.querySelector(...).scrollIntoView({block: "center"})')` BEFORE take_screenshot.
+  - Format: PNG, **viewport-cropped** (`fullPage: false`). Full-page screenshots make assertions 30px tall in a 4000px image — unreadable.
+  - Filename: `<id>__<n>__<short-label>.png` — self-documenting.
+- 5 explicit anti-patterns called out (real ones we've seen), including the t-006 "post-save detail page when assertion is on form-state change" failure.
+
+**Renderer** (`scripts/render_item_artifacts.py`):
+- New `screenshots` parameter (list of `{path, label, focus}` dicts) takes precedence over legacy single-screenshot fields.
+- Renders each as numbered list entry: `1. **<label>**` + image embed + `_Focus:_ <focus>`.
+- Per-entry existence check — one missing screenshot doesn't break the whole block; that one gets "(file not found)" while siblings render normally.
+- CLI gets `--screenshots-json` arg accepting a JSON-encoded list.
+
+### Tests
+- 235 → 243 (+8): `screenshots` list accepted; missing required key rejected; empty-string field rejected; non-list rejected; multi-screenshot block rendered (3 entries, 3 focuses); per-entry missing-file fallback; new field takes precedence over legacy; legacy single-screenshot still works.
+
 ## v0.6.3 — 2026-05-14
 
 ### Fix v0.6.2 validator false-negative on the exact bug it was shipped for

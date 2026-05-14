@@ -30,6 +30,7 @@ Used by the reporting-pr-test-results SKILL — called once per item.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -71,6 +72,7 @@ def render(
     github_run_id: str | None = None,
     server_url: str | None = None,
     repo: str | None = None,
+    screenshots: list[dict] | None = None,
 ) -> str:
     """Return the markdown subsection for one item's artifacts. May
     be an empty string when no artifacts apply (e.g. lint-only item
@@ -102,7 +104,58 @@ def render(
                 f"`{logs_ref}` but the file is absent at `{log_path}`)*"
             )
 
-    # --- Screenshot (chrome-devtools items only) ---
+    # --- Screenshots (chrome-devtools items only) ---
+    # v0.6.4+: prefer the new multi-screenshot `screenshots` list. Falls
+    # back to legacy single `screenshot_ref` + `screenshot_focus` for
+    # results emitted by older executors.
+    if tool == "chrome-devtools" and screenshots:
+        parts.append(f"**Screenshots** ({len(screenshots)} captured):")
+        for i, shot in enumerate(screenshots, start=1):
+            path = shot.get("path") or ""
+            label = shot.get("label") or f"Screenshot {i}"
+            focus = shot.get("focus") or ""
+            if not path:
+                parts.append(
+                    f"{i}. **{label}** — *(missing path field)*"
+                )
+                continue
+            shot_path = _normalize(run_dir, path, sub_dir="screenshots")
+            if shot_path.exists():
+                if mode == "local":
+                    parts.append(
+                        f"{i}. **{label}**\n\n"
+                        f"![{item_id} {label}](file://{shot_path})"
+                    )
+                elif screenshot_url_base:
+                    parts.append(
+                        f"{i}. **{label}**\n\n"
+                        f"![{item_id} {label}]"
+                        f"({screenshot_url_base}{shot_path.name})"
+                    )
+                else:
+                    artifact_url = (
+                        f"{server_url}/{repo}/actions/runs/"
+                        f"{github_run_id}#artifacts"
+                        if server_url and repo and github_run_id else
+                        "(in artifact)"
+                    )
+                    parts.append(
+                        f"{i}. **{label}**\n\n"
+                        f"`{shot_path.name}` ({artifact_url})"
+                    )
+                if focus:
+                    parts.append(f"   _Focus:_ {focus}")
+            else:
+                parts.append(
+                    f"{i}. **{label}** — *(file not found at "
+                    f"`{shot_path}`; executor referenced `{path}`)*"
+                )
+        # Don't fall through to legacy single-screenshot rendering
+        # when the multi-screenshot field is present.
+        if not parts:
+            return ""
+        return "\n\n".join(parts) + "\n"
+
     if tool == "chrome-devtools":
         if screenshot_ref:
             shot_path = _normalize(run_dir, screenshot_ref, sub_dir="screenshots")
@@ -159,8 +212,15 @@ def _main() -> int:
     p.add_argument("--logs-ref", default="",
                    help="The result's logs_ref field, or empty.")
     p.add_argument("--screenshot-ref", default="",
-                   help="The result's screenshot_ref field, or empty.")
+                   help="The result's screenshot_ref field, or empty. "
+                        "Legacy single-screenshot field — prefer "
+                        "--screenshots-json for v0.6.4+ results.")
     p.add_argument("--screenshot-focus", default="")
+    p.add_argument("--screenshots-json", default=None,
+                   help="JSON string for the v0.6.4+ `screenshots` "
+                        "field (list of {path, label, focus}). When "
+                        "present, takes precedence over the single-"
+                        "screenshot legacy fields.")
     p.add_argument("--mode", default="local", choices=["local", "ci"])
     p.add_argument("--screenshot-url-base", default=None)
     p.add_argument("--github-run-id", default=None)
@@ -168,6 +228,16 @@ def _main() -> int:
     p.add_argument("--repo", default=None)
     args = p.parse_args()
 
+    screenshots = None
+    if args.screenshots_json:
+        try:
+            screenshots = json.loads(args.screenshots_json)
+        except json.JSONDecodeError as e:
+            sys.stderr.write(
+                f"render_item_artifacts: --screenshots-json failed "
+                f"to parse: {e}\n"
+            )
+            return 2
     sys.stdout.write(render(
         run_dir=args.run_dir,
         item_id=args.item_id,
@@ -180,6 +250,7 @@ def _main() -> int:
         github_run_id=args.github_run_id,
         server_url=args.server_url,
         repo=args.repo,
+        screenshots=screenshots,
     ))
     return 0
 

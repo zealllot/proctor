@@ -1024,6 +1024,157 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.6.4: multi-screenshot evidence (richer report screenshots) --------
+
+def test_test_results_screenshots_list_accepted():
+    """v0.6.4+: multi-screenshot `screenshots` list on result items."""
+    valid = {
+        "items": [{
+            "id": "t-006", "status": "pass", "evidence": "ok",
+            "screenshots": [
+                {"path": ".proctor/runs/x/screenshots/t-006__1.png",
+                 "label": "Before: form shows DigitalContentType=Image",
+                 "focus": "Top center: select reads 'Image'."},
+                {"path": ".proctor/runs/x/screenshots/t-006__2.png",
+                 "label": "Changed: select switched to Game",
+                 "focus": "Same select now reads 'Game'."},
+            ],
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    validate_test_results(valid)
+
+
+def test_test_results_screenshots_missing_required_key_rejected():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "screenshots": [
+                {"path": "x.png", "label": "y"},  # missing focus
+            ],
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_test_results_screenshots_empty_string_rejected():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "screenshots": [
+                {"path": "", "label": "y", "focus": "z"},
+            ],
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_test_results_screenshots_must_be_list():
+    bad = {
+        "items": [{
+            "id": "t-1", "status": "pass", "evidence": "ok",
+            "screenshots": "not-a-list",
+        }],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }
+    with pytest.raises(SchemaError):
+        validate_test_results(bad)
+
+
+def test_artifacts_renders_multi_screenshot_block(tmp_path):
+    """The exact bug user hit on t-006: report showed one useless
+    screenshot. v0.6.4 renders the full list with labels + focus."""
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    for n in (1, 2, 3):
+        shot = run_dir / "screenshots" / f"t-006__{n}.png"
+        shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-006", tool="chrome-devtools",
+        logs_ref=None, screenshot_ref=None, screenshot_focus=None,
+        mode="local",
+        screenshots=[
+            {"path": "t-006__1.png", "label": "Before: Image",
+             "focus": "Select reads 'Image'."},
+            {"path": "t-006__2.png", "label": "Changed: Game",
+             "focus": "Select reads 'Game'."},
+            {"path": "t-006__3.png", "label": "Persisted",
+             "focus": "After reload, still 'Game'."},
+        ],
+    )
+    # All 3 image embeds + 3 focus lines.
+    assert "Before: Image" in out
+    assert "Changed: Game" in out
+    assert "Persisted" in out
+    assert out.count("![t-006") == 3
+    assert "Focus:" in out
+    assert "Select reads 'Image'." in out
+    assert "Select reads 'Game'." in out
+
+
+def test_artifacts_multi_screenshot_missing_file_marks_each(tmp_path):
+    """One missing screenshot among many doesn't kill the whole
+    section — each entry's existence is checked independently."""
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    # Only the first exists.
+    (run_dir / "screenshots" / "t-1.png").write_bytes(b"\x89PNG\r\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-1", tool="chrome-devtools",
+        logs_ref=None, screenshot_ref=None, screenshot_focus=None,
+        mode="local",
+        screenshots=[
+            {"path": "t-1.png", "label": "Step 1", "focus": "ok"},
+            {"path": "t-1__missing.png", "label": "Step 2",
+             "focus": "should be there"},
+        ],
+    )
+    assert "Step 1" in out
+    assert "Step 2" in out
+    assert "file not found" in out
+
+
+def test_artifacts_screenshots_list_takes_precedence_over_legacy(tmp_path):
+    """When both `screenshots` and the legacy single fields are
+    provided, v0.6.4 prefers the list (richer evidence)."""
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "new1.png").write_bytes(b"\x89PNG\r\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-1", tool="chrome-devtools",
+        logs_ref=None,
+        screenshot_ref="legacy.png", screenshot_focus="legacy",
+        mode="local",
+        screenshots=[{"path": "new1.png", "label": "new",
+                      "focus": "should be the one rendered"}],
+    )
+    assert "new" in out
+    assert "should be the one rendered" in out
+    # Legacy rendering shouldn't appear when the list is present.
+    assert "legacy" not in out
+
+
+def test_artifacts_legacy_single_screenshot_still_works(tmp_path):
+    """v0.6.3-and-earlier results that only set screenshot_ref
+    continue to render via the single-screenshot path."""
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "t-1.png").write_bytes(b"\x89PNG\r\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-1", tool="chrome-devtools",
+        logs_ref=None,
+        screenshot_ref="t-1.png",
+        screenshot_focus="legacy single shot",
+        mode="local",
+    )
+    assert "legacy single shot" in out
+    assert "What to look for:" in out
+
+
 # --- v0.6.2: validate_item_result empirical-grounding check ---------------
 
 from plugins.proctor.scripts.validate_item_result import check as vir_check

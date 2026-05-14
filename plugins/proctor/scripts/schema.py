@@ -366,6 +366,27 @@ def validate_test_results(tr: dict) -> None:
                       f"TestResults.items[{i}]")
         _require(item["status"] in VALID_STATUS,
                  f"TestResults.items[{i}].status {item['status']!r} invalid")
+        # `screenshots` (v0.6.4+) — list of {path, label, focus} for
+        # items where ONE screenshot at the assertion point doesn't
+        # carry enough visual evidence: state-change items
+        # (edit/switch/save/round-trip) need before/after pairs;
+        # round-trip items need detail-loaded + post-reload pairs;
+        # edit-and-switch items need original/changed/persisted
+        # triples. See agents/pr-test-executor.md for the per-item
+        # contract.
+        if item.get("screenshots") is not None:
+            _require(isinstance(item["screenshots"], list),
+                     f"TestResults.items[{i}].screenshots must be a list")
+            for j, s in enumerate(item["screenshots"]):
+                _require(isinstance(s, dict),
+                         f"TestResults.items[{i}].screenshots[{j}] must be a dict")
+                _require_keys(s, {"path", "label", "focus"},
+                              f"TestResults.items[{i}].screenshots[{j}]")
+                for k in ("path", "label", "focus"):
+                    _require(isinstance(s[k], str) and s[k].strip(),
+                             f"TestResults.items[{i}].screenshots[{j}].{k} "
+                             f"must be a non-empty string")
+
         for opt_str in ("command", "output_excerpt", "logs_ref",
                         "screenshot_ref", "screenshot_focus"):
             # Treat explicit `null` the same as omitted — the executor
