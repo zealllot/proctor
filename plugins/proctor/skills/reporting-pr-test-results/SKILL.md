@@ -104,27 +104,34 @@ For EACH item, render a `<details>`-collapsed block. Pass items default closed; 
 ```
 {end-if}
 
-{if item.screenshot_ref}**Screenshot:**
-{if SCREENSHOT_URL_BASE is set}
-![{item.id} screenshot]({SCREENSHOT_URL_BASE}{basename of item.screenshot_ref})
-{else if PROCTOR_POST_COMMENT == 0}
-![{item.id} screenshot](file://{absolute path to item.screenshot_ref})
+<!-- v0.4.6+: artifact rendering moved to scripts/render_item_artifacts.py.
+     Reason: AI hand-rendering produced repo-root-relative hrefs
+     (`.proctor/runs/<id>/<id>.log`) which the browser resolved
+     relative to the report's OWN directory, yielding 404
+     (ERR_FILE_NOT_FOUND on file://). The AI also silently rendered
+     nothing for missing artifacts, hiding the "executor skipped
+     take_screenshot" contract violation. The script computes
+     absolute file:// paths, checks existence, and emits explicit
+     "(not captured)" italic badges for missing artifacts. -->
+{run for each item}
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_item_artifacts.py \
+    --run-dir "$(realpath .proctor/runs/<run-id>)" \
+    --item-id "{item.id}" \
+    --tool "{item.tool from approved-plan.json}" \
+    --logs-ref "{item.logs_ref or empty}" \
+    --screenshot-ref "{item.screenshot_ref or empty}" \
+    --screenshot-focus "{item.screenshot_focus or empty}" \
+    --mode "{local | ci}" \
+    ${SCREENSHOT_URL_BASE:+--screenshot-url-base "$SCREENSHOT_URL_BASE"} \
+    ${GITHUB_RUN_ID:+--github-run-id "$GITHUB_RUN_ID"} \
+    ${GITHUB_SERVER_URL:+--server-url "$GITHUB_SERVER_URL"} \
+    ${REPO:+--repo "$REPO"}
+```
 
-_Path: `{item.screenshot_ref}` (open in Preview / VS Code markdown
-preview for inline rendering, or click the link above on macOS)._
-{else}
-[`{item.screenshot_ref}` in artifact](<server>/<repo>/actions/runs/<github-run-id>#artifacts)
-{end-if}
-{if item.screenshot_focus}_What to look for:_ {item.screenshot_focus}{end-if}
-{end-if}
-
-{if item.logs_ref}
-{if PROCTOR_POST_COMMENT == 0}
-**Full log:** `{absolute path to item.logs_ref}`
-{else}
-**Full log:** `{item.logs_ref}` (in artifact)
-{end-if}
-{end-if}
+The script's stdout goes into the per-item section verbatim. Do
+NOT hand-render `file://` or `**Full log:**` lines yourself —
+that's what produced the v0.3.x 404 bug.
 
 {if status == fail AND item.reason}**Failure reason:** `{item.reason}`
 {end-if}

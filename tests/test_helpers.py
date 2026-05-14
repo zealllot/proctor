@@ -1024,6 +1024,137 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.4.6: render_item_artifacts (absolute paths + missing-artifact badges) ---
+
+from plugins.proctor.scripts.render_item_artifacts import render as render_artifacts
+
+
+def test_artifacts_local_log_renders_absolute_file_url(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "t-001.log").write_text("ok\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-001", tool="bash",
+        logs_ref=".proctor/runs/run/t-001.log",   # repo-root-relative, BAD
+        screenshot_ref=None, screenshot_focus=None, mode="local",
+    )
+    # The bug we're fixing: AI's repo-root-relative path normalized to
+    # an absolute file:// URL via the run-dir.
+    assert f"file://{run_dir.resolve()}/t-001.log" in out
+    assert "Full log:" in out
+
+
+def test_artifacts_local_missing_log_shows_not_found_badge(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-001", tool="bash",
+        logs_ref="t-001.log",   # ref'd but file doesn't exist
+        screenshot_ref=None, screenshot_focus=None, mode="local",
+    )
+    assert "not found" in out
+    assert "Full log:" in out
+
+
+def test_artifacts_chrome_devtools_missing_screenshot_loud_warning():
+    """The exact bug user hit: 11 chrome-devtools items, 0 screenshots.
+    Reporter must SURFACE the absence with a loud message, not silently
+    render nothing."""
+    out = render_artifacts(
+        run_dir="/tmp", item_id="t-005", tool="chrome-devtools",
+        logs_ref=None,
+        screenshot_ref=None,   # executor never set this
+        screenshot_focus=None, mode="local",
+    )
+    assert "Screenshot:" in out
+    assert "not captured" in out
+    assert "REQUIRE" in out or "contract" in out
+    assert "executor bug" in out or "executor subagent" in out
+
+
+def test_artifacts_chrome_devtools_present_screenshot_renders_image(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    shot = run_dir / "screenshots" / "t-005.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")  # minimal PNG signature
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-005", tool="chrome-devtools",
+        logs_ref=None,
+        screenshot_ref="t-005.png",
+        screenshot_focus="The 'Game URL' field shows the saved value.",
+        mode="local",
+    )
+    assert f"![t-005 screenshot](file://{shot.resolve()})" in out
+    assert "What to look for:" in out
+    assert "'Game URL' field shows the saved value." in out
+
+
+def test_artifacts_chrome_devtools_with_repo_root_relative_ref(tmp_path):
+    """The actual production case: executor wrote screenshot_ref as
+    `.proctor/runs/<id>/screenshots/t-005.png` (repo-root-relative).
+    Renderer should still find it under run-dir/screenshots/."""
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    shot = run_dir / "screenshots" / "t-005.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-005", tool="chrome-devtools",
+        logs_ref=None,
+        screenshot_ref=".proctor/runs/something/screenshots/t-005.png",
+        screenshot_focus=None, mode="local",
+    )
+    assert f"file://{shot.resolve()}" in out
+
+
+def test_artifacts_lint_only_with_no_log_returns_empty(tmp_path):
+    """Lint-only items often have nothing to render — that's fine, no
+    spurious empty sections in the report."""
+    out = render_artifacts(
+        run_dir=tmp_path, item_id="t-001", tool="lint-only",
+        logs_ref=None, screenshot_ref=None, screenshot_focus=None,
+        mode="local",
+    )
+    assert out == ""
+
+
+def test_artifacts_ci_mode_log_links_to_artifact(tmp_path):
+    """CI mode renders an artifact-zip URL instead of file://."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "t-001.log").write_text("ok\n")
+    out = render_artifacts(
+        run_dir=run_dir, item_id="t-001", tool="bash",
+        logs_ref="t-001.log", screenshot_ref=None,
+        screenshot_focus=None, mode="ci",
+        github_run_id="123456", server_url="https://github.com",
+        repo="acme/repo",
+    )
+    assert "file://" not in out
+    assert "actions/runs/123456#artifacts" in out
+
+
+def test_artifacts_cli_runs(tmp_path):
+    import subprocess
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "t-001.log").write_text("ok\n")
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts"
+                 / "render_item_artifacts.py")
+    result = subprocess.run(
+        ["python3", script,
+         "--run-dir", str(run_dir),
+         "--item-id", "t-001",
+         "--tool", "bash",
+         "--logs-ref", "t-001.log",
+         "--mode", "local"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "Full log:" in result.stdout
+    assert "file://" in result.stdout
+
+
 # --- v0.4.5: wizard_decide_mode deterministic MODE picker ---------------
 
 from plugins.proctor.scripts.wizard_decide_mode import (

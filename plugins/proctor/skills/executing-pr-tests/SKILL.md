@@ -190,6 +190,27 @@ Output: a single `TestResults` JSON object.
    - Append to results array. If status is `pass` AND `outputs` is
      non-empty, write `outputs` into `run_context[<this_id>]` so
      downstream items can substitute against it.
+   - **Verify artifact-capture contract** (v0.4.6+). The
+     pr-test-executor agent's contract REQUIRES:
+     - `logs_ref` set (the path to `<logs_dir>/<id>.log`) for ALL items.
+     - `screenshot_ref` set (the path to `<logs_dir>/screenshots/<id>.png`) for chrome-devtools items.
+
+     Real runs show the subagent skipping these. After receiving the
+     result, check both:
+
+     ```bash
+     # Missing logs_ref → append warning to evidence
+     [ -z "$RESULT_LOGS_REF" ] && \
+         echo "WARN: executor returned no logs_ref for <id>; report will render '(not captured)'"
+     # Missing screenshot_ref on chrome-devtools → louder warning
+     [ "$TOOL" = "chrome-devtools" ] && [ -z "$RESULT_SCREENSHOT_REF" ] && \
+         echo "WARN: chrome-devtools item <id> has no screenshot_ref — executor skipped take_screenshot (contract violation); report will flag this visibly"
+     ```
+
+     Do NOT downgrade the item's status — the test may have passed
+     fine, the gap is just visibility. The reporter's
+     `render_item_artifacts.py` will surface the missing artifact in
+     the per-item section so the human reviewer sees what's absent.
 
 5. After all items finish, **clean up**: close all browser contexts;
    in legacy mode, also kill setup processes by sending SIGTERM to

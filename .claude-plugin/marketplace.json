@@ -10,7 +10,7 @@
       "name": "proctor",
       "source": "./plugins/proctor",
       "description": "AI-driven PR test runner — Claude Code plugin. Analyze diff → plan tests → execute (chrome-devtools/Bash) → auto-fix → report comment. v0.3+ supports auto-login (form + TOTP) against deployed test envs with multi-role admin accounts.",
-      "version": "0.4.5"
+      "version": "0.4.6"
     }
   ]
 }

@@ -2,6 +2,38 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.6 — 2026-05-14
+
+### Reporter artifact links — absolute file:// URLs + loud "missing artifact" badges
+
+User opened `file:///path/to/.proctor/runs/<id>/report.html` and "Full log" links 404'd with `ERR_FILE_NOT_FOUND`. Also: 11 chrome-devtools items, 0 screenshots — yet report rendered nothing acknowledging the gap.
+
+**Two bugs, both same root cause** (AI hand-rendered something prose said should be computed deterministically):
+
+1. **Log links 404'd** because reporter rendered repo-root-relative hrefs `.proctor/runs/<id>/t-001.log`. The browser resolves those relative to the REPORT's directory (`.proctor/runs/<id>/`), giving `.proctor/runs/<id>/.proctor/runs/<id>/t-001.log` — double-nested, doesn't exist. The reporter SKILL prose said "absolute path to item.logs_ref" but the AI rendered repo-relative anyway.
+2. **Missing screenshots silently absent.** The pr-test-executor agent contract REQUIRES `screenshot_ref` for chrome-devtools items, but real runs show subagents skipping `take_screenshot`. Reporter's `{if item.screenshot_ref}` skipped rendering, hiding the gap. Reviewer couldn't tell "test passed without screenshot" apart from "test passed and there's nothing visual to show".
+
+**Same fix pattern as v0.4.3 / v0.4.5**: move the deterministic logic out of AI prose into a script.
+
+**New helper** (`plugins/proctor/scripts/render_item_artifacts.py`):
+- Reads run-dir + item fields, normalizes the artifact ref against (a) absolute path, (b) `<run-dir>/<sub-dir>/<basename>` (the executor's canonical write location), (c) `<cwd>/<ref>` (repo-root-relative — what AIs default to). Returns the first one that EXISTS.
+- For LOGS: emits `**Full log:** [<name>](file:///abs/path)` in local mode, or `... (in artifact)` link in CI mode. If the file is missing despite a ref → italic "(not found at <path>)" badge.
+- For SCREENSHOTS on chrome-devtools items:
+  - present → image embed + `_What to look for:_` line from `screenshot_focus`.
+  - **ref present but file missing** → "(file not found at <path>)" badge.
+  - **ref absent entirely** → loud `**Screenshot:** *(not captured — chrome-devtools items REQUIRE a screenshot per the pr-test-executor agent contract, but screenshot_ref is absent on this result. Treat as an executor bug; the test may have passed without visual verification.)*` — surfaces the contract violation instead of silently rendering nothing.
+- Lint-only items with no logs / no screenshots → returns empty string (no spurious sections).
+
+**Reporter SKILL** (`reporting-pr-test-results/SKILL.md`):
+- Per-item artifact subsection replaced with a single bash call to `render_item_artifacts.py`. AI passes the item's fields; script's stdout goes into the report verbatim.
+- "Do NOT hand-render `file://` or `**Full log:**` lines yourself — that's what produced the v0.3.x 404 bug" added to the forbidden list.
+
+**Executor SKILL** (`executing-pr-tests/SKILL.md`):
+- New post-dispatch artifact-capture check: after receiving each subagent result, log a warning when `logs_ref` is empty (any item) or `screenshot_ref` is empty (chrome-devtools items). Status NOT downgraded — the test may have passed fine; the gap is just visibility. The reporter's script will surface the missing artifact visibly.
+
+### Tests
+- 190 → 198 (+8): local log absolute file:// URL when ref is repo-root-relative; missing log "(not found)" badge; chrome-devtools missing-screenshot loud warning (verifies the EXACT bug user hit); chrome-devtools present-screenshot image embed + focus line; chrome-devtools repo-root-relative screenshot ref resolves to actual path; lint-only with nothing to render returns empty; CI mode emits artifact URL instead of file://; CLI runs end-to-end.
+
 ## v0.4.5 — 2026-05-14
 
 ### Wizard MODE decision moved into a deterministic script — fixes silent NEEDS_LOCAL_REGEN skip
