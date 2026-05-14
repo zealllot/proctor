@@ -2,6 +2,30 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.5 — 2026-05-14
+
+### Mechanical enforcement of the v0.6.4 screenshot contract
+
+v0.6.4 introduced the per-item-type screenshot-count contract (render 1, negative 1, happy-save 2, round-trip 2, edit-and-switch 3) as prose discipline on the executor agent. e2e-driver run against PR-1115 confirmed prose alone is insufficient: pre-v0.6.4 production runs shipped t-006 ("edit reward, switch Digital Content Type from Image to Game") with one screenshot whose contents didn't even show the field being asserted on. The contract needs a structural backstop.
+
+**New script** (`plugins/proctor/scripts/validate_screenshots_contract.py`):
+- `classify_item(item)` — pure-function classifier that maps a TestPlan item to one of `{not-chrome-devtools, render-check, negative, happy-save, round-trip, edit-and-switch}`. Reads `tool`, `error_type`, `what:`, `how:`. Documented heuristic order so reviewers can read a plan and predict which items will be screenshot-enforced.
+- `check(plan, results)` — returns a list of violation strings, one per item whose result has fewer screenshots than its bucket's minimum. Counts both the new `screenshots: [{path, label, focus}]` list (valid entries only) and the legacy `screenshot_ref` (as 1, for the render-check / negative floor). Skipped items exempt — they have no evidence to capture. CLI mode emits violations to stdout + exits non-zero.
+
+**Pipeline wiring** (`plugins/proctor/scripts/proctor_run.py`):
+- `_STEP_APPROVED` (executor finished, transitioning to fix/report decision) now runs `validate_screenshots_contract.check()` against the run's TestPlan + TestResults after schema validation passes.
+- On violation: emit an `error` envelope with the full violation list. Pipeline aborts before report-render; the developer sees the gap before the run is "complete" rather than discovering useless screenshots in the published report.
+
+**Agent prose update** (`plugins/proctor/agents/pr-test-executor.md`):
+- New paragraph under the v0.6.4 "Screenshots are PROOF" section calling out the v0.6.5 mechanical check and what aborting looks like. The agent still describes the contract in detail; the mechanical check is the floor, not the ceiling.
+
+### Tests
+- 243 → 268 (+25): classifier round-trips on each bucket; check returns empty on satisfied minimums; check flags every minimum-violation case; legacy `screenshot_ref` counts toward render-check floor but not happy-save (preserves backward-compat without raising the ceiling); non-chrome-devtools items exempt; skipped items exempt; plan/results-drift items silently skipped; pinned regression case mirroring the actual pre-v0.6.4 t-002/t-003/t-006 result shape against a representative PR-#1115 plan — all three flagged.
+
+### Why this is structural
+
+v0.6.4 belongs to the family of "make the LLM behave better via better prose". v0.6.5 belongs to the family of "make the LLM's mistakes loudly visible at validation time so they cannot ship unnoticed". The same delineation as v0.6.1 (pipeline state machine over prose loop discipline) and v0.6.2 (`validate_item_result.py` over executor agent prose forbidding preemptive skip). The pattern: when prose enforcement of a rule produces a real production failure, ship a mechanical check that fires before the artifact is finalized.
+
 ## v0.6.4 — 2026-05-14
 
 ### Screenshots as proof — per-item-type contract for evidence

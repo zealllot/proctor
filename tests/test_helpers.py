@@ -3050,3 +3050,379 @@ def test_impact_radius_min_occurrences_tunable(tmp_path):
                                         min_occurrences=1)
     assert "single.go" not in with_threshold["files"]
     assert "single.go" in without_threshold["files"]
+
+
+# --- v0.6.5: per-item-type screenshot-contract validator ------------------
+
+from plugins.proctor.scripts.validate_screenshots_contract import (
+    classify_item,
+    check as ss_check,
+)
+
+
+# classify_item: each bucket has one canonical input pattern.
+
+def test_ss_classify_non_chrome_devtools_exempt():
+    assert classify_item({"tool": "bash", "what": "anything"}) == "not-chrome-devtools"
+    assert classify_item({"tool": "lint-only", "what": "anything"}) == "not-chrome-devtools"
+    assert classify_item({"tool": "curl", "what": "anything"}) == "not-chrome-devtools"
+
+
+def test_ss_classify_negative_via_error_type():
+    """error_type set ⇒ this is a validator-reject test (≥1)."""
+    item = {"tool": "chrome-devtools",
+            "what": "Reject blank Game URL",
+            "error_type": "validation"}
+    assert classify_item(item) == "negative"
+
+
+def test_ss_classify_edit_and_switch_via_what():
+    """The literal v0.6.4-doc anti-pattern wording must match."""
+    item = {"tool": "chrome-devtools",
+            "what": "edit reward, switch Digital Content Type from Image to Game",
+            "how": "..."}
+    assert classify_item(item) == "edit-and-switch"
+
+
+def test_ss_classify_edit_and_switch_via_change_type_from_to():
+    item = {"tool": "chrome-devtools",
+            "what": "Change Digital Content Type from Image to Game",
+            "how": "..."}
+    assert classify_item(item) == "edit-and-switch"
+
+
+def test_ss_classify_round_trip_via_hard_reload():
+    item = {"tool": "chrome-devtools",
+            "what": "Re-open saved Image reward; fields hard-reload to "
+                    "same values",
+            "how": "Navigate, hard-reload, verify."}
+    assert classify_item(item) == "round-trip"
+
+
+def test_ss_classify_round_trip_via_round_trip_phrase():
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: re-open saved Image reward — DigitalContentType "
+                    "and asset round-trip correctly through the read path",
+            "how": "..."}
+    # Matches both happy AND round-trip; collapsed to round-trip per
+    # classifier ordering. Both demand 2, so no functional difference.
+    assert classify_item(item) == "round-trip"
+
+
+def test_ss_classify_happy_save_via_happy_prefix():
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: create Digital Download reward with type=Image "
+                    "and asset uploaded — save succeeds",
+            "how": "..."}
+    assert classify_item(item) == "happy-save"
+
+
+def test_ss_classify_render_check_default():
+    item = {"tool": "chrome-devtools",
+            "what": "Digital Download new-form renders new fields",
+            "how": "Navigate to /new; assert fields visible."}
+    assert classify_item(item) == "render-check"
+
+
+# check(): violations are produced when result has too few screenshots.
+
+def _make_plan_results(plan_items, result_items):
+    plan = {"items": plan_items}
+    statuses = [i.get("status", "pass") for i in result_items]
+    summary = {
+        "total": len(result_items),
+        "pass": statuses.count("pass"),
+        "fail": statuses.count("fail"),
+        "skipped": statuses.count("skipped"),
+    }
+    results = {"items": result_items, "summary": summary}
+    return plan, results
+
+
+def test_ss_check_render_check_one_screenshot_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "x.png", "label": "form", "focus": "fields"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_render_check_zero_screenshots_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-1" in violations[0]
+    assert ">=1" in violations[0]
+    assert "render-check" in violations[0]
+
+
+def test_ss_check_happy_save_two_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "filled", "focus": "form"},
+              {"path": "b.png", "label": "saved", "focus": "toast"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_happy_save_one_screenshot_flagged():
+    """The exact pre-v0.6.4 bug pattern: save items shipped with one
+    screenshot."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshot_ref": ".proctor/runs/x/t-2.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-2" in violations[0]
+    assert ">=2" in violations[0]
+    assert "happy-save" in violations[0]
+
+
+def test_ss_check_edit_and_switch_three_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-6", "tool": "chrome-devtools",
+          "what": "edit reward, switch Digital Content Type from Image to Game",
+          "how": "...", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-6", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "1.png", "label": "before", "focus": "Image"},
+              {"path": "2.png", "label": "after-change", "focus": "Game"},
+              {"path": "3.png", "label": "persisted", "focus": "reload"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_edit_and_switch_one_screenshot_flagged_the_t006_bug():
+    """The literal t-006 production bug the v0.6.4 contract was
+    introduced to prevent: 1 screenshot of a post-save detail page
+    when the test asserted on a form-state switch. v0.6.4 prose
+    contract failed to prevent it; v0.6.5 mechanical check catches
+    it before report render."""
+    plan, results = _make_plan_results(
+        [{"id": "t-006", "tool": "chrome-devtools",
+          "what": "edit reward, switch Digital Content Type from Image to Game",
+          "how": "Navigate to detail; change select; save; reload.",
+          "category": "api", "risk": "high", "depends_on": []}],
+        [{"id": "t-006", "status": "pass",
+          "evidence": "Reloaded; type=Game.",
+          "screenshot_ref": ".proctor/runs/x/t-006.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-006" in violations[0]
+    assert ">=3" in violations[0]
+    assert "edit-and-switch" in violations[0]
+
+
+def test_ss_check_round_trip_two_screenshots_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-3", "tool": "chrome-devtools",
+          "what": "HAPPY: re-open saved Image reward — fields round-trip",
+          "how": "navigate + hard-reload", "category": "api",
+          "risk": "high", "depends_on": []}],
+        [{"id": "t-3", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "before-reload", "focus": "f1"},
+              {"path": "b.png", "label": "after-reload", "focus": "f1"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_round_trip_one_screenshot_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-3", "tool": "chrome-devtools",
+          "what": "HAPPY: re-open saved Image reward — fields round-trip",
+          "how": "navigate + hard-reload", "category": "api",
+          "risk": "high", "depends_on": []}],
+        [{"id": "t-3", "status": "pass", "evidence": "ok",
+          "screenshot_ref": "x.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "round-trip" in violations[0]
+    assert ">=2" in violations[0]
+
+
+def test_ss_check_negative_one_screenshot_ok():
+    plan, results = _make_plan_results(
+        [{"id": "t-7", "tool": "chrome-devtools",
+          "what": "Reject blank Game URL",
+          "how": "fill+save", "category": "api", "risk": "medium",
+          "depends_on": [], "error_type": "validation"}],
+        [{"id": "t-7", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "e.png", "label": "err", "focus": "field+toast"}]}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_negative_zero_screenshots_flagged():
+    plan, results = _make_plan_results(
+        [{"id": "t-7", "tool": "chrome-devtools",
+          "what": "Reject blank Game URL",
+          "how": "fill+save", "category": "api", "risk": "medium",
+          "depends_on": [], "error_type": "validation"}],
+        [{"id": "t-7", "status": "pass", "evidence": "ok"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "negative" in violations[0]
+    assert ">=1" in violations[0]
+
+
+def test_ss_check_non_chrome_devtools_item_not_enforced():
+    """Bash/lint/curl items aren't screenshot-bearing; the validator
+    must not demand screenshots from them."""
+    plan, results = _make_plan_results(
+        [{"id": "t-10", "tool": "bash",
+          "what": "verify protobuf tags",
+          "how": "grep", "category": "schema", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-10", "status": "pass", "evidence": "ok",
+          "screenshot_ref": None}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_skipped_item_exempt():
+    """A skipped item didn't run, can't have a screenshot — the
+    empirical-grounding validator is the right tool for those."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "skipped",
+          "reason": "precondition-not-met",
+          "evidence": "server returned HTTP 503"}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_legacy_screenshot_ref_counted_for_render_check():
+    """v0.6.3-and-earlier results may legitimately set only the
+    legacy `screenshot_ref` field. For render-check (min 1) that
+    is sufficient; for happy-save (min 2) it is not. Backward
+    compatibility preserved at the floor, not above it."""
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshot_ref": ".proctor/runs/x/t-1.png"}],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_screenshots_entry_missing_focus_not_counted():
+    """A `screenshots` list entry that omits the required `focus`
+    field is not a valid screenshot per schema — and so cannot
+    count toward the minimum, even though the file exists."""
+    plan, results = _make_plan_results(
+        [{"id": "t-2", "tool": "chrome-devtools",
+          "what": "HAPPY: create reward — save succeeds",
+          "how": "fill+save", "category": "api", "risk": "high",
+          "depends_on": []}],
+        [{"id": "t-2", "status": "pass", "evidence": "ok",
+          "screenshots": [
+              {"path": "a.png", "label": "filled", "focus": "form"},
+              {"path": "b.png", "label": "saved"},  # focus missing
+          ]}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert ">=2" in violations[0]
+
+
+def test_ss_check_pinned_pre_v064_run_flagged_top_to_bottom():
+    """Pin the literal pre-v0.6.4 t-002/t-003/t-005/t-006 result-
+    shape (single legacy screenshot_ref, no list) against a plan
+    representative of the PR-#1115 plan. Without v0.6.5 every
+    happy-save / round-trip / edit-and-switch item would render in
+    a report with insufficient evidence — v0.6.5 flags every one
+    so the gap is visible BEFORE report render."""
+    plan_items = [
+        {"id": "t-002", "tool": "chrome-devtools",
+         "what": "HAPPY: create Digital Download reward with type=Image — save succeeds",
+         "how": "...", "category": "api", "risk": "high", "depends_on": []},
+        {"id": "t-003", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open saved Image reward — fields round-trip",
+         "how": "navigate + hard-reload", "category": "api",
+         "risk": "high", "depends_on": []},
+        {"id": "t-006", "tool": "chrome-devtools",
+         "what": "edit reward, switch Digital Content Type from Image to Game",
+         "how": "...", "category": "api", "risk": "high", "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-002", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-002.png"},
+        {"id": "t-003", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-003.png"},
+        {"id": "t-006", "status": "pass", "evidence": "ok",
+         "screenshot_ref": ".proctor/runs/x/t-006.png"},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results)
+    # All three flagged.
+    assert len(violations) == 3
+    ids = "\n".join(violations)
+    assert "t-002" in ids and "happy-save" in ids
+    assert "t-003" in ids and "round-trip" in ids
+    assert "t-006" in ids and "edit-and-switch" in ids
+
+
+def test_ss_check_results_with_unmatched_plan_id_skipped():
+    """An item present in results but absent from plan is silently
+    skipped — that's planner/executor drift, not this script's
+    concern."""
+    plan, results = _make_plan_results(
+        [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [
+            {"id": "t-1", "status": "pass", "evidence": "ok",
+             "screenshots": [{"path": "x.png", "label": "f", "focus": "fl"}]},
+            {"id": "t-999-orphan", "status": "pass", "evidence": "ok"},
+        ],
+    )
+    assert ss_check(plan, results) == []
+
+
+def test_ss_check_plan_item_with_no_result_skipped():
+    """Conversely, a plan item with no matching result is also out
+    of scope — that's an execution-completeness check elsewhere."""
+    plan, results = _make_plan_results(
+        [
+            {"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+             "how": "navigate", "category": "frontend", "risk": "low",
+             "depends_on": []},
+            {"id": "t-2", "tool": "chrome-devtools",
+             "what": "HAPPY: create reward — save succeeds",
+             "how": "...", "category": "api", "risk": "high",
+             "depends_on": []},
+        ],
+        [{"id": "t-1", "status": "pass", "evidence": "ok",
+          "screenshots": [{"path": "x.png", "label": "f", "focus": "fl"}]}],
+    )
+    # Only t-1 has a result; it passes. t-2 has no result; not flagged.
+    assert ss_check(plan, results) == []
