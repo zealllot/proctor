@@ -3193,9 +3193,9 @@ def test_impact_radius_cli_batch_multiple_files(tmp_path):
         'package x\nfunc cb() { Banana(); Banana(); }\n')
     _commit(tmp_path)
 
-    script = (
-        "/Users/zealllot/go/src/github.com/zealllot/proctor/"
-        "plugins/proctor/scripts/impact_radius.py"
+    script = str(
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts" / "impact_radius.py"
     )
     proc = subprocess.run(
         [sys.executable, script,
@@ -3225,9 +3225,9 @@ def test_impact_radius_cli_single_file_backward_compatible(tmp_path):
         'package x\nfunc a() { Foo(); Foo(); }\n')
     _commit(tmp_path)
 
-    script = (
-        "/Users/zealllot/go/src/github.com/zealllot/proctor/"
-        "plugins/proctor/scripts/impact_radius.py"
+    script = str(
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts" / "impact_radius.py"
     )
     proc = subprocess.run(
         [sys.executable, script,
