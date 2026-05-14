@@ -2,6 +2,28 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.9 — 2026-05-14
+
+### Removed `/proctor-drive` — subagent dispatch was a dead-end
+
+The v0.6.1 `/proctor-drive` command theorized that dispatching the pipeline through a Task subagent would bypass the main-AI turn-model stalls. Two production failures since proved otherwise:
+
+1. **Subagents stall at the same turn boundaries** as the main AI (documented in the v0.6.1 entry below but never fully removed from the recommendation).
+2. **Subagent sessions don't register the host plugin's Skills.** When `proctor_run.py` emits `dispatch_skill` envelopes for `proctor:executing-pr-tests` / etc., the subagent's `Skill` tool returns `Unknown skill` because `$CLAUDE_PLUGIN_ROOT` is just an env var — Claude Code's skill loader doesn't enumerate it as a plugin source. Surfaced in the v0.6.8 e2e validation attempt where the pipeline stalled cleanly at `step=approved`, every dispatch_skill rejected.
+
+The right answer is simpler than the v0.6.1 workaround claimed:
+
+| Where | Command | Why |
+|---|---|---|
+| Local interactive | `/proctor:proctor <PR>` (you type it) | Plugin installed in your session — Skills are registered. Stall → type `continue`. |
+| CI | `claude --print "/proctor:proctor <PR>"` (in `github-action/action.yml`) | Non-interactive mode loops on tool calls without turn-model stops. |
+
+**Removed**: `plugins/proctor/commands/proctor-drive.md`.
+
+**Updated**: `commands/proctor.md` top section. Replaced the misleading "if you stalled use /proctor-drive instead" prose with the scenario table above, plus an explicit "do not dispatch from subagent" warning.
+
+No code change, no test change. Plugin shrinks 78 lines.
+
 ## v0.6.8 — 2026-05-14
 
 ### Negative-test screenshot contract: error must be rendered in DOM, not just response body

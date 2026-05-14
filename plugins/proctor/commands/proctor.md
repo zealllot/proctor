@@ -8,13 +8,14 @@ allowed-tools: Bash(gh *), Bash(jq *), Bash(yq *), Bash(python3 *), Bash(git *),
 
 Run the PRoctor test pipeline against a GitHub PR.
 
-## ⚠ CRITICAL (v0.6.1+): if you stall mid-pipeline, use `/proctor-drive` instead
+## How to invoke (v0.6.9+)
 
-Real-world v0.6.0 trace: even with the state machine, the main Claude Code AI still stalled after `dispatch_skill` returned (the Skill completed, but the AI ended its turn instead of immediately re-invoking `proctor_run.py`). This is a platform-level turn-model constraint, not a state machine bug — a subagent runs the same pipeline through end-to-end without issue.
+| Where | How | Why |
+|---|---|---|
+| **Local, interactive** | You type `/proctor:proctor <PR>` in your own Claude Code session | Plugin is installed in your session — Skills are registered, state machine drives. If the AI ever stalls between stages (turn-model edge case), just type `continue` to nudge it. |
+| **CI** | `github-action/action.yml` already runs `claude --print "/proctor:proctor <PR>"` non-interactively | Non-interactive `--print` loops on tool calls until the model returns text — no turn-model stalls. The action also presets the approval-gate answer to "Run all items" via `--permission-mode`. |
 
-**If you find yourself reading this comment because you ALREADY stalled** (the AI is sitting at an empty `❯` prompt mid-pipeline and you typed something to unstick it), the right fix is: kill this session and run `/proctor-drive <PR>` instead. That command dispatches the whole pipeline as one Agent task — no turn boundaries between stages, no stalls.
-
-If you're starting fresh, prefer `/proctor-drive` from the start. This command (`/proctor:proctor`) still works but requires loop discipline the AI doesn't reliably exhibit.
+**Do NOT** dispatch this pipeline from a subagent (e.g. via `Task` tool) — subagent sessions don't register the host plugin's Skills, so every `dispatch_skill` envelope fails with `Unknown skill`. The previous `/proctor-drive` shortcut was removed in v0.6.9 for this reason.
 
 ## ⚠ The pipeline is a state-machine loop (v0.6.0+)
 
