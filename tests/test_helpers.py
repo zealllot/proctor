@@ -1024,6 +1024,176 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.5.0: wizard state machine driver ---------------------------------
+
+# wizard_run.py uses dynamic sys.path setup at import time so importing
+# its functions from a test file is tricky. Use subprocess + JSON parse.
+
+
+def _run_wizard(state_file, current_tag=None, answer=None, bash_rc=None,
+                repo_root=None, plugin_root=None):
+    """Helper: invoke wizard_run.py and return its emitted envelope."""
+    import subprocess as sp
+    script = (pathlib.Path(__file__).resolve().parent.parent
+              / "plugins" / "proctor" / "scripts" / "wizard_run.py")
+    plugin_root = plugin_root or (pathlib.Path(__file__).resolve().parent.parent
+                                  / "plugins" / "proctor")
+    cmd = ["python3", str(script),
+           "--state-file", str(state_file),
+           "--repo-root", str(repo_root) if repo_root else ".",
+           "--plugin-root", str(plugin_root)]
+    if current_tag:
+        cmd += ["--current-tag", current_tag]
+    if answer is not None:
+        cmd += ["--answer", answer]
+    if bash_rc is not None:
+        cmd += ["--bash-rc", str(bash_rc)]
+    result = sp.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+def test_wizard_first_invocation_on_user_scenario_emits_ask_user(tmp_path):
+    """The exact user bug scenario: v0.4.0 layout, seed script present,
+    local.yml missing, pin out of date → state machine's first
+    invocation should emit type=ask_user."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.3")
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path)
+    assert env["type"] == "ask_user"
+    assert env["header"] == "Local config"
+    assert any("Regenerate seed-local.sh AND re-run" in o["label"]
+               for o in env["options"])
+
+
+def test_wizard_current_emits_done(tmp_path):
+    """Fully-configured repo at the latest pin: state machine just
+    emits type=done. No multi-step loop needed."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.6")
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path)
+    assert env["type"] == "done"
+    assert "already integrated" in env["summary"]
+
+
+def test_wizard_bump_only_emits_bash(tmp_path):
+    """local.yml present but pin out of date: state machine emits
+    type=bash to invoke the atomic bump-action.sh script. AI runs it
+    in ONE Bash tool call — no stalls."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.3")
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path)
+    assert env["type"] == "bash"
+    assert "wizard_bump_action.sh" in env["command"]
+    assert "v0.4.6" in env["command"]
+
+
+def test_wizard_bump_only_after_bash_success_emits_done(tmp_path):
+    """After bump-action.sh exits 0, the state machine's next
+    invocation emits type=done. No further user input needed."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.3")
+    state_file = tmp_path / "wizard-state.json"
+    # First invocation gets the bash envelope.
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    # Second invocation (simulating bash exited 0): should be done.
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path, bash_rc=0)
+    assert env["type"] == "done"
+
+
+def test_wizard_bump_only_after_bash_failure_done_with_warning(tmp_path):
+    """If bump-action.sh exits non-zero (e.g. push failed), state
+    machine still emits type=done so AI exits the loop cleanly, but
+    summary surfaces the failure."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.4.3")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path, bash_rc=4)
+    assert env["type"] == "done"
+    assert "exited 4" in env["summary"]
+
+
+def test_wizard_needs_local_regen_recommended_path(tmp_path):
+    """Two-iteration loop: ask_user → user picks 'Regenerate' →
+    show envelope pointing at legacy prose for the regen flow."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
+    state_file = tmp_path / "wizard-state.json"
+    env1 = _run_wizard(state_file, current_tag="v0.4.6",
+                       repo_root=tmp_path)
+    assert env1["type"] == "ask_user"
+    env2 = _run_wizard(
+        state_file, current_tag="v0.4.6", repo_root=tmp_path,
+        answer="Regenerate seed-local.sh AND re-run it (Recommended)",
+    )
+    assert env2["type"] == "show"
+    assert "regenerate seed-local.sh" in env2["markdown"].lower()
+
+
+def test_wizard_needs_local_regen_just_run_existing(tmp_path):
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path,
+                      answer="Just run the existing seed-local.sh")
+    assert env["type"] == "done"
+    assert "seed-local.sh" in env["summary"]
+
+
+def test_wizard_needs_local_regen_skip(tmp_path):
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path,
+                      answer="Skip — I'll handle .proctor/local.yml myself")
+    assert env["type"] == "done"
+
+
+def test_wizard_fresh_falls_back_to_legacy_prose(tmp_path):
+    """Fresh install isn't migrated to the state machine yet — emit
+    a show envelope pointing at the legacy prose, then done."""
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path)
+    assert env["type"] == "show"
+    assert "fresh" in env["markdown"]
+    assert "legacy SKILL.md" in env["markdown"]
+    # State should be marked done so a second invocation doesn't loop.
+    env2 = _run_wizard(state_file, current_tag="v0.4.6",
+                       repo_root=tmp_path)
+    # The script is already at step=done; subsequent invocations should
+    # return a `done` envelope, not loop forever.
+    assert env2["type"] == "done"
+
+
+def test_wizard_state_file_persists_between_invocations(tmp_path):
+    """The state file is the only thing carrying context between
+    invocations — losing it would break the loop."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    assert state_file.exists()
+    state = json.loads(state_file.read_text())
+    assert state["mode"] == "needs-local-regen"
+    assert state["step"]  # non-empty: we've advanced past _STEP_INIT
+
+
+def test_wizard_corrupted_state_file_resets_gracefully(tmp_path):
+    """If state file is corrupted JSON, wizard treats it as fresh
+    rather than crashing (better than locking user out)."""
+    state_file = tmp_path / "wizard-state.json"
+    state_file.write_text("this is not json {{{")
+    env = _run_wizard(state_file, current_tag="v0.4.6",
+                      repo_root=tmp_path)
+    # Should run detection + decide. With no .proctor or workflow it
+    # should pick `fresh` mode.
+    assert env["type"] in ("show", "ask_user", "done", "bash")
+
+
 # --- v0.4.6: render_item_artifacts (absolute paths + missing-artifact badges) ---
 
 from plugins.proctor.scripts.render_item_artifacts import render as render_artifacts

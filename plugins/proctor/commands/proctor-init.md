@@ -8,9 +8,80 @@ allowed-tools: Bash(gh *), Bash(git *), Bash(claude *), Bash(jq *), Bash(yq *), 
 
 Bootstrap PRoctor on the current repository.
 
-You are the setup wizard. Lead the user through the steps below. Be concise — output one short sentence per step explaining what you're about to do, then run the corresponding tool. Don't dump long explanations between steps; the user wants the wizard to feel fast.
+## ⚠ CRITICAL (v0.5.0+): the wizard is a state-machine loop
 
-## 0. Pre-flight
+**Don't follow the prose below step-by-step.** v0.5.0 moved the wizard's control flow into a Python state machine at `scripts/wizard_run.py`. Your job is a tight LOOP that drives the script — each iteration reads one envelope, surfaces the indicated AskUserQuestion / Bash / message, and re-invokes the script. The legacy prose below this section is kept ONLY as fallback documentation for modes the state machine doesn't yet implement (fresh / migrate / bump-only-with-seed).
+
+**Stop conditions** (the only legitimate ones):
+- Envelope type is `done` → emit summary, exit loop.
+- Envelope type is `error` → emit error, exit loop.
+- An `ask_user` envelope's AskUserQuestion is currently displayed and awaiting a user response.
+
+**If you completed any single step and your turn ends without re-invoking `wizard_run.py`** — that's the same stall pattern the user has been hitting all session. Don't do it. Iterate.
+
+## Wizard loop
+
+### 0. Pre-flight (run ONCE at the start, then loop below)
+
+```bash
+# Must succeed:
+git rev-parse --is-inside-work-tree >/dev/null
+gh auth status >/dev/null 2>&1
+
+# Resolve the latest PRoctor release tag (used by the state machine):
+CURRENT_TAG=$(gh release view --repo zealllot/proctor --json tagName --jq '.tagName' 2>/dev/null \
+  || gh api repos/zealllot/proctor/tags --jq '.[0].name' 2>/dev/null \
+  || echo "main")
+```
+
+### 1. Loop body — each iteration is ONE assistant turn
+
+For each iteration, do exactly these tool calls in order:
+
+**1a. Invoke the state machine** (NO arguments after the first invocation unless the previous iteration's envelope was `ask_user` or `bash`):
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_run.py \
+    --state-file .proctor/wizard-state.json \
+    --current-tag "$CURRENT_TAG" \
+    --repo-root . \
+    --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+    ${PREV_ANSWER:+--answer "$PREV_ANSWER"} \
+    ${PREV_BASH_RC:+--bash-rc "$PREV_BASH_RC"}
+```
+
+The script emits one JSON envelope to stdout. Parse the `type` field.
+
+**1b. Branch on `type`** — exactly one action per iteration:
+
+- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. After the user answers, save `PREV_ANSWER=<selected-label>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
+
+- **`type=show`**: emit the `markdown` field verbatim to chat. Save `PREV_ANSWER=` (clear) and `PREV_BASH_RC=`. **Continue to next iteration (1a)** in the same response — don't end the turn.
+
+- **`type=bash`**: run the `command` field as a Bash tool call. Save the exit code as `PREV_BASH_RC=<exit>`. Save `PREV_ANSWER=`. **Continue to next iteration (1a)** in the same response.
+
+- **`type=done`**: emit the `summary` field to chat. Exit the loop. End the turn.
+
+- **`type=error`**: emit the `message` field to chat. Exit the loop. End the turn.
+
+**1c. There is no other branch.** If the envelope's `type` isn't one of the five above, that's a wizard_run.py bug — emit the raw envelope as a bug report and exit.
+
+### 2. Loop discipline (anti-stall checklist)
+
+- After each `ask_user` answer, the script must re-run in the SAME response (with `--answer "$PREV_ANSWER"`). Don't end your turn after the AskUserQuestion answer; that's how the old "继续 prompt" stalls happened.
+- After each `bash` command, the script must re-run in the same response (with `--bash-rc "$PREV_BASH_RC"`).
+- After each `show`, the script must re-run in the same response (no flags).
+- Only `done` / `error` end the turn. If you find yourself ending the turn for any other reason, that's a bug — keep looping.
+
+The state file `.proctor/wizard-state.json` persists between iterations. If the AI process dies mid-flow, re-invoking the wizard resumes from the last persisted step. Safe to interrupt.
+
+---
+
+## Legacy prose (fallback for modes the state machine doesn't yet implement)
+
+The sections below describe the wizard's behavior in detail. v0.5.0's state machine handles `current` / `bump-only` / `needs-local-regen` / `legacy-migration` directly. For modes `fresh` / `migrate` / `bump-only-with-seed`, the state machine emits a `show` envelope pointing you here and exits — you then walk this prose manually. v0.5.x will migrate the remaining modes into Python.
+
+## 0. Pre-flight (legacy reference)
 
 Run these checks first. If any fail, tell the user how to fix and stop.
 

@@ -2,6 +2,62 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.5.0 — 2026-05-14
+
+### Wizard control flow → Python state machine
+
+User feedback after a session of inter-step stalls (`Crunched for 1m 14s` / `Brewed for 21s` / `Cooked for 1m 18s`, requiring "继续" prompts to unstick): "如果部署 ci 的话根本没办法执行". The wizard's prose-driven multi-step procedure gave the AI too many "what's next" decision points; each transition was a stall opportunity.
+
+The structural fix (deferred since v0.4.5's CHANGELOG noted it as v0.5 territory): move the wizard's control flow out of prose into a Python state machine. v0.4.3 / v0.4.5 / v0.4.6 already validated this pattern for specific surfaces (approval-gate render / MODE decision / artifact rendering). v0.5.0 extends it to the wizard's overall control flow.
+
+**New driver** (`plugins/proctor/scripts/wizard_run.py`):
+- State-machine driver that reads `.proctor/wizard-state.json`, advances by ONE state transition per invocation, writes state back, and emits exactly one JSON envelope describing what the AI should do next.
+- 5 envelope types:
+  - `ask_user` — AI calls AskUserQuestion with the spec, then re-invokes with `--answer "<label>"`.
+  - `show` — AI emits the markdown to chat, then re-invokes.
+  - `bash` — AI runs the command, then re-invokes with `--bash-rc <exit_code>`.
+  - `done` — AI emits summary, exits the loop.
+  - `error` — AI emits the error, exits.
+- The state file is the only thing carrying context between invocations. Safe to interrupt mid-flow; re-invoking resumes.
+
+**New atomic bump action** (`plugins/proctor/scripts/wizard_bump_action.sh`):
+- Single shell script: sed-replace pin → git diff → git add → git commit → git push. One Bash tool call from the wizard's `bash` envelope. Eliminates the v0.4.x bump-only stall path (edit + diff + commit + push → 4 separate tool calls × ~1-3min churn each).
+- Portable (BSD sed on macOS, GNU sed on Linux). Optional `--no-push` flag.
+- Exit code 4 if push fails; commit is still in place locally.
+
+**New harness** (`plugins/proctor/commands/proctor-init.md` top section):
+- Replaced the open-ended "lead the user through the steps" prose with an explicit `while`-style loop description: invoke `wizard_run.py`, parse envelope, dispatch one action, re-invoke. Loop discipline explicitly forbids ending the turn between iterations.
+- Stop conditions enumerated: only `done` / `error` envelopes / displayed-and-awaiting-answer AskUserQuestion are legitimate end-of-turn states. Anything else is a stall.
+- The legacy 1300-line prose stays below the harness as documentation + fallback for modes not yet migrated to the state machine.
+
+### What the state machine implements (v0.5.0 scope)
+
+- `current` — fully configured, exit with summary.
+- `bump-only` — emit `bash` envelope invoking `wizard_bump_action.sh`. One AI iteration: invoke script, get exit code, re-invoke wizard, get `done`. Two iterations total instead of v0.4.x's 4+ stalled steps.
+- `needs-local-regen` — emit `ask_user` for the 3-option question, then branch on answer (Regenerate / Just run / Skip) to either a `show` envelope pointing at legacy prose for the regen flow OR `done`.
+- `legacy-migration` — emit `ask_user` for the migration question, then branch to either a `show` envelope pointing at the v0.4.0 git-mv block OR `done`.
+
+### What's still in legacy prose (v0.5.x will migrate)
+
+- `fresh` — full new install (1300 lines of stack detection + auth setup + file generation). The state machine emits a `show` envelope routing to Sections 1-8 of the legacy prose.
+- `migrate` — v0.2 → v0.3 migration (adds auth block, drops `setup:`). Legacy prose Section 7-8.
+- `bump-only-with-seed` — pin bump + Step 8c-pre seed script regen. Legacy prose Section 8 + 8c-pre.
+
+For these modes the AI walks legacy prose manually. The state machine returns `done` after emitting the `show` envelope so the wizard's outer loop terminates cleanly; the AI then handles the prose section in subsequent turns.
+
+### Why this is the structural fix
+
+Every prior v0.3.x / v0.4.x release that tightened wizard prose tried to fix the same symptom (AI stalls between steps) with the same approach (loud "MUST" directives). All failed in production runs to some degree. v0.4.3 / v0.4.5 / v0.4.6 found a different shape that works: take the deterministic logic out of prose, put it in a script the AI dispatches. v0.5.0 extends this from "specific surfaces" to "the wizard's control flow itself".
+
+The AI's job is now I/O relay across 3-4 iterations max for the fast modes. Each iteration's prose responsibility is bounded: parse one envelope, dispatch one action. No multi-step procedure to interpret, no "what next" decision points between iterations.
+
+### Tests
+- 198 → 209 (+11): first invocation on user-bug scenario emits ask_user (the exact PR-1115 / mcd-website case); current mode emits done immediately; bump-only emits bash with script invocation; after bash success → done; after bash failure → done with warning; needs-local-regen for each of the 3 options; fresh mode falls back to legacy prose; state file persists between invocations; corrupted state file resets gracefully.
+
+### Next: v0.6
+
+Same pattern for `/proctor:proctor` orchestrator. The main pipeline (analyze / plan / execute / fix / report) has the same inter-stage stall problem. v0.6.0 will be a `scripts/proctor_run.py` state machine that dispatches each stage's skill and the AskUserQuestion approval gate; AI's role compresses to "run script, relay envelopes". Shipping after v0.5.0 sees a real run.
+
 ## v0.4.6 — 2026-05-14
 
 ### Reporter artifact links — absolute file:// URLs + loud "missing artifact" badges
