@@ -8,27 +8,107 @@ allowed-tools: Bash(gh *), Bash(jq *), Bash(yq *), Bash(python3 *), Bash(git *),
 
 Run the PRoctor test pipeline against a GitHub PR.
 
-## ⚠ Critical: this command runs the WHOLE pipeline non-stop
+## ⚠ CRITICAL (v0.6.0+): the pipeline is a state-machine loop
 
-Stages 1–9 below are a single sequence, NOT a checklist with pause points.
+Same architectural pattern as the v0.5.0 wizard: the pipeline's control flow lives in a Python state machine at `scripts/proctor_run.py`. Your job is a tight LOOP that drives the script — each iteration reads one envelope, surfaces the indicated action, and re-invokes the script. Versions before v0.6.0 had this as 9 stages of prose with explicit "after stage X → do Y" directives; in production the AI repeatedly stalled between stages (3-5 minute Churn pauses requiring "继续" nudges). v0.6.0 removes those decision points.
 
-**Your turn ends ONLY when** one of these has happened:
-- The reporting skill completed (= terminal success)
-- A hard error aborted the run (auth misconfigured, force-push detected, setup-failed)
-- The local-mode approval gate's AskUserQuestion is currently displayed and awaiting a user response
-- The CI-mode early-exit ran (`require_approval: true` + `mode=ci` → `[proctor] awaiting approval`, exit 0)
+**Stop conditions** (the only legitimate ones to end the turn):
+- Envelope type is `done` → emit summary, exit loop.
+- Envelope type is `error` → emit error, exit loop.
+- An `ask_user` envelope's AskUserQuestion is currently displayed and awaiting a user response.
 
-**If you wrote a JSON file and validated it but your turn is still going** — you have not finished. The next concrete tool call (AskUserQuestion, dispatching the next skill, etc.) is still owed. Writing the file is half the work; what comes AFTER the file is the other half. Do not stop between them.
+**If you complete any single step and your turn ends without re-invoking `proctor_run.py`** — that's the chronic stall pattern. Don't do it. Iterate.
 
-**Specifically, after Stage 1 finishes (change-map.json written + validated)** → invoke skill `planning-pr-tests` for Stage 2 with no pause.
+## Pipeline loop
 
-**Specifically, after Stage 2 finishes (test-plan.json written + validated AND the planning skill's self-audit lint passed)** → step 6 has FOUR substeps (6a header → 6b table → 6c estimate → 6d AskUserQuestion). All four MUST execute in order. The planning skill itself runs `plan_smells.py --strict` as its final step (v0.3.35+ self-audit) — by the time you reach step 6 the plan is already audited; do NOT re-run plan_smells here, that's the historical v0.3.32/v0.3.33 design which we deprecated in v0.3.38 because the duplicate gate causes the orchestrator AI to stall ("I just ran this lint, why again?").
+### 0. Pre-flight (ONCE at the start)
 
-**Specifically, after the user answers the approval gate** → save approved-plan.json, then invoke skill `executing-pr-tests` with no pause.
+```bash
+gh auth status >/dev/null 2>&1 || { echo "ERR: gh not authenticated. Run: gh auth login"; exit 1; }
 
-**Specifically, after Stage 3 finishes (test-results.json written)** → invoke skill `fixing-test-failures` (or write fix-pr-ref.json=null if nothing to fix), then immediately invoke skill `reporting-pr-test-results`.
+# Mode detection
+export PROCTOR_MODE="${GITHUB_ACTIONS:+ci}"
+export PROCTOR_MODE="${PROCTOR_MODE:-local}"
 
-If you find yourself emitting a status line ("done", "validated", "10 items planned") and your turn ENDS there — that's a bug. The status line is a log marker, not a stopping point. Continue.
+# State-file path lives under .proctor/runs/<run-id>/ once we know the
+# run-id. Until then we use a temp path that gets moved after pre-flight
+# returns the run-id via the first bash envelope's stdout.
+export STATE_FILE="/tmp/proctor-pipeline-state-$$.json"
+```
+
+### 1. Loop body — each iteration is ONE assistant turn
+
+**1a. Invoke the state machine:**
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/proctor_run.py \
+    --state-file "$STATE_FILE" \
+    --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+    --mode "$PROCTOR_MODE" \
+    ${PR_ARG:+--pr-arg "$PR_ARG"} \
+    ${PREV_ANSWER:+--answer "$PREV_ANSWER"} \
+    ${PREV_BASH_RC:+--bash-rc "$PREV_BASH_RC"}
+```
+
+On the FIRST invocation pass `--pr-arg "$ARGUMENTS"`. Thereafter omit it. After the pre-flight bash returns RUN_ID/RUN_DIR/PR_NUMBER, parse those from the bash output and update the state file:
+
+```bash
+# After the FIRST bash envelope (pre-flight) returns:
+RUN_ID=$(echo "$BASH_OUTPUT" | grep '^RUN_ID=' | cut -d= -f2)
+RUN_DIR=$(echo "$BASH_OUTPUT" | grep '^RUN_DIR=' | cut -d= -f2)
+PR_NUMBER=$(echo "$BASH_OUTPUT" | grep '^PR_NUMBER=' | cut -d= -f2)
+
+# Move state file under the run dir + patch it
+NEW_STATE_FILE="$RUN_DIR/pipeline-state.json"
+mv "$STATE_FILE" "$NEW_STATE_FILE"
+export STATE_FILE="$NEW_STATE_FILE"
+python3 -c "
+import json
+s = json.load(open('$STATE_FILE'))
+s['run_id'] = '$RUN_ID'
+s['run_dir'] = '$RUN_DIR'
+s['pr_number'] = int('$PR_NUMBER')
+json.dump(s, open('$STATE_FILE', 'w'), indent=2)
+"
+```
+
+(Do this update INLINE, in the same response as the pre-flight bash call. Don't pause to "think about" what to do next.)
+
+**1b. Branch on envelope type** — exactly one action per iteration:
+
+- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options`. Save the user's selection as `PREV_ANSWER=<label>`. **Continue in the same response** — re-invoke proctor_run.py with `--answer "$PREV_ANSWER"`.
+
+- **`type=show`**: emit the `markdown` field verbatim to chat. Save `PREV_ANSWER=` and `PREV_BASH_RC=` (clear both). **Continue in the same response** — re-invoke.
+
+- **`type=bash`**: run the `command` field via Bash. Save `PREV_BASH_RC=<exit-code>`. Save `PREV_ANSWER=`. **Continue in the same response** — re-invoke.
+
+- **`type=dispatch_skill`**: invoke the `skill` name via the Skill tool. The skill writes its artifact to `expects_artifact` (the script will validate it on next invocation). **Continue in the same response** — re-invoke (no flags).
+
+- **`type=done`**: emit the `summary` field. Exit the loop. End the turn.
+
+- **`type=error`**: emit the `message` field. Exit the loop with the error.
+
+### 2. Loop discipline (anti-stall checklist)
+
+- Every iteration ends with re-invoking proctor_run.py UNLESS the envelope is `done`/`error` or an AskUserQuestion is displayed and awaiting answer.
+- Don't dump artifact JSON between iterations. Don't summarize what the previous stage did. Just dispatch the next action.
+- Skills (Stage 1-5) handle their own work — the orchestrator's job is to TELL them to run, not to think about them.
+
+### 3. What the state machine handles internally
+
+- Stage 1 (analyze): emits `dispatch_skill` for `proctor:analyzing-pr-changes`, validates change-map.json on next invocation.
+- Stage 2 (plan): emits `dispatch_skill` for `proctor:planning-pr-tests`, validates test-plan.json.
+- Approval gate: emits `bash` for `render_plan_table.py`, then `ask_user` with 2 options. "Run all" copies plan → approved-plan + dispatches execute. "Cancel" emits done.
+- Stage 3 (execute): emits `dispatch_skill` for `proctor:executing-pr-tests`, validates test-results.json.
+- Stage 4 (fix): conditionally emits `dispatch_skill` for `proctor:fixing-test-failures` when fail_count > 0; otherwise writes `fix-pr-ref.json = null` and skips.
+- Stage 5 (report): emits `dispatch_skill` for `proctor:reporting-pr-test-results`.
+- Final: emits `done` with the file:// URL to report.html.
+
+---
+
+## Legacy prose (fallback documentation)
+
+The sections below are the v0.3.x / v0.4.x prose-driven version of the pipeline. v0.6.0 superseded them with the state machine above. They're kept for reference and as fallback for any flow the state machine doesn't yet handle (CI mode's `require_approval=true` early-exit, mutex acquire, etc.).
 
 ## Inputs
 

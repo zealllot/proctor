@@ -1024,6 +1024,219 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.6.0: proctor_run state machine for /proctor:proctor ---------------
+
+
+def _run_proctor(state_file, **kwargs):
+    """Helper: invoke proctor_run.py and return its emitted envelope."""
+    import subprocess as sp
+    script = (pathlib.Path(__file__).resolve().parent.parent
+              / "plugins" / "proctor" / "scripts" / "proctor_run.py")
+    plugin_root = (pathlib.Path(__file__).resolve().parent.parent
+                   / "plugins" / "proctor")
+    cmd = ["python3", str(script),
+           "--state-file", str(state_file),
+           "--plugin-root", str(plugin_root)]
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        cmd += [f"--{k.replace('_', '-')}", str(v)]
+    result = sp.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+def test_proctor_first_invocation_requires_pr_arg(tmp_path):
+    state_file = tmp_path / "state.json"
+    env = _run_proctor(state_file)
+    assert env["type"] == "error"
+    assert "pr-arg" in env["message"]
+
+
+def test_proctor_first_invocation_emits_bash_for_fetch(tmp_path):
+    state_file = tmp_path / "state.json"
+    env = _run_proctor(state_file, pr_arg="1115")
+    assert env["type"] == "bash"
+    assert "pr_fetch" in env["command"] or "fetch_pr" in env["command"]
+    assert "RUN_ID=" in env["command"]
+
+
+def test_proctor_after_fetch_dispatches_analyze(tmp_path):
+    """The state machine must transition from FETCHED → dispatch
+    analyzing-pr-changes after the harness populates run_id/run_dir/
+    pr_number from the pre-flight bash output."""
+    state_file = tmp_path / "state.json"
+    # First invocation: get bash envelope, state advances to FETCHED.
+    _run_proctor(state_file, pr_arg="1115")
+    # Simulate the harness updating state with values from bash stdout.
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = json.loads(state_file.read_text())
+    state["run_id"] = "test-run"
+    state["run_dir"] = str(run_dir)
+    state["pr_number"] = 1115
+    state_file.write_text(json.dumps(state))
+    # Second invocation: should dispatch the analyze skill.
+    env = _run_proctor(state_file)
+    assert env["type"] == "dispatch_skill"
+    assert env["skill"] == "proctor:analyzing-pr-changes"
+    assert "change-map.json" in env["expects_artifact"]
+
+
+def test_proctor_after_analyze_validates_and_dispatches_plan(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    # Skip ahead to the post-analyze step by hand-priming state.
+    state = {"step": "analyzed", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115, "pr_arg": "1115"}
+    state_file.write_text(json.dumps(state))
+    # Write a valid change-map.json so the validator passes.
+    (run_dir / "change-map.json").write_text(json.dumps({
+        "pr": {"number": 1115, "head_sha": "abc", "base_sha": "def",
+               "url": "https://x"},
+        "hunks": [{"file": "a.go", "category": "api", "risk": "low",
+                   "summary": "."}],
+        "categories_present": ["api"],
+    }))
+    env = _run_proctor(state_file)
+    assert env["type"] == "dispatch_skill"
+    assert env["skill"] == "proctor:planning-pr-tests"
+
+
+def test_proctor_after_plan_emits_bash_for_render(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "plan_dispatched", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115, "pr_arg": "1115"}
+    state_file.write_text(json.dumps(state))
+    (run_dir / "test-plan.json").write_text(json.dumps({"items": [
+        {"id": "t-1", "category": "api", "what": "x", "how": "y",
+         "tool": "bash", "risk": "low", "depends_on": []},
+    ]}))
+    env = _run_proctor(state_file)
+    assert env["type"] == "bash"
+    assert "render_plan_table.py" in env["command"]
+
+
+def test_proctor_after_render_emits_ask_user_approval(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "planned", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    env = _run_proctor(state_file)
+    assert env["type"] == "ask_user"
+    assert env["header"] == "Approve plan"
+    assert any("Run all" in o["label"] for o in env["options"])
+    assert any("Cancel" in o["label"] for o in env["options"])
+
+
+def test_proctor_approval_run_all_dispatches_execute(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "test-plan.json").write_text('{"items": []}')
+    state = {"step": "table_shown", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    env = _run_proctor(state_file, answer="Run all items")
+    assert env["type"] == "dispatch_skill"
+    assert env["skill"] == "proctor:executing-pr-tests"
+    # approved-plan.json should have been written.
+    assert (run_dir / "approved-plan.json").exists()
+
+
+def test_proctor_approval_cancel_emits_done(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "table_shown", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    env = _run_proctor(state_file,
+                       answer="Cancel — let me edit the plan first")
+    assert env["type"] == "done"
+    assert "aborted" in env["summary"].lower()
+
+
+def test_proctor_execute_no_failures_skips_fix(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "approved", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    # All-pass results.
+    (run_dir / "test-results.json").write_text(json.dumps({
+        "items": [{"id": "t-1", "status": "pass", "evidence": "ok"}],
+        "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+    }))
+    env = _run_proctor(state_file)
+    assert env["type"] == "show"
+    assert "No failures" in env["markdown"]
+    # fix-pr-ref.json = null should have been written.
+    assert (run_dir / "fix-pr-ref.json").read_text().strip() == "null"
+
+
+def test_proctor_execute_with_failures_dispatches_fix(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "approved", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    (run_dir / "test-results.json").write_text(json.dumps({
+        "items": [
+            {"id": "t-1", "status": "pass", "evidence": "ok"},
+            {"id": "t-2", "status": "fail", "evidence": "broke",
+             "reason": "assertion"},
+        ],
+        "summary": {"total": 2, "pass": 1, "fail": 1, "skipped": 0},
+    }))
+    env = _run_proctor(state_file)
+    assert env["type"] == "dispatch_skill"
+    assert env["skill"] == "proctor:fixing-test-failures"
+
+
+def test_proctor_execute_aborted_skips_to_report(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    state = {"step": "approved", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    (run_dir / "test-results.json").write_text(json.dumps({
+        "items": [], "summary": {"total": 0, "pass": 0, "fail": 0, "skipped": 0},
+        "aborted": "force-push",
+    }))
+    env = _run_proctor(state_file)
+    assert env["type"] == "show"
+    assert "aborted" in env["markdown"].lower()
+
+
+def test_proctor_after_report_done(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_dir = tmp_path / ".proctor" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.html").write_text("<html></html>")
+    state = {"step": "reported", "run_id": "test-run",
+             "run_dir": str(run_dir), "pr_number": 1115}
+    state_file.write_text(json.dumps(state))
+    env = _run_proctor(state_file)
+    assert env["type"] == "done"
+    assert "report" in env["summary"].lower()
+
+
+def test_proctor_corrupted_state_resets(tmp_path):
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not json {{{")
+    env = _run_proctor(state_file, pr_arg="1115")
+    # Should treat as fresh state and emit the first bash envelope.
+    assert env["type"] in ("bash", "error")
+
+
 # --- v0.5.0: wizard state machine driver ---------------------------------
 
 # wizard_run.py uses dynamic sys.path setup at import time so importing

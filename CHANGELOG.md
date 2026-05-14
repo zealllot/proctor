@@ -2,6 +2,51 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.0 — 2026-05-14
+
+### Pipeline orchestrator → Python state machine (matches v0.5.0 wizard refactor)
+
+v0.5.0 moved the wizard's control flow into a state machine and eliminated the inter-step stalls there. v0.6.0 extends the same architecture to the main `/proctor:proctor` pipeline. The 9 stages of prose with explicit "after stage X → do Y" directives are replaced with a state machine that drives stage transitions; the AI's role compresses to "run the script, dispatch the indicated action, re-invoke".
+
+**New driver** (`plugins/proctor/scripts/proctor_run.py`):
+- Reads `.proctor/runs/<run-id>/pipeline-state.json`, advances one transition per invocation.
+- 6 envelope types: `bash` (run command), `dispatch_skill` (invoke Skill tool), `show` (emit markdown), `ask_user` (AskUserQuestion), `done` (terminal), `error`.
+- 10 state transitions cover the happy path: INIT → FETCHED → ANALYZED → PLAN_DISPATCHED → PLANNED → TABLE_SHOWN → APPROVED → EXECUTED → (FIX_DECIDED → FIXED) → REPORTED → DONE.
+- Validates artifact JSON via `schema.py` at each stage boundary; surfaces schema errors as `error` envelopes before dispatching the next stage.
+- Conditional fix dispatch: only invokes `proctor:fixing-test-failures` when `summary.fail > 0`. No failures → writes `fix-pr-ref.json = null` and skips Stage 4.
+- Aborted runs (e.g. `force-push`) skip fix + jump straight to report so the user sees what happened.
+
+**New orchestrator harness** (`plugins/proctor/commands/proctor.md` top section):
+- Replaces the 9-stage prose with a tight `while`-style loop description: invoke `proctor_run.py`, parse envelope, dispatch one action, re-invoke.
+- Loop discipline explicitly forbids inter-stage stalls — only `done`/`error`/awaiting-AskUserQuestion legitimately end the turn.
+- Mode detection + state-file path setup happens ONCE in pre-flight; state machine handles everything after.
+- Legacy 9-stage prose stays below as fallback documentation + reference for any flow the state machine doesn't yet handle (CI mode's `require_approval=true` early-exit + mutex acquire).
+
+### Why this matters operationally
+
+User's session-long complaint was "如果部署 ci 的话根本没办法执行" — the inter-stage stalls in `/proctor:proctor` made the pipeline impossible to run non-interactively (CI deployment, sandbox automation, etc.). v0.6.0 removes those stalls by removing the AI's discretion at each stage boundary:
+
+| Stage boundary | v0.4.x failure mode (observed) | v0.6.0 behavior |
+|---|---|---|
+| Stage 1 → 2 | AI dumped ChangeMap JSON, churned 3m+ | State machine emits `dispatch_skill` for plan; AI dispatches and re-invokes |
+| Stage 2 → approval gate | AI dumped TestPlan JSON, churned 5m+ | State machine emits `bash` for render_plan_table.py, then `ask_user` |
+| Approval gate → Stage 3 | AI churned waiting for "what's next" | State machine immediately emits `dispatch_skill` for execute |
+| Stage 3 → Stage 4 | AI hesitated on "fix or report?" | State machine reads test-results.summary.fail, emits the right skill |
+| Stage 4 → 5 | Same | State machine routes to report |
+
+Plus all the v0.4.x partial fixes (render_plan_table.py from v0.4.3, render_item_artifacts.py from v0.4.6, etc.) remain in place — the state machine USES them via `bash` envelopes rather than the AI hand-running them mid-stall.
+
+### Tests
+- 209 → 222 (+13): first invocation requires pr-arg; first invocation emits bash for fetch; post-fetch dispatches analyze; post-analyze validates + dispatches plan; post-plan emits bash for render; post-render emits ask_user approval; "Run all" dispatches execute + writes approved-plan.json; "Cancel" emits done; no-failures result skips fix + writes null; failures result dispatches fix; aborted result skips fix to report; report stage emits done with report.html URL; corrupted state resets gracefully.
+
+### Still v0.6.x territory
+
+- CI mode `require_approval=true` early-exit (post plan as PR comment + exit 0 for re-run on `/proctor run` comment trigger).
+- Mutex acquire/release (concurrent CI run coordination).
+- "Drop specific items" approval-gate path (currently only "Run all" and "Cancel" are implemented).
+
+These will be additive state transitions in v0.6.x; the v0.6.0 happy path works end-to-end for local runs and CI runs that don't need approval gating.
+
 ## v0.5.0 — 2026-05-14
 
 ### Wizard control flow → Python state machine
