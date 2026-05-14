@@ -9,7 +9,7 @@ aren't present in the running server, so tests can't find them.
 
 This helper (v0.3.37+) creates an ephemeral worktree under the run
 directory at the PR's head SHA, copies the gitignored
-``.pr-test.local.yml`` (which carries the dev's setup + credentials)
+``.proctor/local.yml`` (which carries the dev's setup + credentials)
 into it, and surfaces the worktree path. The executing-pr-tests
 skill then runs setup/teardown/test commands from that worktree
 instead of the user's checkout, so the dev server compiles + runs
@@ -44,10 +44,10 @@ from pathlib import Path
 
 # Gitignored files we copy from the repo root into the worktree
 # because the worktree starts as a clean checkout (no untracked
-# files). `.pr-test.local.yml` carries the dev's setup commands +
+# files). `.proctor/local.yml` carries the dev's setup commands +
 # auth credentials and must be present for the run to work.
 # Add other paths here if a wider class of repos needs them.
-_GITIGNORED_FILES_TO_COPY = [".pr-test.local.yml"]
+_GITIGNORED_FILES_TO_COPY = [".proctor/local.yml"]
 
 
 def setup(
@@ -128,11 +128,14 @@ def setup(
     )
 
     # Copy gitignored config files so the dev's local setup +
-    # credentials apply inside the worktree.
+    # credentials apply inside the worktree. v0.4.0+ paths live under
+    # `.proctor/` so we mkdir the parent before copying.
     for fname in _GITIGNORED_FILES_TO_COPY:
         src = repo_root / fname
         if src.exists():
-            shutil.copy2(src, worktree_path / fname)
+            dst = worktree_path / fname
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
     marker.write_text(str(worktree_path) + "\n")
     return worktree_path

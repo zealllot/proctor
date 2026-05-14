@@ -46,7 +46,7 @@ VALID_ERROR_TYPE = {
     "auth",             # not-logged-in / session-expired
 }
 
-# Auth types accepted in .pr-test.yml's auth.type field. Add new values
+# Auth types accepted in .proctor/config.yml's auth.type field. Add new values
 # here when adding support for other login mechanisms (oauth, magic
 # link, etc.); each new value needs a corresponding flow in the
 # executing-pr-tests skill.
@@ -412,43 +412,43 @@ def validate_fix_pr_ref(ref) -> None:
 
 
 # ---------------------------------------------------------------------------
-# .pr-test.yml validation (v0.3.0+) + .pr-test.local.yml overlay loading.
+# .proctor/config.yml validation (v0.3.0+) + .proctor/local.yml overlay loading.
 # ---------------------------------------------------------------------------
 
 def validate_pr_test_config(cfg: dict) -> None:
-    """Validate the merged `.pr-test.yml` (+ optional `.pr-test.local.yml`
+    """Validate the merged `.proctor/config.yml` (+ optional `.proctor/local.yml`
     overlay). Auth block is optional — when omitted, PRoctor runs in the
     legacy "no-login" mode (driven by the consumer's `setup:` block, which
     might start a fresh server with bypassed auth). When auth is present,
     every required sub-key is enforced strictly so consumers get loud
     feedback instead of a silent misconfiguration mid-run."""
-    _require(isinstance(cfg, dict), ".pr-test.yml: must be a mapping")
+    _require(isinstance(cfg, dict), ".proctor/config.yml: must be a mapping")
 
     auth = cfg.get("auth")
     if auth is None:
         return  # legacy mode, nothing more to check at config level
-    _require(isinstance(auth, dict), ".pr-test.yml.auth: must be a mapping")
+    _require(isinstance(auth, dict), ".proctor/config.yml.auth: must be a mapping")
     _require_keys(auth, {"type", "login_url", "selectors", "accounts"},
-                  ".pr-test.yml.auth")
+                  ".proctor/config.yml.auth")
     _require(auth["type"] in VALID_AUTH_TYPES,
-             f".pr-test.yml.auth.type {auth['type']!r} not in {sorted(VALID_AUTH_TYPES)}")
+             f".proctor/config.yml.auth.type {auth['type']!r} not in {sorted(VALID_AUTH_TYPES)}")
 
     if auth["type"] == "form_with_totp":
         sel = auth["selectors"]
-        _require(isinstance(sel, dict), ".pr-test.yml.auth.selectors: must be a mapping")
+        _require(isinstance(sel, dict), ".proctor/config.yml.auth.selectors: must be a mapping")
         missing = _FORM_TOTP_SELECTOR_KEYS - set(sel.keys())
         _require(not missing,
-                 f".pr-test.yml.auth.selectors: missing keys {sorted(missing)}")
+                 f".proctor/config.yml.auth.selectors: missing keys {sorted(missing)}")
         for k in _FORM_TOTP_SELECTOR_KEYS:
             _require(isinstance(sel[k], str) and sel[k].strip(),
-                     f".pr-test.yml.auth.selectors.{k}: must be a non-empty string")
+                     f".proctor/config.yml.auth.selectors.{k}: must be a non-empty string")
 
     accs = auth["accounts"]
     _require(isinstance(accs, list) and len(accs) > 0,
-             ".pr-test.yml.auth.accounts: must be a non-empty list")
+             ".proctor/config.yml.auth.accounts: must be a non-empty list")
     seen_names: set[str] = set()
     for i, a in enumerate(accs):
-        label = f".pr-test.yml.auth.accounts[{i}]"
+        label = f".proctor/config.yml.auth.accounts[{i}]"
         _require(isinstance(a, dict), f"{label}: must be a mapping")
         _require_keys(a, {"name"}, label)
         _require(isinstance(a["name"], str) and a["name"].strip(),
@@ -494,7 +494,7 @@ def validate_test_plan_account_refs(plan: dict, cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config loader: .pr-test.yml + optional .pr-test.local.yml overlay.
+# Config loader: .proctor/config.yml + optional .proctor/local.yml overlay.
 # ---------------------------------------------------------------------------
 
 def _deep_merge_overlay(base: dict, overlay: dict) -> dict:
@@ -519,21 +519,46 @@ def _deep_merge_overlay(base: dict, overlay: dict) -> dict:
 def load_config(repo_root: str | os.PathLike[str] = ".") -> dict:
     """Load the merged PRoctor config for the repo at `repo_root`.
 
-    Reads `.pr-test.yml`; if `.pr-test.local.yml` exists, deep-merges it
-    on top so per-developer overrides (different `base_url`, different
-    secret env var names) take effect without touching the committed file.
+    v0.4.0+: config lives under ``.proctor/config.yml`` (with optional
+    ``.proctor/local.yml`` overlay) — single directory for all
+    PRoctor-owned consumer files (config + seed script + run artifacts).
+
+    Legacy fallback (deprecated, prints a warning to stderr): if the
+    new paths are absent but the v0.3.x paths ``.pr-test.yml`` /
+    ``.pr-test.local.yml`` exist at the repo root, read those. The
+    wizard's migrate mode will move the files to the new layout.
 
     Returns the merged config dict. Does NOT validate — callers should
     pipe the result through `validate_pr_test_config` before use."""
+    import sys
     import yaml  # local import — schema.py shouldn't pay yaml cost unless config is loaded
 
     root = Path(repo_root)
-    base_path = root / ".pr-test.yml"
-    if not base_path.exists():
-        raise FileNotFoundError(f".pr-test.yml not found under {root}")
-    base = yaml.safe_load(base_path.read_text()) or {}
+    # New layout first.
+    new_base = root / ".proctor" / "config.yml"
+    new_local = root / ".proctor" / "local.yml"
+    # Legacy fallback (v0.3.x).
+    old_base = root / ".pr-test.yml"
+    old_local = root / ".pr-test.local.yml"
 
-    local_path = root / ".pr-test.local.yml"
+    if new_base.exists():
+        base_path = new_base
+        local_path = new_local
+    elif old_base.exists():
+        sys.stderr.write(
+            "[proctor] WARNING: reading legacy config at .pr-test.yml; "
+            "v0.4.0 moved to .proctor/config.yml. Re-run "
+            "/proctor:proctor-init to migrate (it'll `git mv` the files).\n"
+        )
+        base_path = old_base
+        local_path = old_local
+    else:
+        raise FileNotFoundError(
+            f"No PRoctor config under {root}. Expected "
+            f".proctor/config.yml (v0.4.0+) or .pr-test.yml (legacy)."
+        )
+
+    base = yaml.safe_load(base_path.read_text()) or {}
     if local_path.exists():
         overlay = yaml.safe_load(local_path.read_text()) or {}
         return _deep_merge_overlay(base, overlay)

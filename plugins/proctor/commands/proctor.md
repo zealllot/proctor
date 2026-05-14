@@ -36,7 +36,7 @@ If you find yourself emitting a status line ("done", "validated", "10 items plan
 - Flags (only meaningful in local mode; ignored in CI):
   - `--post-comment` — also post the report as a PR comment (default off in local mode).
   - `--push-fix` — also push the fix branch and open a fix PR (default off in local mode).
-- Optional `.pr-test.yml` at the current repo root.
+- Optional `.proctor/config.yml` at the current repo root.
 
 ## Mode detection
 
@@ -209,7 +209,7 @@ Apply skill `executing-pr-tests`. Pass:
 - approved plan path
 - run-id
 - logs dir = `.proctor/runs/<run-id>/`
-- base_url + per_test_timeout_seconds from `.pr-test.yml`
+- base_url + per_test_timeout_seconds from `.proctor/config.yml`
 - PR head_sha (for force-push detection)
 
 Save output to `.proctor/runs/<run-id>/test-results.json`. Validate.
@@ -222,7 +222,7 @@ pass/fail counts in chat.
 
 ### 8. Stage 4 — fix
 
-If `test-results.json` has any `fail` items AND `.pr-test.yml.auto_fix`
+If `test-results.json` has any `fail` items AND `.proctor/config.yml.auto_fix`
 is true (default), apply skill `fixing-test-failures`. Save output to
 `.proctor/runs/<run-id>/fix-pr-ref.json`.
 

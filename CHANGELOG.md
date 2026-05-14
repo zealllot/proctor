@@ -2,6 +2,76 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.4.0 — 2026-05-14
+
+### Consolidated consumer-side layout — single `.proctor/` directory
+
+User feedback: "项目里的配置文件脚本什么的都放得好分散, 我都看不清有哪些文件" — PRoctor's files were scattered across the consumer's repo root (`.pr-test.yml`, `.pr-test.local.yml`, `.pr-test.local.yml.example`, `hack/proctor-seed-local.sh`, `.proctor/runs/`). Hard to tell what PRoctor owns vs. what's project-specific.
+
+v0.4.0 consolidates everything PRoctor-owned under a single `.proctor/` directory at the repo root. GitHub workflow file stays at `.github/workflows/proctor.yml` because GitHub Actions requires that path; everything else moves:
+
+**Path map (v0.3.x → v0.4.0):**
+
+| v0.3.x | v0.4.0 |
+|---|---|
+| `.pr-test.yml` | `.proctor/config.yml` |
+| `.pr-test.local.yml` (gitignored) | `.proctor/local.yml` (gitignored) |
+| `.pr-test.local.yml.example` | `.proctor/local.yml.example` |
+| `hack/proctor-seed-local.sh` | `.proctor/seed-local.sh` |
+| `.proctor/runs/<run-id>/...` (unchanged) | `.proctor/runs/<run-id>/...` (unchanged) |
+| `.github/workflows/proctor.yml` (unchanged — GH requires path) | unchanged |
+
+The consumer's `.gitignore` flips from:
+```
+.pr-test.local.yml
+.proctor/runs/
+```
+to:
+```
+.proctor/local.yml
+.proctor/runs/
+```
+(everything else under `.proctor/` is committed: `config.yml`, `local.yml.example`, `seed-local.sh`).
+
+### Backwards compatibility (one-version shim)
+
+`schema.load_config` reads the new paths first, falls back to the legacy paths with a deprecation warning printed to stderr:
+```
+[proctor] WARNING: reading legacy config at .pr-test.yml; v0.4.0 moved to
+.proctor/config.yml. Re-run /proctor:proctor-init to migrate (it'll `git mv` the files).
+```
+
+The fallback exists so consumers can upgrade the plugin without their first run failing — but the warning is loud enough that "I'll migrate later" doesn't get forgotten.
+
+### Migration via the wizard
+
+`/proctor:proctor-init` gains a new pre-flight step (before the normal MODE branching): if it detects `.pr-test.yml` AND no `.proctor/config.yml`, it offers via AskUserQuestion:
+
+- **Migrate to v0.4.0 layout (Recommended)** — `git mv` the files into `.proctor/`, update `.gitignore`, then continue with the normal wizard flow re-evaluating against the new layout.
+- **Keep current layout** — fall through to legacy-path mode (compatibility shim runs at every PRoctor invocation; deprecation warning fires).
+
+The migration commands use `git mv` for tracked files so the consumer doesn't lose blame history; the gitignored `local.yml` is moved with plain `mv` (it was never tracked).
+
+### What changed inside the plugin
+
+Bulk path rewrite across:
+- `scripts/schema.py` — `load_config` path priority + all `.pr-test.yml.*` validation error labels.
+- `scripts/worktree.py` — copies `.proctor/local.yml` (was `.pr-test.local.yml`); mkdir parents to handle nested path.
+- `commands/proctor.md`, `commands/proctor-init.md` — all path references + the wizard migration step.
+- `agents/pr-test-executor.md` — screenshot/logs paths unchanged (`.proctor/runs/`).
+- `skills/{analyzing,planning,executing,fixing,reporting}-pr-*/SKILL.md` — config + setup-file references.
+
+Test fixtures (`tests/test_helpers.py`):
+- `test_worktree_setup_copies_pr_test_local_yml` → `test_worktree_setup_copies_local_yml`. Creates `.proctor/local.yml` under the test repo root, asserts the worktree contains `.proctor/local.yml` (mkdir-parents path).
+- All other tests pass unchanged at 170 (schema validation tests don't touch path strings — they validate config CONTENT, not file LOCATION).
+
+### Tests
+- 170 unchanged (test count). One test was renamed + body updated to match new paths; the test still validates the same behavior (worktree copies the dev's gitignored local config) at the new location.
+
+### Why a minor version bump
+
+This is a breaking change for consumers — the file paths in their repo change. The compatibility shim in `load_config` means v0.3.x-laid-out repos still work at runtime, but the wizard now offers migration as the first question, and the deprecation warning is hard to miss. The plugin internals deserve a `0.4` boundary; the `0.3.x` line was 41 releases of incremental fixes.
+
 ## v0.3.41 — 2026-05-14
 
 ### Wizard: confirm setup commands + env source before writing yaml

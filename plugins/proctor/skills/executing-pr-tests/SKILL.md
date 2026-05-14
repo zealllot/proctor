@@ -43,7 +43,7 @@ Output: a single `TestResults` JSON object.
    The helper:
    - Fetches `pull/<n>/head` if the SHA isn't already in local objects.
    - Creates a detached-HEAD worktree at `.proctor/runs/<run-id>/pr-checkout/`.
-   - Copies `.pr-test.local.yml` from the original repo into the worktree (it's gitignored, so it wouldn't otherwise be present — but the dev's setup commands + credentials live there).
+   - Copies `.proctor/local.yml` from the original repo into the worktree (it's gitignored, so it wouldn't otherwise be present — but the dev's setup commands + credentials live there).
    - Prints the absolute worktree path on stdout.
 
    On failure (PR force-pushed since plan was captured, fetch unavailable, etc.), the helper raises; abort the run with `aborted: "worktree-setup-failed"`.
@@ -52,15 +52,15 @@ Output: a single `TestResults` JSON object.
 
 2b. **Run setup** from the merged config, with cwd set to `$WORKTREE_DIR`. Each command via Bash. If any exits non-zero → abort with `aborted: "setup-failed"`.
 
-   The merged config is `.pr-test.yml` overlaid by `.pr-test.local.yml`
+   The merged config is `.proctor/config.yml` overlaid by `.proctor/local.yml`
    when the latter exists (the file is gitignored — only developers
    running PRoctor locally will have one). In practice:
 
    - **CI runs** (deployed test env, `auth:` present, no `setup:` in
-     `.pr-test.yml`, no `.pr-test.local.yml`) → setup is empty, skip
+     `.proctor/config.yml`, no `.proctor/local.yml`) → setup is empty, skip
      this step. Auth in step 3 logs into the already-deployed server.
    - **Local runs** (developer's `claude /proctor:proctor`, where
-     `.pr-test.local.yml` provides `setup:` to bring up the dev
+     `.proctor/local.yml` provides `setup:` to bring up the dev
      server) → setup runs, restarts the local server fresh each
      invocation, THEN auth logs in.
    - **Legacy CI bring-up** (v0.2.x consumers, no `auth:`, just
@@ -69,11 +69,11 @@ Output: a single `TestResults` JSON object.
    Setup commands typically include a "kill previous PRoctor-managed
    PID via pidfile" idiom so every invocation gets a fresh server
    without colliding with other PRoctor instances or the dev's own
-   processes. The wizard's `.pr-test.local.yml.example` ships this
+   processes. The wizard's `.proctor/local.yml.example` ships this
    pattern by default.
 
 3. **Login per account, group items by `as_account`** (v0.3.0+, only when
-   `.pr-test.yml.auth` is set). For each distinct `as_account` value
+   `.proctor/config.yml.auth` is set). For each distinct `as_account` value
    in the plan (default = `auth.accounts[0].name` for items without
    one):
 

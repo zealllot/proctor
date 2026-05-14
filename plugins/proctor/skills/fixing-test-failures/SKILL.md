@@ -5,7 +5,7 @@ description: "Use after executing-pr-tests when there are failures and `auto_fix
 
 # Fixing Test Failures
 
-Input: `test-results.json`, `change-map.json`, `.pr-test.yml`, env (run-id, repo, PR head ref, `PROCTOR_PUSH_FIX`).
+Input: `test-results.json`, `change-map.json`, `.proctor/config.yml`, env (run-id, repo, PR head ref, `PROCTOR_PUSH_FIX`).
 
 Output: one `FixPRRef` JSON object, or `null` if there's nothing to fix or no patch was producible.
 

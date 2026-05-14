@@ -1094,17 +1094,21 @@ def test_worktree_setup_idempotent_when_sha_matches(tmp_path):
     assert wt1 == wt2
 
 
-def test_worktree_setup_copies_pr_test_local_yml(tmp_path):
+def test_worktree_setup_copies_local_yml(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
-    # Drop a gitignored local config in the repo.
-    (repo / ".pr-test.local.yml").write_text("setup: [echo hi]\n")
+    # Drop a gitignored local config under .proctor/ in the repo
+    # (v0.4.0+ layout — the worktree helper copies this single file
+    # so the dev's setup commands + credentials apply inside the
+    # PR-aligned worktree).
+    (repo / ".proctor").mkdir()
+    (repo / ".proctor" / "local.yml").write_text("setup: [echo hi]\n")
     run_dir = repo / ".proctor" / "runs" / "test-run"
 
     wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
                        repo_root=repo)
-    copied = wt_path / ".pr-test.local.yml"
+    copied = wt_path / ".proctor" / "local.yml"
     assert copied.exists()
     assert copied.read_text() == "setup: [echo hi]\n"
 

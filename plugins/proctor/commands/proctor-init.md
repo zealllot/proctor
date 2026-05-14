@@ -1,5 +1,5 @@
 ---
-description: Interactive setup wizard. Detects your stack, asks 5–6 questions, generates `.pr-test.yml` + GitHub workflow, optionally configures the auth secret and repo permissions. Run in the repo you want to add PRoctor to.
+description: Interactive setup wizard. Detects your stack, asks 5–6 questions, generates `.proctor/config.yml` + GitHub workflow, optionally configures the auth secret and repo permissions. Run in the repo you want to add PRoctor to.
 argument-hint: ""
 allowed-tools: Bash(gh *), Bash(git *), Bash(claude *), Bash(jq *), Bash(yq *), Bash(test *), Bash(ls *), Bash(cat *), Bash(grep *), Bash(printf *), Bash(echo *), Bash(mkdir *), Bash(pbcopy *), Bash(pbpaste *), Read, Write, Glob, AskUserQuestion
 ---
@@ -33,23 +33,59 @@ CURRENT_TAG=$(gh release view --repo zealllot/proctor --json tagName --jq '.tagN
 Before anything else, check what PRoctor state is already in this repo:
 
 ```bash
-EXISTING_PR_TEST_YML=$(test -f .pr-test.yml && echo yes)
+EXISTING_PR_TEST_YML=$(test -f .proctor/config.yml && echo yes)
 EXISTING_WORKFLOW=$(test -f .github/workflows/proctor.yml && echo yes)
 # Detect current pin (if any) — used to classify "v0.2 era" vs "v0.3 era"
 CURRENT_PIN=$(grep -oE 'zealllot/proctor/github-action@v[0-9]+\.[0-9]+\.[0-9]+' \
                 .github/workflows/proctor.yml 2>/dev/null | head -1 | sed 's|.*@||')
-HAS_AUTH_BLOCK=$(grep -qE '^auth:' .pr-test.yml 2>/dev/null && echo yes)
+HAS_AUTH_BLOCK=$( (grep -qE '^auth:' .proctor/config.yml 2>/dev/null || grep -qE '^auth:' .pr-test.yml 2>/dev/null) && echo yes )
+
+# v0.4.0 layout migration: detect whether this repo is on the v0.3.x
+# scattered layout (.pr-test.yml at root, hack/proctor-seed-local.sh)
+# vs the v0.4.0 consolidated layout (.proctor/config.yml, .proctor/seed-local.sh).
+LEGACY_LAYOUT=$( (test -f .pr-test.yml || test -x hack/proctor-seed-local.sh) && echo yes )
+NEW_LAYOUT=$(test -f .proctor/config.yml && echo yes)
 ```
 
 Also check whether a local-seed helper exists (orthogonal to MODE — used to decide whether Step 8c-pre runs):
 
 ```bash
 HAS_SEED_SCRIPT=$( \
-  test -x hack/proctor-seed-local.sh -o \
-       -x scripts/proctor-seed-local.sh -o \
-       -x ./proctor-seed-local.sh && echo yes \
+  (test -x .proctor/seed-local.sh \
+   || test -x hack/proctor-seed-local.sh \
+   || test -x scripts/proctor-seed-local.sh \
+   || test -x ./proctor-seed-local.sh) && echo yes \
 )
 ```
+
+**v0.4.0 layout-migration branch** (runs BEFORE the normal MODE branching):
+
+If `LEGACY_LAYOUT=yes` AND `NEW_LAYOUT=` (empty): the consumer is on the v0.3.x scattered layout. v0.4.0 consolidated everything under `.proctor/`. Offer migration via AskUserQuestion:
+
+> "Detected v0.3.x config layout (`.pr-test.yml`, `hack/proctor-seed-local.sh`). v0.4.0 consolidated everything under `.proctor/`. Migrate?"
+
+Options:
+- **Migrate to v0.4.0 layout (Recommended)** — `git mv` the files, update `.gitignore`. The plugin reads either layout at runtime, but the new layout is cleaner and required for future versions.
+- **Keep current layout** — the v0.3.x compatibility shim in `schema.load_config` will keep reading the old paths, but a deprecation warning fires on every run.
+
+If user picks "Migrate to v0.4.0":
+
+```bash
+mkdir -p .proctor
+git mv .pr-test.yml .proctor/config.yml
+[ -f .pr-test.local.yml.example ] && git mv .pr-test.local.yml.example .proctor/local.yml.example
+[ -f .pr-test.local.yml ] && mv .pr-test.local.yml .proctor/local.yml  # gitignored — plain mv
+[ -x hack/proctor-seed-local.sh ] && git mv hack/proctor-seed-local.sh .proctor/seed-local.sh
+
+# Update .gitignore: remove old ignore lines, add new ones
+sed -i.bak \
+    -e '/^\.pr-test\.local\.yml$/d' \
+    -e '/^\.proctor\/runs/d' \
+    .gitignore && rm .gitignore.bak
+printf '\n# PRoctor (v0.4.0+) layout\n.proctor/local.yml\n.proctor/runs/\n' >> .gitignore
+```
+
+Then continue to normal MODE branching below (re-evaluate the env vars after the migration — `LEGACY_LAYOUT` flips to empty, `NEW_LAYOUT=yes`).
 
 Branch on what's there:
 
@@ -60,7 +96,7 @@ Branch on what's there:
 
   > "Detected existing PRoctor integration pinned at <CURRENT_PIN>. v0.3.0 introduces:
   > - Auth + multi-account testing against an already-running server (no CI bring-up needed for runtime tests).
-  > - Per-developer `.pr-test.local.yml` overrides.
+  > - Per-developer `.proctor/local.yml` overrides.
   >
   > How would you like to proceed?"
   > - **Migrate to v0.3 existing-env mode (Recommended)** — keep `require_approval` / `auto_fix` / etc., drop `setup:`, add `auth:` block. Bump workflow pin to `<CURRENT_TAG>`, add secret pass-through.
@@ -80,7 +116,7 @@ Branch on what's there:
 
 For `migrate` and `bump-only`, **do NOT call out to Sections 1–6**; they're CI-bring-up flow only.
 
-**Seed-script gating is orthogonal to MODE**: any time `.pr-test.yml` declares `auth.accounts` AND no local seed script exists, Step 8c-pre runs. Bumping the action version doesn't help a dev who still needs to seed local users.
+**Seed-script gating is orthogonal to MODE**: any time `.proctor/config.yml` declares `auth.accounts` AND no local seed script exists, Step 8c-pre runs. Bumping the action version doesn't help a dev who still needs to seed local users.
 
 ## 1. Detect stack
 
@@ -198,7 +234,7 @@ Otherwise continue with Q1 below.
 
 ### Q2 — Server setup commands (only if Q1 = Yes; pre-fill per stack)
 
-> "I'll add these `setup:` commands to `.pr-test.yml`. OK?"
+> "I'll add these `setup:` commands to `.proctor/config.yml`. OK?"
 Show the proposed list as the option label preview. For example for Node+Vite:
 ```
 - corepack enable && corepack prepare pnpm@9 --activate
@@ -269,7 +305,7 @@ Don't ask for the secret value here — we'll set it interactively after files l
 
 ## 3. Generate files
 
-Write `.pr-test.yml` at the repo root:
+Write `.proctor/config.yml` at the repo root:
 
 ```yaml
 # Generated by /proctor-init. Tweak as needed.
@@ -405,13 +441,13 @@ If Q3 was Yes (auto_fix), the repo's Actions permissions need to allow PR creati
 Print a short summary like:
 
 ```
-✓ .pr-test.yml          (Vite + Go, dev servers on :5173 / :7000)
+✓ .proctor/config.yml          (Vite + Go, dev servers on :5173 / :7000)
 ✓ .github/workflows/proctor.yml  (pinned to v0.2.0)
 ✓ Auth secret set: CLAUDE_CODE_OAUTH_TOKEN
 ✓ Actions PR-creation: enabled
 
 Next:
-  1. git add .pr-test.yml .github/workflows/proctor.yml
+  1. git add .proctor/config.yml .github/workflows/proctor.yml
   2. git commit -m "ci: add PRoctor"
   3. Open a small PR — PRoctor will analyze it within ~10 minutes and post a report comment.
 
@@ -432,7 +468,7 @@ If any step was skipped (auth not set, perms not flipped), call those out as "TO
 
 Entered when Q0 = "Existing running server" (`MODE=fresh`) OR when migrating from v0.2 (`MODE=migrate`). Captures auth + accounts then hands off to Section 8 for file generation / patching.
 
-In `MODE=migrate`, read the existing `.pr-test.yml` first and use its values as DEFAULTS so the user can press-enter to keep what they have. Specifically, parse out: `require_approval`, `auto_fix`, `base_url` (if present), and `mobile_emulator`. Treat these as locked answers — don't re-ask.
+In `MODE=migrate`, read the existing `.proctor/config.yml` first and use its values as DEFAULTS so the user can press-enter to keep what they have. Specifically, parse out: `require_approval`, `auto_fix`, `base_url` (if present), and `mobile_emulator`. Treat these as locked answers — don't re-ask.
 
 ### Step 7a — Login mechanism (Q-EnvA)
 
@@ -441,7 +477,7 @@ Ask, one short question via AskUserQuestion:
 > "How does an admin log into the app you want PRoctor to test?"
 - **Form: email + password + TOTP (2FA)** (Recommended) — sets `auth.type: form_with_totp`. Continue to 7b.
 - **Form: email + password, no 2FA** — also `form_with_totp` schema-wise; mark the `totp` selector + `totp_seed_env` as TODO in the generated file, document for the user that the schema requires them but the runtime can treat 2FA as no-op when the seed is empty. Continue to 7b.
-- **Something else** (SSO, magic link, OAuth) — skip the auth block. Tell the user PRoctor v0.3.0 doesn't generate other auth types yet; they can run without `auth:` (legacy mode) or hand-edit the file. Stop after generating the no-auth `.pr-test.yml`.
+- **Something else** (SSO, magic link, OAuth) — skip the auth block. Tell the user PRoctor v0.3.0 doesn't generate other auth types yet; they can run without `auth:` (legacy mode) or hand-edit the file. Stop after generating the no-auth `.proctor/config.yml`.
 
 ### Step 7b — Login form selectors (Q-EnvB)
 
@@ -593,7 +629,7 @@ Filter rules (apply AFTER the union, not as part of authoritative selection):
 
 Present the result via AskUserQuestion (multi-select):
 
-> "I found these candidate admin roles in the codebase. Which ones should PRoctor test under? (Each picked role becomes one auth account in `.pr-test.yml`.)"
+> "I found these candidate admin roles in the codebase. Which ones should PRoctor test under? (Each picked role becomes one auth account in `.proctor/config.yml`.)"
 >
 > Options: `<each DETECTED_ROLES entry>` + "Add a role not in this list" + "Just one generic admin account"
 
@@ -606,9 +642,9 @@ Present the result via AskUserQuestion (multi-select):
 
 Save the final list as `ROLE_NAMES = [name, name, name]`.
 
-`MODE=migrate` special case: if the existing `.pr-test.yml` already has `auth.accounts:` declared, **skip the detection grep entirely** and confirm:
+`MODE=migrate` special case: if the existing `.proctor/config.yml` already has `auth.accounts:` declared, **skip the detection grep entirely** and confirm:
 
-> "Existing `.pr-test.yml` declares N accounts: `<names>`. Keep them, or rediscover from the codebase?"
+> "Existing `.proctor/config.yml` declares N accounts: `<names>`. Keep them, or rediscover from the codebase?"
 - Keep → reuse the existing list, skip Step 7d (accounts already fully configured).
 - Rediscover → fall through to the grep-driven flow above.
 
@@ -655,7 +691,7 @@ Save each as `ACCOUNTS[i] = {name: ROLE_NAMES[i], role_label, email_env, passwor
 
 ### Step 7e — Base URL (Q-EnvE)
 
-In `MODE=migrate`: if the existing `.pr-test.yml` already has `base_url`, ask to confirm (default = existing).
+In `MODE=migrate`: if the existing `.proctor/config.yml` already has `base_url`, ask to confirm (default = existing).
 
 In `MODE=fresh`: ask via AskUserQuestion:
 
@@ -670,7 +706,7 @@ Save as `BASE_URL`.
 
 ### Step 7f — Confirm setup commands + env source (v0.3.41+)
 
-**Why this step exists**: previous wizard versions auto-generated `setup:` commands from stack detection and silently baked them into `.pr-test.local.yml`. When detection was slightly wrong (the env-source file path, the build command, the right docker-compose path), the dev server would start in a misconfigured state and produce mysterious failures during `/proctor:proctor` runs (e.g. gRPC handshake errors talking to a backend with mismatched keys). The fix: show the proposed commands and ASK before writing.
+**Why this step exists**: previous wizard versions auto-generated `setup:` commands from stack detection and silently baked them into `.proctor/local.yml`. When detection was slightly wrong (the env-source file path, the build command, the right docker-compose path), the dev server would start in a misconfigured state and produce mysterious failures during `/proctor:proctor` runs (e.g. gRPC handshake errors talking to a backend with mismatched keys). The fix: show the proposed commands and ASK before writing.
 
 This step has TWO sub-questions, both AskUserQuestion.
 
@@ -707,7 +743,7 @@ Compose the proposed setup block using the snippets from Step 8b's "stack-aware 
 
 Render the FULL block in chat as a markdown YAML code-fenced block. Then AskUserQuestion:
 
-> "Use these setup commands? They'll be written into your `.pr-test.local.yml` (gitignored — only you have it)."
+> "Use these setup commands? They'll be written into your `.proctor/local.yml` (gitignored — only you have it)."
 
 Options:
 - "Use as-is — these look right" (Recommended)
@@ -716,7 +752,7 @@ Options:
 
 Branch:
 - **Use as-is** → store the rendered commands as `SETUP_COMMANDS` (list of strings, one per line excluding YAML's `  - `).
-- **Customize** → set `SETUP_COMMANDS = "<USER-FILLS-IN>"` marker. Step 8b / 8c-pre will write a `setup:` block with one TODO comment and stop there; the seed script writes `.pr-test.local.yml` with the TODO comment in place of commands. Tell the user explicitly in the wizard summary: "Edit `.pr-test.local.yml` to fill in your setup commands before running `/proctor:proctor`."
+- **Customize** → set `SETUP_COMMANDS = "<USER-FILLS-IN>"` marker. Step 8b / 8c-pre will write a `setup:` block with one TODO comment and stop there; the seed script writes `.proctor/local.yml` with the TODO comment in place of commands. Tell the user explicitly in the wizard summary: "Edit `.proctor/local.yml` to fill in your setup commands before running `/proctor:proctor`."
 - **Skip** → set `SETUP_COMMANDS = []`. Same warning in the summary.
 
 The confirmed `SETUP_COMMANDS` is what 8b and 8c-pre USE — they don't regenerate from detection at write time. Step 7f is the single source of truth for "what setup commands go into the dev's local yaml".
@@ -725,13 +761,13 @@ The confirmed `SETUP_COMMANDS` is what 8b and 8c-pre USE — they don't regenera
 
 This section is reached at the end of `MODE=fresh` (existing-env path) OR `MODE=migrate` OR `MODE=bump-only`. It's the single file-mutation point. **Show the user a diff preview** before each Write — they can refuse any single change.
 
-### 8a — Write `.pr-test.yml`
+### 8a — Write `.proctor/config.yml`
 
 For `MODE=fresh` or `MODE=migrate`: generate the YAML from Section 7's captured answers. Template:
 
 ```yaml
 # Managed by /proctor-init. Re-run the wizard to regenerate.
-# Per-developer overrides go in .pr-test.local.yml (gitignored).
+# Per-developer overrides go in .proctor/local.yml (gitignored).
 
 base_url: <BASE_URL>
 
@@ -758,21 +794,21 @@ per_test_timeout_seconds: <migrate: from existing or 60 | fresh: 60>
 mobile_emulator: <migrate: from existing or false | fresh: false>
 ```
 
-For `MODE=migrate`, DROP the existing `setup:` block (no longer needed in existing-env mode) and emit a `setup_removed` note to mention in the summary. Don't silently drop other keys we don't understand — preserve them at the end of the file with a `# Preserved from previous .pr-test.yml:` comment.
+For `MODE=migrate`, DROP the existing `setup:` block (no longer needed in existing-env mode) and emit a `setup_removed` note to mention in the summary. Don't silently drop other keys we don't understand — preserve them at the end of the file with a `# Preserved from previous .proctor/config.yml:` comment.
 
-### 8b — Write `.pr-test.local.yml.example`
+### 8b — Write `.proctor/local.yml.example`
 
 ⚠ If Step 8c-pre's seed script is generated, **the dev should run that script
 instead of copying this example file manually**. The script handles
-generating TOTP seeds, seeding the local DB, AND writing `.pr-test.local.yml`
+generating TOTP seeds, seeding the local DB, AND writing `.proctor/local.yml`
 for them. This example file is the FALLBACK (no seed script, custom flow).
 
 The example file should include a `setup:` block so the developer gets auto-server-lifecycle out of the box. **Use the `SETUP_COMMANDS` confirmed in Step 7f** — do NOT regenerate from detection here. Step 7f is the single source of truth (user already saw + approved the commands). The snippet reference below remains for documentation purposes and for what Step 7f shows the user; this step just consumes the result.
 
-Generate `.pr-test.local.yml.example` like this:
+Generate `.proctor/local.yml.example` like this:
 
 ```yaml
-# Per-developer overrides. Copy this to .pr-test.local.yml and edit.
+# Per-developer overrides. Copy this to .proctor/local.yml and edit.
 # Gitignored — each dev keeps their own.
 #
 # How this works: every `claude /proctor:proctor <PR>` invocation runs
@@ -880,15 +916,15 @@ For **Python / Django / FastAPI / Rails / etc.** — emit a TODO placeholder:
 
 ### 8c-pre — Write the local-seed helper script
 
-**Runs whenever `NEEDS_SEED_SCRIPT=yes`** (i.e. `auth.accounts` declared but no `hack/proctor-seed-local.sh` / `scripts/proctor-seed-local.sh` / top-level equivalent exists yet). Orthogonal to MODE — runs in fresh, migrate, AND bump-only-with-missing-script.
+**Runs whenever `NEEDS_SEED_SCRIPT=yes`** (i.e. `auth.accounts` declared but no `.proctor/seed-local.sh` / `.proctor/seed-local.sh` / top-level equivalent exists yet). Orthogonal to MODE — runs in fresh, migrate, AND bump-only-with-missing-script.
 
 If the seed script already exists, **don't overwrite** — just skip this step. The dev's filled-in TODO block (their project-specific UPSERT SQL) is in there; clobbering would discard that work.
 
-Generate `hack/proctor-seed-local.sh` (or `scripts/proctor-seed-local.sh` if no `hack/`, or top-level `proctor-seed-local.sh` if neither exists). This script:
+Generate `.proctor/seed-local.sh` (or `.proctor/seed-local.sh` if no `hack/`, or top-level `proctor-seed-local.sh` if neither exists). This script:
 
 1. Generates a fresh 32-char base32 TOTP seed per account.
 2. Inserts/upserts each account into the local DB.
-3. Writes `.pr-test.local.yml` with the resulting credentials as **inline values** (not env vars — the file is gitignored, so plaintext is acceptable for local-only test accounts).
+3. Writes `.proctor/local.yml` with the resulting credentials as **inline values** (not env vars — the file is gitignored, so plaintext is acceptable for local-only test accounts).
 
 **Before writing the script template, the wizard MUST do three reads:**
 
@@ -1091,7 +1127,7 @@ The DB-insertion step is genuinely project-specific (table name, password hashin
 # What this does:
 #   1. Generate a fresh TOTP seed per role.
 #   2. UPSERT each role's user into your local DB.
-#   3. Write .pr-test.local.yml with the resulting credentials inline.
+#   3. Write .proctor/local.yml with the resulting credentials inline.
 #
 # Run after `docker-compose up` so your local DB is reachable.
 set -euo pipefail
@@ -1155,11 +1191,11 @@ for i in "${!ROLES[@]}"; do
   printf '  ✓ %-22s %s\n' "$role" "$email"
 done
 
-# Emit .pr-test.local.yml with inline credentials AND setup commands so
+# Emit .proctor/local.yml with inline credentials AND setup commands so
 # PRoctor brings up the local server itself on `claude /proctor:proctor`.
 # (Gitignored — see .gitignore.)
 {
-  echo "# Generated by hack/proctor-seed-local.sh — DO NOT COMMIT."
+  echo "# Generated by .proctor/seed-local.sh — DO NOT COMMIT."
   echo "# Re-run that script to regenerate (TOTP seeds rotate each run)."
   echo
   echo "base_url: http://localhost:<APP_PORT>"
@@ -1187,10 +1223,10 @@ Otherwise emit one `  - <cmd>` per entry:>
     echo "      password: $PASSWORD"
     echo "      totp_seed: ${SEEDS[$i]}"
   done
-} > .pr-test.local.yml
+} > .proctor/local.yml
 
 echo
-echo "✓ Wrote .pr-test.local.yml ($(wc -l < .pr-test.local.yml | tr -d ' ') lines)"
+echo "✓ Wrote .proctor/local.yml ($(wc -l < .proctor/local.yml | tr -d ' ') lines)"
 echo "✓ ${#ROLES[@]} local AI-tester accounts seeded into $<DB_NAME_ENV>."
 echo
 echo "Next: claude /proctor:proctor <PR#>"
@@ -1200,9 +1236,9 @@ Substitute the wizard's discovered values for `<ACCOUNTS[i].name>`, `<APP_PORT>`
 
 Make the script executable: `chmod +x <path-to-script>`.
 
-#### `STACK_AWARE_SETUP_COMMANDS` to embed in `.pr-test.local.yml`
+#### `STACK_AWARE_SETUP_COMMANDS` to embed in `.proctor/local.yml`
 
-Re-use the same template from Section 8b's `.pr-test.local.yml.example` setup block — same pidfile pattern, same wait-loop, same stack-specific build/run command. Compose the list:
+Re-use the same template from Section 8b's `.proctor/local.yml.example` setup block — same pidfile pattern, same wait-loop, same stack-specific build/run command. Compose the list:
 
 ```
 - docker compose -f <COMPOSE_HIT> up -d              (if COMPOSE_HIT)
@@ -1236,7 +1272,7 @@ Then in the YAML emission section: `echo "$SETUP_BLOCK"` to dump it verbatim. Th
 Read `.gitignore`. For each of these lines, append it ONLY if not already present:
 
 ```
-.pr-test.local.yml
+.proctor/local.yml
 .proctor/
 .proctor-hash-*/
 ```
@@ -1310,22 +1346,22 @@ Print, regardless of mode:
 
 ```
 Done. Files changed:
-  ✓ .pr-test.yml                           (created / updated)
-  ✓ .pr-test.local.yml.example             (created — copy to .pr-test.local.yml)
-  ✓ .gitignore                             (.proctor/ and .pr-test.local.yml ignored)
+  ✓ .proctor/config.yml                           (created / updated)
+  ✓ .proctor/local.yml.example             (created — copy to .proctor/local.yml)
+  ✓ .gitignore                             (.proctor/ and .proctor/local.yml ignored)
   ✓ .github/workflows/proctor.yml          (action pinned to <CURRENT_TAG>, secrets pass-through added)
 
 Next steps:
   1. Commit the above and open a PR (or merge if you've batched it on master).
   2. (CI / deployed env) Run the secret-set commands above for each account.
   3. (Local dev) Run the seed script to populate your local DB + generate
-     `.pr-test.local.yml`:
-        ./hack/proctor-seed-local.sh
+     `.proctor/local.yml`:
+        ./.proctor/seed-local.sh
      (Replace path if generated elsewhere. The script TODO-marks the SQL
-     part — fill that in once per project, then `.pr-test.local.yml` writes
+     part — fill that in once per project, then `.proctor/local.yml` writes
      itself on every re-run.)
   4. (If migration) The old setup: block was dropped — see PRESERVED comment block
-     at the bottom of .pr-test.yml for anything else that wasn't recognized.
+     at the bottom of .proctor/config.yml for anything else that wasn't recognized.
   5. Test: comment `/proctor run` on any PR (CI), or `claude /proctor:proctor <PR#>` locally.
 ```
 

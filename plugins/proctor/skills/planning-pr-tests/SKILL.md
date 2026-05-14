@@ -1,12 +1,12 @@
 ---
 name: planning-pr-tests
-description: Use when /proctor has a ChangeMap and needs to produce a concrete TestPlan — one test item per behavior worth verifying. Second stage of the PRoctor pipeline. Output is a single JSON object — no prose. Use when handed `change-map.json` and optionally `.pr-test.yml`.
+description: Use when /proctor has a ChangeMap and needs to produce a concrete TestPlan — one test item per behavior worth verifying. Second stage of the PRoctor pipeline. Output is a single JSON object — no prose. Use when handed `change-map.json` and optionally `.proctor/config.yml`.
 ---
 
 # Planning PR Tests
 
 Input: a `ChangeMap` JSON (output of analyzing-pr-changes) and optionally
-the contents of the repo's `.pr-test.yml`.
+the contents of the repo's `.proctor/config.yml`.
 
 Output: a single JSON object matching the `TestPlan` contract.
 
@@ -49,14 +49,14 @@ current one cannot answer the question.
    Don't propose a runner that doesn't exist.
 
 3. **`bash` with `curl`** — API contract verification when the repo's
-   `.pr-test.yml setup:` actually starts a server. The planner can
-   know this by inspecting `.pr-test.yml`: if `setup:` is empty or
+   `.proctor/config.yml setup:` actually starts a server. The planner can
+   know this by inspecting `.proctor/config.yml`: if `setup:` is empty or
    missing, **do not plan** curl items against `base_url`.
 
 4. **`chrome-devtools`** — visible UI behavior, real user
    interactions, visual regressions. Most expensive; reserve for
    things steps 1–3 cannot verify. Same pre-flight as curl: only plan
-   chrome-devtools items if `.pr-test.yml setup:` brings up a server,
+   chrome-devtools items if `.proctor/config.yml setup:` brings up a server,
    otherwise plan a `lint-only` item that checks the source.
 
 5. **`skip`** — only when the change genuinely cannot be verified
@@ -88,7 +88,7 @@ mark `risk: high` so the operator sees an environment was missing.
    and `api`, append at least one extra item with `category: "e2e-flow"`
    that exercises the user-visible path involving both layers. Use
    `tool: "chrome-devtools"` and write `how:` as a short scripted
-   journey. **Skip this rule** if `.pr-test.yml setup:` doesn't bring
+   journey. **Skip this rule** if `.proctor/config.yml setup:` doesn't bring
    up both layers.
 
 3. Each item gets a unique `id` (`t-001`, `t-002`, ...) in declaration
@@ -98,7 +98,7 @@ mark `risk: high` so the operator sees an environment was missing.
 4. Set `risk` per item based on the underlying hunk's risk and the
    blast radius of failure.
 
-5. If `.pr-test.yml` provides `test_focus`, weight more items toward
+5. If `.proctor/config.yml` provides `test_focus`, weight more items toward
    those categories; do not omit other categories entirely.
 
 6. **Use `pr_context` from the ChangeMap to drive what each item actually verifies.** The PR description often contains the real acceptance criteria — they're rarely visible from the diff alone. For the items you generate:
@@ -449,7 +449,7 @@ Don't write `preconditions` for items where the only precondition is "PRoctor is
 Executor behavior (see `executing-pr-tests/SKILL.md`):
 - Run the command via Bash. Exit 0 → proceed; non-zero → mark this item `skipped` with `reason: "precondition-not-met"` and DON'T dispatch the subagent.
 - Templates (`{{<id>.<key>}}`) work inside the command just like in `how:` / `preconditions`.
-- The command should be a SINGLE-SHOT CHECK, not a setup script. If the precondition needs to be ESTABLISHED rather than verified, put that in the consumer's setup flow (`.pr-test.yml setup:` or a seed step earlier in the journey), not here.
+- The command should be a SINGLE-SHOT CHECK, not a setup script. If the precondition needs to be ESTABLISHED rather than verified, put that in the consumer's setup flow (`.proctor/config.yml setup:` or a seed step earlier in the journey), not here.
 
 When to add it:
 - The test will give confusing results if the precondition isn't met (the assertion path runs against absent state and either passes vacuously or fails for the wrong reason).
@@ -534,9 +534,9 @@ Below: what each pattern looks like in code, and the canonical test it should pr
 
 **When the helper returned NOTHING** but you still think a negative item makes sense — fine, infer one, leave `error_type` unset, and explain in `rationale` why the helper missed it. That feedback loop helps tune the patterns over time.
 
-## Role-aware planning (when `.pr-test.yml` has `auth.accounts`)
+## Role-aware planning (when `.proctor/config.yml` has `auth.accounts`)
 
-If the consumer's `.pr-test.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.
+If the consumer's `.proctor/config.yml` declares an `auth` block with an `accounts` array, this admin has role-based permissions and you can target specific roles per item.
 
 Each item may carry an optional `as_account: <name>` field that references one of the `auth.accounts[].name` values. When omitted, the executor uses `accounts[0]` (by convention the highest-privilege account).
 
@@ -651,5 +651,5 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
 - Emit exactly one JSON object. No prose.
 - IDs must be unique. `depends_on` must reference IDs that exist in the same plan.
 - `tool` must be one of: `chrome-devtools`, `bash`, `curl`, `lint-only`, `skip`.
-- When set, `as_account` must equal one of `auth.accounts[].name` values from `.pr-test.yml`. The validator rejects unknown names.
+- When set, `as_account` must equal one of `auth.accounts[].name` values from `.proctor/config.yml`. The validator rejects unknown names.
 - The final test-plan.json MUST pass `scripts/plan_smells.py --strict` (or 2 failed regen attempts, with the warning explicitly surfaced).

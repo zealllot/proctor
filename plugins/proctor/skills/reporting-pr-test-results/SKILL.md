@@ -47,7 +47,7 @@ Render this immediately after the header, before the per-item sections:
 |---|---|---|
 | ![baseline](VISUAL_URL_BASE/baseline.png) | ![diff](VISUAL_URL_BASE/diff.png) | ![head](VISUAL_URL_BASE/head.png) |
 
-The base URL above is the `base_url` from `.pr-test.yml`. Captured by chromium headless at 1280×800. Pages with animations or randomized content may always show diff pixels — tune `.pr-test.yml.teardown` if your stack needs custom server cleanup between captures.
+The base URL above is the `base_url` from `.proctor/config.yml`. Captured by chromium headless at 1280×800. Pages with animations or randomized content may always show diff pixels — tune `.proctor/config.yml.teardown` if your stack needs custom server cleanup between captures.
 ```
 
 When `VISUAL_URL_BASE` is empty, omit the entire section — don't render an empty header.
@@ -155,7 +155,7 @@ CI mode (FixPRRef has `number` / `url` fields):
 - ✅ Opened fix PR: [#<num>](<server>/<repo>/pull/<num>) covering `<id1>`, `<id2>`. Review and merge if happy.
 - ⚠️ Opened fix PR: [#<num>](...) covering `<id1>`. **Couldn't fix:** `<id2>` — needs human review.
 - ⛔ Failures couldn't be auto-fixed. Needs human review.
-- ⏸️ Auto-fix disabled (`.pr-test.yml` has `auto_fix: false`). See failures above.
+- ⏸️ Auto-fix disabled (`.proctor/config.yml` has `auto_fix: false`). See failures above.
 - ✨ All passed — nothing to fix.
 ```
 
@@ -168,7 +168,7 @@ Local mode (FixPRRef has `mode: "local"` and `patches_dir`):
 - 📝 Generated patches in `<patches_dir>` covering `<id1>`, `<id2>`. Apply with: `git apply --3way <patches_dir>/<id>.patch`
 - 📝 Generated patches in `<patches_dir>` covering `<id1>`. **Couldn't fix:** `<id2>` — needs human review.
 - ⛔ Failures couldn't be auto-fixed. Needs human review.
-- ⏸️ Auto-fix disabled (`.pr-test.yml` has `auto_fix: false`). See failures above.
+- ⏸️ Auto-fix disabled (`.proctor/config.yml` has `auto_fix: false`). See failures above.
 - ✨ All passed — nothing to fix.
 
 Re-run with `--push-fix` to also push these as a fix PR.
