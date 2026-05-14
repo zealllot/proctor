@@ -53,14 +53,64 @@ _GITIGNORED_FILES_TO_COPY = [".proctor/local.yml"]
 # main repo into the worktree so the dev server doesn't have to rebuild
 # them. Each entry must exist at the main repo root to be linked.
 # Override via .proctor/config.yml's `worktree_symlink_dirs` field.
+#
+# v0.7.1 — entries can be sub-paths (e.g. ``external/assets/mcd``) when
+# the parent dir is tracked but a gitignored sub-dir inside it carries
+# the runtime artifact. The original ``external/assets`` entry didn't
+# work for the mcd-website repo because ``external/assets/`` itself is
+# tracked (with ``fonts/`` + ``images/``) — only ``external/assets/mcd``
+# (the frontend webpack bundle) is gitignored, so the symlink-the-
+# parent strategy from v0.7.0 silently no-op'd. We now list both:
+# the parent (for repos where the whole dir is gitignored) AND the
+# sub-path (for repos where only one sub-dir is gitignored). worktree.py
+# tries each entry independently and links whichever exists at the repo
+# root but doesn't yet exist in the worktree.
 _DEFAULT_GITIGNORED_DIRS_TO_SYMLINK = [
-    "external/assets",       # frontend bundle output (mcd-website pattern)
+    "external/assets",       # whole-dir variant (some consumer repos)
+    "external/assets/mcd",   # sub-path variant (mcd-website: parent is tracked, mcd/ is gitignored)
     "node_modules",          # JS deps
     "dist",                  # generic build output
     "build",                 # generic build output
     ".next",                 # Next.js
     "vendor",                # Go vendoring (rare with go.mod, but...)
 ]
+
+
+def _default_worktree_path(repo_root: Path, run_dir: Path) -> Path:
+    """Choose where to place the worktree.
+
+    v0.7.0 placed it at ``<run_dir>/pr-checkout/`` (inside the consumer
+    repo). That broke when the consumer repo lives under
+    ``$GOPATH/src/...``: ``go run .`` from the worktree path resolves
+    the dir to ``<module-name>/.proctor/runs/<id>/pr-checkout``, which
+    Go reads as a sub-package import that doesn't exist in the parent
+    module, and ``go run`` fails with::
+
+        main module (github.com/.../mcd-website) does not contain
+        package github.com/.../.proctor/runs/<id>/pr-checkout
+
+    v0.7.1 places worktrees OUTSIDE the consumer repo by default, at
+    ``$TMPDIR/proctor-worktrees/<consumer-name>-<run-id>/``. The path
+    stays correlated to the run via the ``worktree-path.txt`` marker
+    inside ``run_dir``, so teardown still finds it.
+
+    Override via env ``PROCTOR_WORKTREE_BASE_DIR`` if the dev wants a
+    different parent (e.g. a faster local SSD, or a persistent dir to
+    inspect failed runs without immediate cleanup).
+    """
+    import os
+    import tempfile
+    base = os.environ.get("PROCTOR_WORKTREE_BASE_DIR")
+    if base:
+        base_path = Path(base).resolve()
+    else:
+        base_path = Path(tempfile.gettempdir()) / "proctor-worktrees"
+    base_path.mkdir(parents=True, exist_ok=True)
+    # Encode consumer repo name + run-id in the dir so concurrent runs
+    # against different PRs don't collide.
+    consumer_name = repo_root.name
+    run_id = run_dir.name
+    return (base_path / f"{consumer_name}-{run_id}").resolve()
 
 
 def setup(
@@ -70,9 +120,15 @@ def setup(
     repo_root: Path | None = None,
     symlink_dirs: list[str] | None = None,
 ) -> Path:
-    """Ensure a worktree at ``head_sha`` exists under ``run_dir``.
+    """Ensure a worktree at ``head_sha`` exists.
 
     Returns the absolute path to the worktree.
+
+    v0.7.1 — worktree is placed outside the consumer repo (default:
+    under ``$TMPDIR/proctor-worktrees/``). See ``_default_worktree_path``
+    for the rationale (Go module conflicts when consumer repo is in
+    ``$GOPATH/src/``). The location is recorded in
+    ``<run_dir>/worktree-path.txt`` for teardown.
 
     - Idempotent: if the worktree already exists at the right SHA,
       returns the path without re-creating.
@@ -86,7 +142,7 @@ def setup(
     repo_root = (repo_root or Path.cwd()).resolve()
     run_dir = run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
-    worktree_path = (run_dir / "pr-checkout").resolve()
+    worktree_path = _default_worktree_path(repo_root, run_dir)
     marker = run_dir / "worktree-path.txt"
 
     # If worktree already exists, verify it's at the right SHA and

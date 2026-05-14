@@ -2172,6 +2172,19 @@ def test_render_plan_table_cli_reads_stdin(tmp_path):
 from plugins.proctor.scripts.worktree import setup as wt_setup, teardown as wt_teardown
 
 
+@pytest.fixture(autouse=False)
+def _isolated_worktree_base(tmp_path, monkeypatch):
+    """v0.7.1+: worktree.setup() places worktrees outside the consumer
+    repo (under $TMPDIR/proctor-worktrees/ by default, override via
+    $PROCTOR_WORKTREE_BASE_DIR). For tests we need a per-test isolated
+    base so concurrent test runs don't collide or leak worktrees.
+    Apply this fixture via parameter in worktree tests."""
+    base = tmp_path / "wt-base"
+    base.mkdir()
+    monkeypatch.setenv("PROCTOR_WORKTREE_BASE_DIR", str(base))
+    return base
+
+
 def _init_repo_with_commits(repo_path):
     """Create a tiny git repo with two commits and a 'PR-like' branch
     at the second commit. Returns (initial_sha, pr_sha)."""
@@ -2200,7 +2213,7 @@ def _init_repo_with_commits(repo_path):
     return initial_sha, pr_sha
 
 
-def test_worktree_setup_creates_aligned_checkout(tmp_path):
+def test_worktree_setup_creates_aligned_checkout(_isolated_worktree_base, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
@@ -2222,7 +2235,7 @@ def test_worktree_setup_creates_aligned_checkout(tmp_path):
     assert marker.read_text().strip() == str(wt_path.resolve())
 
 
-def test_worktree_setup_idempotent_when_sha_matches(tmp_path):
+def test_worktree_setup_idempotent_when_sha_matches(_isolated_worktree_base, tmp_path):
     """Calling setup twice at the same SHA shouldn't error or
     recreate."""
     repo = tmp_path / "repo"
@@ -2237,7 +2250,7 @@ def test_worktree_setup_idempotent_when_sha_matches(tmp_path):
     assert wt1 == wt2
 
 
-def test_worktree_setup_copies_local_yml(tmp_path):
+def test_worktree_setup_copies_local_yml(_isolated_worktree_base, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
@@ -2256,7 +2269,7 @@ def test_worktree_setup_copies_local_yml(tmp_path):
     assert copied.read_text() == "setup: [echo hi]\n"
 
 
-def test_worktree_setup_no_local_yml_is_fine(tmp_path):
+def test_worktree_setup_no_local_yml_is_fine(_isolated_worktree_base, tmp_path):
     """If the dev hasn't created .pr-test.local.yml, setup shouldn't
     error — just create the worktree without it."""
     repo = tmp_path / "repo"
@@ -2269,7 +2282,7 @@ def test_worktree_setup_no_local_yml_is_fine(tmp_path):
     assert not (wt_path / ".pr-test.local.yml").exists()
 
 
-def test_worktree_teardown_removes_worktree(tmp_path):
+def test_worktree_teardown_removes_worktree(_isolated_worktree_base, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _, pr_sha = _init_repo_with_commits(repo)
@@ -2284,7 +2297,7 @@ def test_worktree_teardown_removes_worktree(tmp_path):
     assert not (run_dir / "worktree-path.txt").exists()
 
 
-def test_worktree_teardown_no_marker_is_noop(tmp_path):
+def test_worktree_teardown_no_marker_is_noop(_isolated_worktree_base, tmp_path):
     """Teardown when no setup ever happened should be a quiet no-op
     (covers the cur_head == pr_head case where setup is skipped)."""
     repo = tmp_path / "repo"
@@ -2297,7 +2310,7 @@ def test_worktree_teardown_no_marker_is_noop(tmp_path):
     wt_teardown(run_dir=run_dir, repo_root=repo)
 
 
-def test_worktree_setup_recreates_when_sha_differs(tmp_path):
+def test_worktree_setup_recreates_when_sha_differs(_isolated_worktree_base, tmp_path):
     """If the existing worktree is at a different SHA than requested
     (rare but possible — e.g. force-push between two runs in the same
     run dir, or manual interference), tear it down and recreate."""
@@ -2320,7 +2333,7 @@ def test_worktree_setup_recreates_when_sha_differs(tmp_path):
 
 # --- v0.7.0: worktree.py auto-symlinks gitignored runtime build dirs -----
 
-def test_worktree_setup_symlinks_default_runtime_dirs(tmp_path):
+def test_worktree_setup_symlinks_default_runtime_dirs(_isolated_worktree_base, tmp_path):
     """When the main repo has gitignored runtime build dirs (e.g.
     `external/assets`, `node_modules`), worktree.setup() symlinks them
     into the worktree so the dev server doesn't have to rebuild.
@@ -2351,7 +2364,7 @@ def test_worktree_setup_symlinks_default_runtime_dirs(tmp_path):
     assert (linked_assets / "mcd.bundle.js").read_text() == "// built\n"
 
 
-def test_worktree_setup_skips_symlink_when_source_absent(tmp_path):
+def test_worktree_setup_skips_symlink_when_source_absent(_isolated_worktree_base, tmp_path):
     """Default symlink list contains common gitignored runtime dirs
     (`dist`, `.next`, `vendor`, ...) that not every repo has. Missing
     sources are silently skipped — no broken symlinks created."""
@@ -2371,7 +2384,7 @@ def test_worktree_setup_skips_symlink_when_source_absent(tmp_path):
         assert not (wt_path / d).is_symlink(), f"broken symlink at {d}"
 
 
-def test_worktree_setup_symlink_dirs_empty_list_skips_all(tmp_path):
+def test_worktree_setup_symlink_dirs_empty_list_skips_all(_isolated_worktree_base, tmp_path):
     """Passing `symlink_dirs=[]` explicitly opts out of all symlinking,
     even when default sources are present (consumer-level escape hatch
     via `.proctor/config.yml.worktree_symlink_dirs: []`)."""
@@ -2392,7 +2405,7 @@ def test_worktree_setup_symlink_dirs_empty_list_skips_all(tmp_path):
     assert not (wt_path / "node_modules").is_symlink()
 
 
-def test_worktree_setup_symlink_dirs_custom_list(tmp_path):
+def test_worktree_setup_symlink_dirs_custom_list(_isolated_worktree_base, tmp_path):
     """A consumer-provided override list — only the named dirs are
     symlinked, even if other defaults exist at the main repo root."""
     repo = tmp_path / "repo"
@@ -2412,6 +2425,123 @@ def test_worktree_setup_symlink_dirs_custom_list(tmp_path):
     assert (wt_path / "custom_cache" / "marker").read_text() == "present\n"
     # Default `external/assets` NOT linked (override replaced defaults).
     assert not (wt_path / "external" / "assets").is_symlink()
+
+
+# --- v0.7.1: worktree placed outside consumer repo (Go-module fix) -------
+
+def test_worktree_setup_placed_outside_consumer_repo(_isolated_worktree_base, tmp_path):
+    """v0.7.0 placed worktrees at `<run_dir>/pr-checkout/` (i.e. inside
+    the consumer repo). That breaks when the consumer repo lives under
+    $GOPATH/src/... — Go reads the worktree path as an import sub-path
+    of the consumer module, and `go run .` fails with `main module
+    does not contain package <consumer>/.proctor/runs/<id>/pr-checkout`.
+
+    v0.7.1 places the worktree OUTSIDE the consumer repo (under
+    $PROCTOR_WORKTREE_BASE_DIR, default $TMPDIR/proctor-worktrees/).
+    Source: v0.7.0 e2e against PR #1126 (run `pr1126-75eea89-353a49f0`)
+    — server failed to start with the path-collision error, the executor
+    spent ~1 minute on recovery (kill + retry with `go run ./main.go`)."""
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    # The crucial invariant: the worktree path must NOT be inside the
+    # consumer repo. (Either equal-to or under repo would re-introduce
+    # the GOPATH bug.)
+    assert repo.resolve() not in wt_path.parents
+    assert wt_path != repo.resolve()
+    # It IS under the configured base dir.
+    assert _isolated_worktree_base.resolve() in wt_path.parents
+    # Marker still recorded inside run_dir for teardown.
+    marker = run_dir / "worktree-path.txt"
+    assert marker.exists()
+    assert marker.read_text().strip() == str(wt_path.resolve())
+
+
+def test_worktree_setup_dir_name_includes_consumer_and_run_id(_isolated_worktree_base, tmp_path):
+    """Worktree dir name encodes both the consumer repo name and the
+    run-id so concurrent PRoctor runs against different PRs (or against
+    different consumer repos) don't collide on the same path."""
+    repo = tmp_path / "my-consumer"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    run_dir = repo / ".proctor" / "runs" / "pr1234-abcdef0-12345678"
+    wt_path = wt_setup(run_dir=run_dir, pr_number=1234, head_sha=pr_sha,
+                       repo_root=repo)
+    # Name carries both the consumer repo dir name and the run-id.
+    assert wt_path.name == "my-consumer-pr1234-abcdef0-12345678"
+
+
+def test_worktree_setup_honors_proctor_worktree_base_dir_env(tmp_path, monkeypatch):
+    """If $PROCTOR_WORKTREE_BASE_DIR is set, worktrees go there instead
+    of $TMPDIR/proctor-worktrees/. Lets devs use a faster SSD or a
+    persistent dir to inspect failed runs without immediate cleanup."""
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    _, pr_sha = _init_repo_with_commits(repo)
+    custom_base = tmp_path / "my-custom-worktree-base"
+    custom_base.mkdir()
+    monkeypatch.setenv("PROCTOR_WORKTREE_BASE_DIR", str(custom_base))
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    assert custom_base.resolve() in wt_path.parents
+
+
+def test_worktree_setup_symlinks_subpath_when_parent_tracked(_isolated_worktree_base, tmp_path):
+    """v0.7.0's `external/assets` symlink silently no-op'd when the
+    parent dir was tracked (with `fonts/`, `images/`) while only the
+    gitignored sub-dir `external/assets/mcd/` needed symlinking — that
+    sub-dir got nothing because `dst.exists()` short-circuited the
+    symlink for the parent. v0.7.1's default list now ALSO includes
+    `external/assets/mcd` (the sub-path variant) so the symlink lands
+    at the right level. Source: v0.7.0 e2e regression."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Build a custom repo: initial + tracked-external-assets + pr commit.
+    sp = subprocess
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    sp.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    (repo / "file.txt").write_text("initial\n")
+    (repo / "external" / "assets").mkdir(parents=True)
+    (repo / "external" / "assets" / "tracked.txt").write_text("tracked\n")
+    sp.run(["git", "add", "."], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "initial+tracked external/assets"],
+           cwd=repo, check=True)
+    (repo / "file.txt").write_text("pr content\n")
+    sp.run(["git", "add", "."], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "pr commit"], cwd=repo, check=True)
+    pr_sha = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    # Drop the gitignored mcd subdir AFTER both commits (stays untracked).
+    (repo / "external" / "assets" / "mcd").mkdir()
+    (repo / "external" / "assets" / "mcd" / "bundle.js").write_text(
+        "// runtime build output\n")
+    run_dir = repo / ".proctor" / "runs" / "test-run"
+
+    wt_path = wt_setup(run_dir=run_dir, pr_number=99, head_sha=pr_sha,
+                       repo_root=repo)
+    # The whole `external/assets` is tracked → checkout already created
+    # it as a real dir, NOT a symlink. That's expected and OK.
+    assert (wt_path / "external" / "assets").is_dir()
+    assert not (wt_path / "external" / "assets").is_symlink()
+    # The sub-path `external/assets/mcd` was the gap. v0.7.1 default
+    # list now contains it AND the parent, and the sub-path landed
+    # successfully because at the sub-path's level the dst didn't exist
+    # in the worktree (gitignored).
+    assert (wt_path / "external" / "assets" / "mcd").is_symlink(), (
+        "v0.7.1: external/assets/mcd should be symlinked even when "
+        "the parent dir is tracked"
+    )
+    # And the runtime build output is reachable through the symlink.
+    assert (wt_path / "external" / "assets" / "mcd" / "bundle.js").read_text() \
+        == "// runtime build output\n"
 
 
 # --- v0.7.0: schema accepts worktree_symlink_dirs in .proctor/config.yml --
