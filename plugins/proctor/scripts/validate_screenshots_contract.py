@@ -147,8 +147,20 @@ def classify_item(item: dict) -> str:
     how = (item.get("how") or "").strip()
     combined = f"{what}\n{how}"
 
-    # Most-specific first: edit-and-switch is a strict superset of
-    # round-trip (it ends with a re-open) so it must match first.
+    # Round-trip check comes first when the item is unambiguously a
+    # re-open / after-reload verification. Without this, a plan whose
+    # `what` reads "HAPPY: re-open the just-edited reward — switched
+    # DigitalContentType ..." would match the edit-and-switch regex
+    # (because "edited" + "switched" both appear) and demand 3
+    # screenshots, even though no save action happens in this item.
+    # The signal is past-tense verbs like "just-edited" / "switched"
+    # combined with a re-open verb, OR explicit hard-reload wording.
+    if _ROUND_TRIP_RE.search(combined):
+        return "round-trip"
+
+    # Most-specific first among save-action buckets: edit-and-switch
+    # is a strict superset of happy-save (it changes a field and
+    # persists) so it must match before happy-save.
     if _EDIT_AND_SWITCH_RE.search(combined):
         return "edit-and-switch"
     if _HAPPY_SAVE_RE.search(combined) and _ROUND_TRIP_RE.search(combined):

@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.7 — 2026-05-14
+
+### Classifier: round-trip items no longer misclassified as edit-and-switch
+
+The v0.6.6 e2e run against mcd-website PR #1115 exposed a regex ordering bug in `validate_screenshots_contract.py`. Item t-006b's `what` read:
+
+> "HAPPY: re-open the just-edited reward — switched DigitalContentType, GameUrl, CTA labels all persist after hard reload"
+
+The `_EDIT_AND_SWITCH_RE` (`\bedit\b.*\bswitch\b`) matched on "just-edited" + "switched" (past-tense verbs describing prior history, NOT the action under test in this item). Result: t-006b was bucketed as `edit-and-switch` (requires 3 screenshots) when it's actually a `round-trip` re-open verification (requires 2). The executor had to add a third screenshot purely to satisfy the false-positive classification.
+
+**Fix**: re-order `classify_item` so `_ROUND_TRIP_RE` is checked first. Re-open / hard-reload phrasing is unambiguous — no save action happens inside such an item — so when it matches, the bucket is round-trip regardless of whether edit/switch verbs are present in past-tense context.
+
+Pinned with `test_ss_classify_round_trip_after_edit_not_misclassified_as_edit_switch` (the literal t-006b plan-item text). Tests 270 → 271.
+
 ## v0.6.6 — 2026-05-14
 
 ### Teach the executor to satisfy upstream-validator preconditions

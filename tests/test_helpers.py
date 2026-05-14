@@ -3099,6 +3099,25 @@ def test_ss_classify_round_trip_via_hard_reload():
     assert classify_item(item) == "round-trip"
 
 
+def test_ss_classify_round_trip_after_edit_not_misclassified_as_edit_switch():
+    """v0.6.7 regression: t-006b in the PR-1115 e2e run had
+    `what="HAPPY: re-open the just-edited reward — switched
+    DigitalContentType, GameUrl, CTA labels all persist after hard
+    reload"` and was misclassified as edit-and-switch because the
+    regex saw "edited" + "switched". A re-open verification is a
+    round-trip (2 screenshots), not an edit-and-switch (3) — no
+    save action happens in this item. Reorder check so unambiguous
+    re-open phrasing wins."""
+    item = {"tool": "chrome-devtools",
+            "what": "HAPPY: re-open the just-edited reward — "
+                    "switched DigitalContentType, GameUrl, CTA "
+                    "labels all persist after hard reload",
+            "how": "Navigate to /edit page; hard-reload; assert "
+                   "DigitalContentType=Game and GameUrl value "
+                   "matches what was saved."}
+    assert classify_item(item) == "round-trip"
+
+
 def test_ss_classify_round_trip_via_round_trip_phrase():
     item = {"tool": "chrome-devtools",
             "what": "HAPPY: re-open saved Image reward — DigitalContentType "
