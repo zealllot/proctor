@@ -2,6 +2,40 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.1 — 2026-05-14
+
+### `/proctor-drive` — bypass the AI turn-model stall via subagent dispatch
+
+v0.6.0 shipped the pipeline state machine. Acceptance-test subagent ran it end-to-end (9 iterations, 5 stages, clean `done` envelope). But the user's main Claude Code session **still** stalled at the same point: after `dispatch_skill` returns and the Skill writes its artifact, the AI ends its turn instead of re-invoking `proctor_run.py`. Trace: `Brewed for 2m 51s` after Stage 1 emitted its "done" status, no continuation, user had to type "继续".
+
+**Diagnosis** (from the successful subagent run): the state machine architecture is correct. The stall is a Claude Code platform-level constraint — the main session's AI can end a turn after any tool call. Prose can't structurally prevent that. The subagent didn't suffer because subagent tasks run end-to-end as one unit; there's no inter-step prompt where the AI gets to stop.
+
+**The structural answer**: dispatch the pipeline as a subagent. New `/proctor-drive` command does exactly that.
+
+### `commands/proctor-drive.md` (new)
+
+- Captures `$ARGUMENTS` (PR number/URL).
+- Dispatches ONE `general-purpose` Agent with a verbatim copy of the v0.6.0 harness instructions.
+- Subagent runs `proctor_run.py` in a loop, handling each envelope (`bash`/`dispatch_skill`/`show`/`ask_user`/`done`/`error`) without inter-stage stalls.
+- When subagent returns, main session emits the report.html path and exits.
+- Approval gate's `ask_user` is real — subagent calls `AskUserQuestion` like the main AI would.
+- CI mode falls back to `/proctor:proctor` flow (CI doesn't go through interactive Claude Code session — the workflow runs the action directly, no turn-model stalls apply there).
+
+### `commands/proctor.md` (header note)
+
+- Top-of-file directive added: if you're reading this because the AI already stalled mid-pipeline, kill the session and use `/proctor-drive <PR>` instead.
+- Recommends `/proctor-drive` for fresh starts too.
+- `/proctor:proctor` still works for users who want the multi-iteration loop in the main session; it just isn't reliable for fully-unattended runs.
+
+### Why this is acceptable as the "final" fix
+
+The honest truth: prose-driven loop discipline in the main AI has been the failure mode across every release v0.3.32 → v0.6.0. Six different "tightening" attempts all failed under pressure. The subagent acceptance test conclusively proved the architecture works when loop discipline is enforced. The platform constraint (AI ends turns after tool calls) cannot be worked around via prose. Wrapping the pipeline in a subagent is the structural fix.
+
+The user's actual operational concern was CI deployability — that's solved because CI doesn't use the interactive session. Local users get `/proctor-drive` as the reliable entry point. `/proctor:proctor` stays as the lower-level command for users who want to drive the state machine themselves.
+
+### Tests
+- 222 unchanged (no new helpers; the change is the command layer + harness prose).
+
 ## v0.6.0 — 2026-05-14
 
 ### Pipeline orchestrator → Python state machine (matches v0.5.0 wizard refactor)
