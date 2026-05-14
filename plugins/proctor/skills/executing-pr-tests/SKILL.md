@@ -190,6 +190,28 @@ Output: a single `TestResults` JSON object.
    - Append to results array. If status is `pass` AND `outputs` is
      non-empty, write `outputs` into `run_context[<this_id>]` so
      downstream items can substitute against it.
+   - **Empirical-grounding check** (v0.6.2+). After receiving each
+     subagent result, pipe it through:
+
+     ```bash
+     echo "$RESULT_JSON" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_item_result.py
+     ```
+
+     If stdout is non-empty, the result claims `precondition-not-met` /
+     `environment` without empirical markers (no captured exit code /
+     HTTP status / stderr / DOM snapshot, no `command:` field). Append
+     the validator's warning to the run's evidence chain — the reporter
+     surfaces it visibly. Do NOT override the status; the subagent's
+     classification stands. The warning's purpose is reviewer
+     visibility so the gap doesn't hide.
+
+     This catches the v0.6.1 failure mode: main AI inline-executed
+     items, carried session memory about a prior chacha20poly1305
+     error, and skipped 3 happy-save items without re-trying after
+     the user fixed the env. Per-item subagent dispatch eliminates
+     the session-memory leak structurally (each subagent has fresh
+     context). The validator catches it even when dispatch is bypassed.
+
    - **Verify artifact-capture contract** (v0.4.6+). The
      pr-test-executor agent's contract REQUIRES:
      - `logs_ref` set (the path to `<logs_dir>/<id>.log`) for ALL items.

@@ -2,6 +2,50 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.2 — 2026-05-14
+
+### Forbid preemptive skipping — empirical-grounding validator for executor results
+
+User: "本地怎么还会skip呢？我已经换成正确的env了，怎么还会skip" — after fixing the env, the v0.6.1 run still skipped 3 happy-save items with `reason=precondition-not-met`. Inspection of the skip evidence:
+
+```
+t-005 evidence: "local dev_env's empty/dev PASETO key in pkg/auth
+blocks the gRPC client's chacha20poly1305 token construction..."
+```
+
+The executor (main AI executing inline rather than via per-item subagent dispatch) **never tried** — it carried session memory of a prior chacha20poly1305 error from earlier in the conversation and skipped preemptively. The user's env had been fixed; those items could have passed. The skip evidence was pure code-inspection reasoning, no captured stderr, no observed failure.
+
+This release ships mechanical enforcement.
+
+**New helper** (`plugins/proctor/scripts/validate_item_result.py`):
+- Reads a single-item result OR a full TestResults JSON.
+- For items with `status=skipped` and `reason ∈ {precondition-not-met, environment, data-template-missing}`:
+  - Checks evidence for empirical-grounding markers: `exit code: N`, `HTTP <num>`, `stderr:`, `stdout:`, `DOM snapshot shows`, `server returned`, `curl returned`, `navigated to ...`, `connect: connection refused`, explicit "did not attempt because..." disclaimer, etc.
+  - OR checks for a non-empty `command:` field.
+  - If neither: emits a warning `<id>: status=skipped reason=... but evidence appears to be code-inspection reasoning ...`.
+- Propagated skips (`reason=data-dep-failed: <id>`) are exempt — empirical grounding lives on the upstream item.
+- Doesn't override status. Validation is advisory; the warning surfaces to the reporter so the human reviewer sees the gap.
+
+**Executor agent contract** (`agents/pr-test-executor.md`):
+- New "NO preemptive skip (v0.6.2+, mandatory)" section at the top of the procedure.
+- Explicit forbidden: code inspection, session memory, general reasoning.
+- Required: attempt first action → capture response → cite captured artifact in evidence.
+- Names the v0.6.1 failure mode in prose so future readers see what the rule is fighting.
+- "If you find yourself about to write a `precondition-not-met` skip with no captured stderr/HTTP/DOM snapshot — STOP. Go run the first attempt. Then come back with the real observation."
+
+**Executor SKILL** (`executing-pr-tests/SKILL.md` Step 4):
+- New "Empirical-grounding check (v0.6.2+)" — after each subagent result, pipe through `validate_item_result.py`. Append warnings to the run's evidence chain so the report renders them.
+- Notes that per-item subagent dispatch (the proper executor path) eliminates session-memory leaks structurally — fresh context per item. The validator catches it even when dispatch is bypassed (e.g. main AI hand-executing).
+
+### Why this is structural, not prose
+
+Every prior version that asked the executor "be careful" in prose has been ignored by an AI under pressure. The validator is a `Bash` tool call with deterministic output — it can't be skipped. Warnings flow into the evidence chain mechanically. The reporter renders them. The reviewer sees them. No prose adherence required for the visibility part.
+
+The classification itself still depends on the executor honoring the contract. The validator catches DISHONEST classifications (no empirical evidence) but can't force the executor to actually attempt. Combined with per-item subagent dispatch (which isolates context and removes the session-memory leak), the two layers together are the best defense available without platform-level enforcement.
+
+### Tests
+- 222 → 232 (+10): pass-item no warning; propagated skips (data-dep-failed / data-template-missing) no warning; precondition skips with HTTP / exit code / stderr / DOM evidence no warning; with `command:` field no warning; code-inspection-only skip warns (the EXACT v0.6.1 t-005 + t-009 evidence strings used as fixtures); explicit "did not attempt" disclaimer no warning; unknown skip reasons not checked; check_results walks items; CLI reads single-item from stdin.
+
 ## v0.6.1 — 2026-05-14
 
 ### `/proctor-drive` — bypass the AI turn-model stall via subagent dispatch

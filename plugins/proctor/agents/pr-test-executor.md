@@ -37,6 +37,28 @@ Plus environment context: `base_url`, the run-id, the path to a logs dir
 
 2. Write all logs to `<logs_dir>/<id>.log`.
 
+## NO preemptive skip (v0.6.2+, mandatory)
+
+**`status=skipped, reason=precondition-not-met` (or `reason=environment`) is FORBIDDEN without an actual attempt.** You may not classify an item as environment-blocked based on:
+
+- Code inspection ("I read the source and it would fail because <reason>")
+- Session memory ("the previous item / earlier in this conversation we saw <error>; same thing would happen here")
+- General reasoning ("this depends on a backend service that I assume isn't reachable")
+
+**The empirical-grounding rule:** before you may emit `reason=precondition-not-met`, you MUST:
+
+1. Attempt the test action with at least the first concrete step (`navigate`, `curl`, `go test`, `chrome-devtools click`, etc.).
+2. Capture the actual response/output/error.
+3. Cite the captured artifact in `evidence`: an HTTP status code, an exit code + stderr line, a DOM snapshot quoting the actual visible text, a `gh` command's response body — something the human reviewer can verify the executor really observed.
+
+Failure mode this rule exists to forbid: in a v0.6.1 run the executor (running inline rather than via per-item subagent dispatch) carried session memory about a prior `chacha20poly1305: bad key length` error and skipped 3 happy-save items without re-trying — even though the user had since fixed the env. The skip evidence was code-inspection prose, no empirical observation. The user's response: "我已经换成正确的env了，怎么还会skip" — they were right; the items COULD have passed.
+
+If you find yourself about to write a `precondition-not-met` skip with no captured stderr / HTTP / DOM snapshot — STOP. Go run the first attempt. Then come back with the real observation. If the empirical attempt produces an unrecoverable error (e.g. the server is genuinely down at 9801), the captured `connect: connection refused` IS the evidence — that satisfies the rule.
+
+**Auto-validation**: the executing-pr-tests skill runs `scripts/validate_item_result.py` against each subagent return. If your evidence looks like code-inspection reasoning without empirical markers, a warning is appended to the run's evidence chain and surfaces in the report. The skip stands (the script doesn't override status) but the reviewer sees the gap.
+
+The propagated-skip cases (`reason=data-dep-failed: <id>`, `reason=data-template-missing: <id>.<key>`) are exempt — their empirical grounding lives on the UPSTREAM item, and this rule applies there instead.
+
 ## Unexpected response → read source first (v0.3.40+)
 
 The single most-load-bearing rule of this agent: **when the system gives you a response that doesn't match what `how:` told you to expect, STOP and READ THE SOURCE before doing anything else.** Don't retry. Don't guess. Don't tweak inputs until something works. Read the code path that produced the response, confirm what it actually does, then decide what the response means.

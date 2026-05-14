@@ -1024,6 +1024,164 @@ def test_plan_smells_single_negative_not_flagged_for_coverage():
     assert not any("plan-coverage" in w for w in warnings)
 
 
+# --- v0.6.2: validate_item_result empirical-grounding check ---------------
+
+from plugins.proctor.scripts.validate_item_result import check as vir_check
+
+
+def test_vir_pass_item_no_warning():
+    """Pass items don't trigger the check at all."""
+    assert vir_check({
+        "id": "t-001", "status": "pass", "evidence": "all good",
+    }) == []
+
+
+def test_vir_propagated_skip_no_warning():
+    """data-dep-failed skips are propagated from upstream; grounding
+    lives on the upstream item, not this one."""
+    assert vir_check({
+        "id": "t-006", "status": "skipped",
+        "reason": "data-dep-failed: t-005",
+        "evidence": "upstream failed",
+    }) == []
+
+
+def test_vir_data_template_missing_propagated_no_warning():
+    """data-template-missing has the form 'data-template-missing: t-007.x'
+    — also propagated."""
+    # Note: data-template-missing happens to be in BOTH the empirical-
+    # required list AND the propagated-prefix list. The propagated check
+    # fires first → no warning expected.
+    assert vir_check({
+        "id": "t-008", "status": "skipped",
+        "reason": "data-template-missing: t-007.created_id",
+        "evidence": "upstream pass but no output captured",
+    }) == []
+
+
+def test_vir_precondition_skip_with_empirical_evidence_no_warning():
+    """When evidence cites a real HTTP status / exit code / stderr,
+    the empirical grounding is present → no warning."""
+    cases = [
+        {"id": "t-1", "status": "skipped", "reason": "precondition-not-met",
+         "evidence": "curl returned HTTP 502; server not reachable."},
+        {"id": "t-2", "status": "skipped", "reason": "precondition-not-met",
+         "evidence": "go test exit code: 137 (OOM); skipping."},
+        {"id": "t-3", "status": "skipped", "reason": "precondition-not-met",
+         "evidence": "stderr: connection refused on localhost:5432; "
+                     "Postgres not running."},
+        {"id": "t-4", "status": "skipped", "reason": "environment",
+         "evidence": "Navigated to /admin; DOM snapshot shows login "
+                     "screen — session expired."},
+    ]
+    for c in cases:
+        assert vir_check(c) == [], f"unexpected warning for {c['id']}: {c}"
+
+
+def test_vir_precondition_skip_with_command_field_no_warning():
+    """A non-empty `command:` field also satisfies the rule —
+    something was actually invoked."""
+    assert vir_check({
+        "id": "t-1", "status": "skipped", "reason": "precondition-not-met",
+        "evidence": "the env doesn't support this, so skipping.",
+        "command": "curl -fsS http://localhost:9801/health",
+    }) == []
+
+
+def test_vir_precondition_skip_code_inspection_warning():
+    """The exact v0.6.1 failure mode: skip evidence is pure code-
+    inspection reasoning, no empirical attempt."""
+    cases = [
+        {
+            "id": "t-005", "status": "skipped",
+            "reason": "precondition-not-met",
+            "evidence": (
+                "local dev_env's empty/dev PASETO key in pkg/auth "
+                "blocks the gRPC client's chacha20poly1305 token "
+                "construction when the CMS attempts to call mcd-"
+                "services' CreateReward RPC."
+            ),
+        },
+        {
+            "id": "t-009", "status": "skipped",
+            "reason": "precondition-not-met",
+            "evidence": (
+                "editing an existing backfilled Digital Download "
+                "reward requires (a) a row with DigitalContentType "
+                "already populated from the backend's deployment-"
+                "time backfill, and (b) the gRPC UpdateReward call "
+                "to succeed on save. Both conditions fail in local."
+            ),
+        },
+    ]
+    for c in cases:
+        warnings = vir_check(c)
+        assert warnings, f"expected warning for {c['id']}: {c}"
+        assert any("code-inspection" in w for w in warnings)
+        assert any(c["id"] in w for w in warnings)
+
+
+def test_vir_explicit_no_attempt_disclaimer_no_warning():
+    """An honest 'did not attempt because X' disclaimer in evidence
+    is OK — it surfaces the gap explicitly rather than disguising it
+    as a precondition check."""
+    assert vir_check({
+        "id": "t-1", "status": "skipped", "reason": "precondition-not-met",
+        "evidence": "Did not attempt: backend dependency PR #2663 "
+                    "isn't deployed on staging yet; the test would "
+                    "fail with a 502 we already know how to fix.",
+    }) == []
+
+
+def test_vir_unknown_skip_reason_no_warning():
+    """Skip reasons we don't recognize (e.g. legacy `tool: skip`
+    items) don't trigger the check."""
+    assert vir_check({
+        "id": "t-1", "status": "skipped", "reason": "tool-skip",
+        "evidence": "any text",
+    }) == []
+
+
+def test_vir_check_results_walks_items():
+    from plugins.proctor.scripts.validate_item_result import (
+        check_results as vir_check_all
+    )
+    results = {
+        "items": [
+            {"id": "t-1", "status": "pass", "evidence": "ok"},
+            {"id": "t-2", "status": "skipped",
+             "reason": "precondition-not-met",
+             "evidence": "would fail because of env"},   # warn
+            {"id": "t-3", "status": "skipped",
+             "reason": "data-dep-failed: t-2",
+             "evidence": "upstream gone"},                # propagated, ok
+        ],
+        "summary": {"total": 3, "pass": 1, "fail": 0, "skipped": 2},
+    }
+    warnings = vir_check_all(results)
+    assert len(warnings) == 1
+    assert "t-2" in warnings[0]
+
+
+def test_vir_cli_stdin_single_item(tmp_path):
+    import subprocess
+    script = (pathlib.Path(__file__).resolve().parent.parent
+              / "plugins" / "proctor" / "scripts"
+              / "validate_item_result.py")
+    item = json.dumps({
+        "id": "t-1", "status": "skipped",
+        "reason": "precondition-not-met",
+        "evidence": "the env wouldn't support this",
+    })
+    result = subprocess.run(
+        ["python3", str(script)],
+        input=item, capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "code-inspection" in result.stdout
+    assert "t-1" in result.stdout
+
+
 # --- v0.6.0: proctor_run state machine for /proctor:proctor ---------------
 
 
