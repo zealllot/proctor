@@ -219,6 +219,26 @@ For single-screenshot items (render-check, negative): set BOTH `screenshots` (wi
 - **Multiple screenshots all identical** — taking the SAME post-save view 3 times doesn't satisfy "before/after"; the test gains no signal.
 - **Screenshot of the success toast WITHOUT the form** — proves something saved, doesn't prove the FIELD VALUE is what the test wanted.
 
+### Negative-test screenshot contract (v0.6.8+, mandatory for error_type items)
+
+For any item the planner marked with `error_type` (validation / permission / network / state-conflict / not-found / auth — the buckets `validate_screenshots_contract.py` calls `negative`), the screenshot must be taken AFTER the rendered error chip is in the DOM — not before. This is a specialization of the v0.6.4 contract triggered by the v0.6.6 mcd-website run on PR #1115: t-007 / t-008 / t-009 each shipped a screenshot that was byte-identical (244252 bytes) to the blank "Add Digital Content" form. Each item's evidence claimed the error chip rendered; the screenshot proved it had not. The HTTP response body contained the error HTML; the browser DOM did not. Root cause: the Pattern A submit step used `fetch(form.action, ...)` — a programmatic POST that reads the response body but does NOT render it into the DOM. The screenshot captured the pre-submit form three times.
+
+**Contract**:
+
+1. **Submit must render the response in the DOM.** Use `form.submit()` (real browser navigation — server's 422 + error HTML renders into the page) or click the actual submit button via `mcp__chrome-devtools__click`. Do NOT use `fetch(form.action, ...)` to drive a negative test — fetch is correct for happy-save (the redirect is the evidence) and wrong for validator-reject (the rendered error is the evidence).
+
+2. **Wait for the rendered error.** After submit, `wait_for` text=[<expected error message>] before screenshotting. If the wait_for times out, the submit did not render an error — debug the submit step.
+
+3. **Verify the error text is in the rendered DOM** before take_screenshot. Read `document.body.innerText` and grep for the expected error string; only screenshot when the grep succeeds.
+
+4. **`screenshots[].focus` must point at the error chip's screen position** — not the form's general region. The reviewer reads `focus:` to find the chip in the captured image.
+
+5. **Evidence must say "error chip rendered in PAGE DOM"** (or equivalent wording that distinguishes DOM from response body) AND quote the actual visible error text from `document.body.innerText`. Saying "response body contains '<err>'" is empirical for the validator firing but NOT for the screenshot — the latter requires DOM render.
+
+Detailed steps with code in `skills/satisfying-form-preconditions/SKILL.md` under "Negative-test screenshot: error must be IN THE DOM, not just response body".
+
+Mechanical enforcement (v0.6.8+): `validate_screenshots_contract.py` now scans all negative items for byte-identical screenshots. If two negative items' primary screenshot is the same file size AND both are above 50KB, the contract flags the pair — that's the empirical signature of "same pre-submit form captured twice". The check is O(n²) over negative items only.
+
 If your assertion is on something a screenshot CAN'T show (e.g. `document.title` is the browser tab, computed styles aren't pixels), say so explicitly in `focus` AND verify via DOM:
 
 > "Evidence is on `document.title`, which is in the browser tab and not visible in this page screenshot — verified via DOM-only."

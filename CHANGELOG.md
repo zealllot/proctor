@@ -2,6 +2,38 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.6.8 — 2026-05-14
+
+### Negative-test screenshot contract: error must be rendered in DOM, not just response body
+
+The v0.6.6 e2e run against mcd-website PR #1115 (run-id `pr1115-e6a7c79-v066manual155241`) shipped t-007 / t-008 / t-009 — three negative-test items — with three byte-identical PNGs (244252 bytes each, the blank "Add Digital Content" form). Each item's evidence claimed an error chip rendered (`"Digital Content Type is required"` / `"Game URL is required"` / `"Game URL is not a valid URL"`); the user noticed the screenshots all looked the same and proved otherwise.
+
+**Root cause**: the Pattern A submit step in `satisfying-form-preconditions/SKILL.md` used `fetch(form.action, ...)` — a programmatic POST. The server returns 422 + error HTML, the executor reads `await resp.text()` and observes the expected error string (empirical evidence the validator branch fired), but the **browser DOM never updates** because `fetch` is decoupled from page navigation. `take_screenshot` then captures the pre-submit form. For happy-save items this is fine (the evidence is the redirect URL); for negative items the asserted artifact IS the rendered error, and a fetch-only submit never renders one.
+
+**Fix**:
+
+- **Skill update** (`skills/satisfying-form-preconditions/SKILL.md`): new section *"Negative-test screenshot: error must be IN THE DOM, not just response body"* with the negative-test submit procedure — call `form.submit()` (real browser navigation, server's 422 + error HTML renders into the page) NOT `fetch(form.action, ...)`. Includes seven concrete `evaluate_script` / `wait_for` / `take_screenshot` steps and two named anti-patterns.
+
+- **Executor agent contract update** (`agents/pr-test-executor.md`): new section *"Negative-test screenshot contract (v0.6.8+, mandatory for error_type items)"*. Mandates that for any item with `error_type` set, the screenshot must be taken AFTER the rendered error chip is in DOM (verified via `document.body.innerText` grep), `screenshots[].focus` must point at the chip's screen position, and evidence must explicitly say "rendered in PAGE DOM" (not "response body").
+
+- **Mechanical enforcement** (`scripts/validate_screenshots_contract.py`): new identical-negative-screenshot byte-size lint. After the existing per-bucket count check, scan all negative-classified items pairwise (O(n²); typically n ≤ 5). If two negative items' primary screenshot is the same file size AND both are above 50 KB (heuristic floor to skip legitimate tiny stubs), emit a violation naming both item IDs and the byte size. New `check(plan, results, run_dir=...)` signature; `run_dir` is required for the byte-size lint (count-based contract unaffected when omitted, for backward compatibility).
+
+- **Wired into `proctor_run.py`**: same `_ss_check` call at the EXECUTED→REPORTED boundary now passes `run_dir=run_dir` so the new lint runs in production. Pipeline aborts before report-render if the t-007/008/009 signature is detected.
+
+**Tests** (`tests/test_helpers.py`) +5:
+
+- `test_ss_check_identical_negative_screenshots_warns` — pins the literal v0.6.6 t-007/t-008 signature: two negative items pointing at the same 244252-byte stub, lint emits one violation containing both item IDs and the byte size.
+- `test_ss_check_distinct_negative_screenshots_ok` — two distinct files of different sizes: zero violations.
+- `test_ss_check_identical_below_floor_not_flagged` — same tiny file under the 50 KB floor: zero violations (legitimate sentinels exempt).
+- `test_ss_check_identical_happy_save_screenshots_ok` — two happy-save items sharing a screenshot: zero violations (lint targets negative items only).
+- `test_ss_check_identical_no_run_dir_skipped` — without run_dir, byte-size lint is silently skipped; count-based contract still runs. Backward compatibility preserved.
+
+Tests 271 → 276.
+
+### Why this is the right shape
+
+Same v0.6.5 / v0.6.6 pattern: a real production bug ends with the user identifying it visually → ship the missing executor knowledge as skill + agent doc, regression-test the detection, mechanically enforce so prose alone isn't relied on. The fetch() vs form.submit() distinction is the surgical fix; the byte-size lint is the safety net that catches future regressions of the same shape.
+
 ## v0.6.7 — 2026-05-14
 
 ### Classifier: round-trip items no longer misclassified as edit-and-switch

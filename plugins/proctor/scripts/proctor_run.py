@@ -350,7 +350,10 @@ def _run_step(
         if tp_path.exists():
             try:
                 tp = json.loads(tp_path.read_text())
-                violations = _ss_check(tp, tr)
+                # v0.6.8: pass run_dir so the identical-negative-
+                # screenshot byte-size lint can resolve files. The
+                # count-based contract is unaffected by run_dir.
+                violations = _ss_check(tp, tr, run_dir=run_dir)
             except json.JSONDecodeError as e:
                 return _error(
                     f"test-plan.json could not be parsed for screenshot-"

@@ -76,6 +76,7 @@ import argparse
 import json
 import re
 import sys
+from itertools import combinations
 from pathlib import Path
 
 # Per-bucket minimum screenshot counts, mirroring the table in
@@ -204,7 +205,141 @@ def _count_screenshots(result_item: dict) -> int:
     return 0
 
 
-def check(plan: dict, results: dict) -> list[str]:
+# v0.6.8: identical-negative-screenshot lint. Two negative items
+# producing byte-identical primary screenshots above this floor is
+# the empirical signature of "the same pre-submit form was captured
+# twice instead of the rendered validator-reject states". The
+# v0.6.6 mcd-website run shipped t-007/008/009 with three 244252-
+# byte PNGs (the blank Add-Digital-Content form) because the Pattern
+# A submit used fetch() — server returns 422 + error HTML but the
+# browser DOM never re-renders, so take_screenshot captures the
+# pre-submit form. The floor exists so tiny legitimately-shared
+# stubs (a 4-byte sentinel, an empty PNG sentinel) don't trip the
+# check.
+_IDENTICAL_NEG_MIN_BYTES = 50 * 1024
+
+
+def _primary_screenshot_path(result_item: dict) -> str | None:
+    """Return the primary screenshot's path-as-string for byte-size
+    comparison. Prefers v0.6.4 ``screenshots[0].path``; falls back
+    to legacy ``screenshot_ref``. Returns None when neither is set.
+
+    The "primary" is the first list entry intentionally — the v0.6.4
+    contract puts the asserted artifact at index 0 for single-shot
+    buckets (negative, render-check); for multi-shot buckets the
+    pre-state lives at 0, which is the legitimate place a "blank
+    form" can show up. We only flag identical *negative* primaries
+    because for negatives, the asserted artifact IS the rendered
+    error.
+    """
+    ss = result_item.get("screenshots")
+    if isinstance(ss, list):
+        for s in ss:
+            if not isinstance(s, dict):
+                continue
+            p = s.get("path")
+            if isinstance(p, str) and p.strip():
+                return p
+            # Skip malformed entries — keep looking for a valid path.
+        # All entries malformed or empty.
+    legacy = result_item.get("screenshot_ref")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
+def _resolve_screenshot_size(
+    run_dir: Path | None, ref: str
+) -> int | None:
+    """Resolve a screenshot reference to a byte size on disk.
+
+    Mirrors ``render_item_artifacts._normalize`` resolution: absolute
+    path → repo-root-relative → run_dir/screenshots/<basename>. Returns
+    None if no resolution exists or the resolved path is missing.
+    """
+    if not ref:
+        return None
+    ref_path = Path(ref)
+    candidates: list[Path] = []
+    if ref_path.is_absolute():
+        candidates.append(ref_path)
+    else:
+        if run_dir is not None:
+            candidates.append(run_dir / "screenshots" / ref_path.name)
+            candidates.append(run_dir / ref_path.name)
+        candidates.append(Path.cwd() / ref_path)
+    for c in candidates:
+        try:
+            if c.exists() and c.is_file():
+                return c.stat().st_size
+        except OSError:
+            continue
+    return None
+
+
+def _check_identical_negative_screenshots(
+    plan: dict,
+    results: dict,
+    run_dir: Path | None,
+) -> list[str]:
+    """Flag pairs of negative items whose primary screenshot is byte-
+    identical (and above the floor). Returns a list of violation
+    strings — one per pair.
+
+    The v0.6.6 t-007/008/009 bug: three negative items, three
+    byte-identical 244252-byte PNGs (the blank Add-Digital-Content
+    form). Each evidence string claimed an error chip rendered;
+    each screenshot proved it had not. The Pattern A submit used
+    fetch() — server returned 422 + error HTML but the browser DOM
+    did not re-render. This O(n²) pairwise scan (negatives are
+    typically n ≤ 5, so ≤ 10 comparisons) catches that pattern
+    mechanically before the report is rendered.
+    """
+    if run_dir is None:
+        # Without a run_dir we can't resolve paths to bytes; skip
+        # this check rather than emit false negatives.
+        return []
+    by_id_results = {it["id"]: it for it in results.get("items", [])
+                     if isinstance(it, dict) and "id" in it}
+    # Gather (id, size) for all negative items with a resolvable
+    # primary screenshot whose size meets the floor.
+    neg: list[tuple[str, int]] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict) or "id" not in item:
+            continue
+        if classify_item(item) != "negative":
+            continue
+        result = by_id_results.get(item["id"])
+        if result is None or result.get("status") not in ("pass", "fail"):
+            continue
+        ref = _primary_screenshot_path(result)
+        if not ref:
+            continue
+        size = _resolve_screenshot_size(run_dir, ref)
+        if size is None or size < _IDENTICAL_NEG_MIN_BYTES:
+            continue
+        neg.append((item["id"], size))
+    violations: list[str] = []
+    for (a_id, a_size), (b_id, b_size) in combinations(neg, 2):
+        if a_size != b_size:
+            continue
+        violations.append(
+            f"{a_id} + {b_id}: negative-item screenshots are "
+            f"identical ({a_size} bytes) - almost certainly the "
+            f"same pre-submit blank form was captured twice instead "
+            f"of the rendered validator-reject states. Re-take "
+            f"screenshots AFTER form.submit() renders the error "
+            f"in DOM. See satisfying-form-preconditions SKILL "
+            f"\"Negative-test screenshot\" section."
+        )
+    return violations
+
+
+def check(
+    plan: dict,
+    results: dict,
+    run_dir: Path | str | None = None,
+) -> list[str]:
     """Return a list of violation strings. Empty = contract satisfied.
 
     A violation is reported when:
@@ -220,6 +355,11 @@ def check(plan: dict, results: dict) -> list[str]:
     here (that's a separate execution-completeness check). Items
     present in results without a matching plan entry are skipped
     (planner-vs-results drift is also outside this script's scope).
+
+    When ``run_dir`` is provided (v0.6.8+), additionally scan negative
+    items for byte-identical primary screenshots — the t-007/008/009
+    signature of "fetch() submit screenshotted the pre-submit form
+    instead of the rendered error".
     """
     violations: list[str] = []
     by_id_results = {it["id"]: it for it in results.get("items", [])
@@ -250,6 +390,18 @@ def check(plan: dict, results: dict) -> list[str]:
                 f"evidence the test asserts on. See the per-item-"
                 f"type matrix in the agent doc."
             )
+    # v0.6.8: identical-negative-screenshot lint. Run after the
+    # count check so a count-deficient item is reported once for the
+    # primary failure (no screenshot) without also being flagged by
+    # this comparison (it has no resolvable file anyway).
+    rd: Path | None
+    if isinstance(run_dir, str):
+        rd = Path(run_dir)
+    else:
+        rd = run_dir
+    violations.extend(
+        _check_identical_negative_screenshots(plan, results, rd)
+    )
     return violations
 
 
@@ -259,10 +411,16 @@ def _main() -> int:
                    help="Path to test-plan.json")
     p.add_argument("--results", required=True,
                    help="Path to test-results.json")
+    p.add_argument("--run-dir", default=None,
+                   help=("Path to the run directory (enables the "
+                         "v0.6.8 identical-negative-screenshot "
+                         "byte-size lint). Optional — when omitted, "
+                         "only the count-based contract is enforced."))
     args = p.parse_args()
     plan = json.loads(Path(args.plan).read_text())
     results = json.loads(Path(args.results).read_text())
-    violations = check(plan, results)
+    run_dir = Path(args.run_dir) if args.run_dir else None
+    violations = check(plan, results, run_dir=run_dir)
     for v in violations:
         sys.stdout.write(v + "\n")
     return 1 if violations else 0

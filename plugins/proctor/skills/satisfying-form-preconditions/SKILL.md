@@ -182,6 +182,126 @@ CSRF rejected), pivot back to Pattern A — assume the deploy env's
 storage doesn't accept new test uploads from automation and an
 existing-record reference is the only feasible option.
 
+## Negative-test screenshot: error must be IN THE DOM, not just response body
+
+This section exists because the v0.6.6 mcd-website run on PR #1115
+shipped t-007 / t-008 / t-009 with three byte-identical screenshots
+(244252 bytes each, the blank "Add Digital Content" form). Each
+item's evidence claimed an error chip rendered, and the HTTP response
+body actually DID contain the error HTML — but the screenshots
+captured the pre-submit form, not the rendered error. The user
+spotted it instantly: three "validator rejected" screenshots showing
+zero errors.
+
+**Root cause:** the Pattern A submit step uses
+`fetch(form.action, ...)`. `fetch` is a programmatic POST — the
+server returns the 422 + error HTML, the executor reads `await
+resp.text()` and sees the expected error string (empirical evidence
+the validator branch fired), but the **browser DOM never updates**
+because `fetch` is decoupled from page navigation. `take_screenshot`
+then captures whatever was on screen — which is the pre-submit form.
+
+For **happy-save** items this is fine — the evidence is the redirect
+URL + the created ID, and the post-save detail page is reached by
+follow-up navigation. For **negative items** it is wrong: the
+asserted artifact IS the rendered error, and a fetch-only submit
+never renders one.
+
+### Negative-test submit procedure
+
+1. **Apply MediaBox bypass** (or whatever Pattern A injection the
+   upstream validator needs — same as the happy-save case).
+
+2. **Set the field under test to the invalid value via DOM**:
+
+   ```js
+   document.querySelector('select[name="QorResource.DigitalContentType"]').value = "";
+   // or: select.value = "Game"; input[name="QorResource.GameUrl"].value = "";
+   // or: input[name="QorResource.GameUrl"].value = "not-a-url";
+   ```
+
+3. **Submit via `form.submit()` — NOT `fetch(form.action, ...)`.**
+   `form.submit()` is a real browser navigation: the browser POSTs
+   the form, the server returns the same 422 + error HTML, and the
+   browser RENDERS that response into the DOM. The page URL stays
+   the same (qor admin re-renders the form on validation reject
+   without changing the URL), so the visual cue is the appearance
+   of error chips, not a URL change.
+
+   ```js
+   document.querySelector('form[action*="digital_content"]').submit();
+   ```
+
+   If `form.submit()` is blocked by CSP / framework JS-interception,
+   click the actual submit button via `mcp__chrome-devtools__click`
+   on `<input type="submit">` or `<button type="submit">` — that's
+   the real-user submit path.
+
+4. **Wait for the error to appear in DOM** via
+   `mcp__chrome-devtools__wait_for` on the expected error text or a
+   reliable selector:
+
+   ```
+   wait_for text=["Digital Content Type is required"]
+   ```
+
+   Don't screenshot too early — the error chip is inside the
+   re-rendered form section that only exists after the response
+   loads. If your `wait_for` times out, the submit didn't actually
+   render the error — debug the submit step before screenshotting.
+
+5. **Scroll the error into view** (the v0.6.4 contract) via
+   `evaluate_script`. The error chip is often near the affected
+   field, not at the page top:
+
+   ```js
+   const err = document.querySelector('.qor-error') ||
+               [...document.querySelectorAll('*')].find(
+                   e => e.innerText && e.innerText.includes('is required'));
+   if (err) err.scrollIntoView({block: 'center', behavior: 'instant'});
+   ```
+
+6. **Verify the error is visible in the viewport BEFORE
+   take_screenshot.** Grep `document.body.innerText` for the
+   expected error string:
+
+   ```js
+   const expected = 'Digital Content Type is required';
+   const present = document.body.innerText.includes(expected);
+   // → present must be true; if false, loop step 4-5 (timing).
+   ```
+
+   If grep fails, the screenshot timing is wrong. Loop step 4-5;
+   don't fall through to take_screenshot — that's how three identical
+   pre-submit form PNGs end up in the report.
+
+7. **Take a viewport-cropped screenshot.** The evidence string MUST
+   say the error chip rendered **in PAGE DOM** (not "in response
+   body"), and SHOULD quote the actual visible error text from
+   `document.body.innerText`. Example:
+
+   > "Server returned HTTP 422; error chip 'Digital Content Type is
+   > required' visible in page DOM (verified via
+   > document.body.innerText grep) at the time of take_screenshot.
+   > URL bar remains at /admin/digital_content."
+
+### What NOT to do (negative-test specific)
+
+- **Don't submit via `fetch()` and screenshot the pre-submit form.**
+  That's the literal v0.6.6 t-007/008/009 bug — three identical
+  PNGs in the report, three evidence strings claiming an error
+  rendered. `fetch()` reads the response body but doesn't render it.
+- **Don't `take_snapshot` instead of waiting for the error to
+  render.** `take_snapshot` captures the form-load state — by the
+  time the snapshot returns, the submit may not have completed and
+  the error chip may not be in DOM yet. Use `wait_for` keyed on the
+  expected error text, then snapshot.
+- **Don't take the screenshot BEFORE verifying the error text is in
+  the rendered DOM.** A passing `take_snapshot` that lists no error
+  chip means the submit hasn't fired; a passing
+  `document.body.innerText.includes(expected)` is the only reliable
+  signal the screenshot will capture what evidence claims.
+
 ## What NOT to do
 
 - **Don't skip with `precondition-not-met` after one attempt that hit

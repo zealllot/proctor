@@ -3447,6 +3447,176 @@ def test_ss_check_plan_item_with_no_result_skipped():
     assert ss_check(plan, results) == []
 
 
+# --- v0.6.8: identical-negative-screenshot byte-size lint -----------------
+# The v0.6.6 mcd-website run shipped t-007/t-008/t-009 with three
+# byte-identical 244252-byte PNGs (the blank Add-Digital-Content form).
+# Each evidence string claimed an error chip rendered; the screenshots
+# proved it had not. Root cause: Pattern A submit used fetch() — server
+# returned 422 + error HTML but the browser DOM did not re-render. The
+# lint catches that pattern mechanically by comparing primary-screenshot
+# byte sizes across negative items.
+
+def test_ss_check_identical_negative_screenshots_warns(tmp_path):
+    """Synthesize two negative items pointing at the SAME 100KB+ stub
+    file; check returns a violation containing both item IDs and the
+    byte size. This is the literal v0.6.6 t-007/t-008 signature
+    (244252-byte PNG used as both screenshots)."""
+    # Write a single 100KB+ stub file the two items will reference.
+    stub = tmp_path / "screenshots" / "shared-blank-form.png"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"\x89PNG\r\n\x1a\n" + b"x" * 244244  # 244252 bytes, the t-006 signature
+    stub.write_bytes(payload)
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject blank Game URL",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject DCT empty",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared-blank-form.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared-blank-form.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    # Exactly one violation — the (t-7, t-8) pair.
+    assert len(violations) == 1
+    msg = violations[0]
+    assert "t-7" in msg and "t-8" in msg
+    assert str(len(payload)) in msg  # the byte size is reported
+    assert "identical" in msg.lower()
+
+
+def test_ss_check_distinct_negative_screenshots_ok(tmp_path):
+    """Two negative items pointing at different files of different
+    sizes return 0 violations."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    # Two distinct stubs at different sizes, both above the 50KB floor.
+    (ss_dir / "err-dct-required.png").write_bytes(b"\x89PNG" + b"a" * 120000)
+    (ss_dir / "err-gameurl-required.png").write_bytes(b"\x89PNG" + b"b" * 130000)
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl",
+         "how": "fill+save", "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "err-dct-required.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "err-gameurl-required.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_below_floor_not_flagged(tmp_path):
+    """Two negative items pointing at the SAME tiny stub (e.g. an
+    empty sentinel under the 50KB floor) are NOT flagged. The floor
+    exists so legitimate tiny stubs don't trip the check."""
+    stub = tmp_path / "screenshots" / "tiny-sentinel.png"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_bytes(b"\x89PNG" + b"x" * 100)  # ~100 bytes, well below floor
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "tiny-sentinel.png",
+                          "label": "err", "focus": "chip"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "tiny-sentinel.png",
+                          "label": "err", "focus": "chip"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_happy_save_screenshots_ok(tmp_path):
+    """The lint targets NEGATIVE items only. Two happy-save items
+    legitimately sharing a 'before' screenshot (e.g. they both
+    start from the same blank form) must NOT be flagged — only
+    negatives are checked, because for negatives the asserted
+    artifact IS the rendered error."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "shared-form.png").write_bytes(b"\x89PNG" + b"x" * 200000)
+    plan_items = [
+        {"id": "t-2", "tool": "chrome-devtools",
+         "what": "HAPPY: create Image reward — save succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-4", "tool": "chrome-devtools",
+         "what": "HAPPY: create Game reward — save succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-2", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+         ]},
+        {"id": "t-4", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+             {"path": "shared-form.png", "label": "f", "focus": "fl"},
+         ]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    # No violations — the lint only flags identical NEGATIVE
+    # screenshots, and these are happy-save items.
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_identical_no_run_dir_skipped(tmp_path):
+    """Without a run_dir, the lint can't resolve files to bytes, so it
+    skips silently (rather than emit false negatives). The count-based
+    contract still runs."""
+    plan_items = [
+        {"id": "t-7", "tool": "chrome-devtools",
+         "what": "Reject empty DCT", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+        {"id": "t-8", "tool": "chrome-devtools",
+         "what": "Reject empty GameUrl", "how": "fill+save",
+         "category": "api", "risk": "medium",
+         "depends_on": [], "error_type": "validation"},
+    ]
+    result_items = [
+        {"id": "t-7", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "x.png", "label": "e", "focus": "c"}]},
+        {"id": "t-8", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "x.png", "label": "e", "focus": "c"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    # Even though they reference the same path, without run_dir the
+    # byte-size lint is skipped. Both items satisfy the count
+    # contract (negative needs >=1) so 0 violations.
+    assert ss_check(plan, results) == []
+
+
 # ===== v0.6.6: satisfying-form-preconditions skill detection =====
 # Pins the upstream-validator detection regex against the exact error
 # strings observed in the v0.6.5 t-002 evidence ("Reward Image cannot be
