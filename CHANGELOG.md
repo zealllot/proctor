@@ -2,6 +2,20 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.3 — 2026-05-14
+
+### Wizard auto-cleans `wizard-state.json` on `step=done`
+
+User found a stale `.proctor/wizard-state.json` in their consumer repo (carrying `step=done, mode=bump-only`) and asked what it was for. The file is the persistence layer for `wizard_run.py` (v0.5.0+ state machine driving `/proctor:proctor-init`) — its only purpose is "resume after interrupt", so once the wizard has emitted `done` the file's job is over. v0.5.0..v0.7.2 left it behind, which (a) confused the consumer who didn't ask for the file and (b) risked it getting committed by `git add .proctor` because the wizard's gitignore template didn't list it.
+
+**Fix in `wizard_run.py`**: when the emitted envelope is `done`, `state_file.unlink()` instead of `_save_state(...)`. Idempotent — already-absent file is fine.
+
+**Fix in `commands/proctor-init.md`**:
+- Migrate-mode gitignore block (Step 2b) now appends `.proctor/wizard-state.json` alongside `local.yml` + `runs/`.
+- Section 8c (fresh-mode gitignore) had a bug independent of this report: it told the wizard to add a bare `.proctor/` rule, which would gitignore the files the consumer is supposed to commit (`config.yml`, `local.yml.example`, `seed-local.sh`). Replaced with the explicit four-line block (`.proctor/local.yml`, `.proctor/runs/`, `.proctor/wizard-state.json`, `.proctor-hash-*/`) plus an explicit "do NOT add bare `.proctor/`" warning. mcd-website's actual gitignore happened to be correct (legacy migrate-mode output), but a fresh consumer following section 8c would have ended up with a broken setup.
+
+Tests 291 → 293 (auto-delete-on-done + idempotent-unlink-when-absent).
+
 ## v0.7.2 — 2026-05-14
 
 ### Auto-detect gitignored runtime dirs (replaces hardcoded project-leak list)

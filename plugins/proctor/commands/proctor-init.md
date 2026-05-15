@@ -191,10 +191,15 @@ sed -i.bak \
 
 # Append the canonical v0.4.0 block, but only the lines that aren't
 # already present (grep -F to treat as fixed string, -q for quiet).
+# v0.7.3: also covers `.proctor/wizard-state.json` (transient
+# wizard state file — auto-deleted on done, but if the wizard
+# crashes mid-flow the file persists for resume; either way it
+# should NOT be committed).
 {
     grep -qxF '# PRoctor (v0.4.0+) layout' .gitignore || echo '# PRoctor (v0.4.0+) layout'
     grep -qxF '.proctor/local.yml'         .gitignore || echo '.proctor/local.yml'
     grep -qxF '.proctor/runs/'             .gitignore || echo '.proctor/runs/'
+    grep -qxF '.proctor/wizard-state.json' .gitignore || echo '.proctor/wizard-state.json'
 } >> .gitignore.tmp
 [ -s .gitignore.tmp ] && {
     printf '\n' >> .gitignore   # leading newline only when we're appending something
@@ -1447,11 +1452,18 @@ Read `.gitignore`. For each of these lines, append it ONLY if not already presen
 
 ```
 .proctor/local.yml
-.proctor/
+.proctor/runs/
+.proctor/wizard-state.json
 .proctor-hash-*/
 ```
 
-(`.proctor-hash-*/` covers the in-tree temp dirs the Go-stack `gen_hash` helper creates during seed-script runs. The script's `trap RETURN rm -rf` cleans them up under normal exit; this gitignore line covers the Ctrl+C case.)
+Note: only the four paths above. **Do NOT** add a bare `.proctor/` rule — that would silently gitignore the files the consumer is supposed to commit (`config.yml`, `local.yml.example`, `seed-local.sh`).
+
+Breakdown:
+- `.proctor/local.yml` — per-developer credentials (TOTP seeds, passwords). Never committed.
+- `.proctor/runs/` — per-run artifacts (logs, screenshots, reports). Disposable.
+- `.proctor/wizard-state.json` — transient state machine file for `/proctor:proctor-init`. v0.7.3+ auto-deletes on `step=done`; gitignore protects the resume-after-crash case.
+- `.proctor-hash-*/` — in-tree temp dirs the Go-stack `gen_hash` helper creates during seed-script runs. The script's `trap RETURN rm -rf` cleans them up under normal exit; this gitignore line covers the Ctrl+C case.
 
 ### 8d — Patch `.github/workflows/proctor.yml` (DO NOT overwrite)
 

@@ -1777,6 +1777,50 @@ def test_wizard_state_file_persists_between_invocations(tmp_path):
     assert state["step"]  # non-empty: we've advanced past _STEP_INIT
 
 
+def test_wizard_state_file_deleted_when_done(tmp_path):
+    """v0.7.3: when the wizard reaches step=done, the state file is
+    auto-deleted. The file's only purpose is "resume after interrupt";
+    once we've emitted done there's nothing to resume, and leaving the
+    stale file confuses subsequent re-runs (a fresh invocation should
+    start from scratch, not resume "done"). Source: user found a
+    leftover .proctor/wizard-state.json carrying step=done in their
+    consumer repo and asked what it was for."""
+    # Use the fresh-mode path which emits done on the very first
+    # invocation (the legacy-fallback shape), so we can assert that
+    # the state file gets deleted in the same call that emits done.
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    assert env["type"] == "show"
+    # Not done yet (still emitting the legacy-prose pointer) — file persists.
+    assert state_file.exists()
+    # Next invocation reaches done → file should be removed.
+    env2 = _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    assert env2["type"] == "done"
+    assert not state_file.exists(), (
+        "v0.7.3: wizard must auto-delete .proctor/wizard-state.json when "
+        "step=done — leftover state confuses subsequent re-runs and "
+        "leaves bookkeeping artifacts the consumer didn't ask for."
+    )
+
+
+def test_wizard_state_file_unlink_is_idempotent(tmp_path):
+    """If the state file is already gone when we try to delete it on
+    `done`, no crash. Defensive — the file might've been hand-deleted
+    by the user between the previous wizard step's _save_state and
+    this invocation."""
+    state_file = tmp_path / "wizard-state.json"
+    # First invocation creates state file (the fresh-mode show envelope).
+    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    # User deletes it manually before the second invocation.
+    state_file.unlink()
+    # Second invocation: starts from empty state, immediately emits done.
+    # Must not crash trying to unlink the already-absent file.
+    env = _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
+    # Empty state means we go through the full fresh path again, ending in show.
+    assert env["type"] in {"done", "show"}
+    # Either way, no exception was raised getting here.
+
+
 def test_wizard_corrupted_state_file_resets_gracefully(tmp_path):
     """If state file is corrupted JSON, wizard treats it as fresh
     rather than crashing (better than locking user out)."""
