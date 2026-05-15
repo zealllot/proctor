@@ -2,6 +2,80 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.9 — 2026-05-15
+
+### Wizard step iterator + neutral terminology + setup-block.yml as single source of truth
+
+**Motivating evidence.** After v0.7.8 shipped, the user re-ran `/proctor:proctor-init` against mcd-website TWICE in a row. Neither run triggered the new `amend-daemons` mode the v0.7.8 wizard was supposed to surface. The audit identified three structural causes that this release fixes:
+
+1. **Mode dispatch was single-select / mutually exclusive.** First run: the action pin was old → `bump-only` won first-match → wizard exited. Second run: `.proctor/local.yml` was missing → `needs-local-regen` won → wizard exited. `amend-daemons` never fired because the earlier modes always matched first on real upgrade scenarios. The wizard needed to run MULTIPLE steps in one invocation, not pick one mode and exit.
+2. **Terminology leaked consumer-specific nouns.** The wizard surfaced category labels `daemon` / `worker` / `publish ticker` / `cron` that aliased with mcd-website's actual binary name (`cmd/mcd-daemon`). Different consumers use different category names (`sidekiq`, `celery-worker`, `cron`, `scheduler`, `pubsub-listener`). PRoctor should classify and ask in neutral structural terms.
+3. **`seed-local.sh` had a hardcoded SETUP_BLOCK heredoc** so wizard amendments to `.proctor/local.yml setup:` were silently overwritten on the next `./.proctor/seed-local.sh` re-run. The wizard needed to own the setup-block content — not the seed script.
+
+### Fix A — step iterator replaces single-mode dispatch
+
+- **New `scripts/wizard_decide_steps.py`** returns an ORDERED LIST of all applicable steps rather than a single `mode` string. Step ids:
+  - `step_legacy_layout_migrate` — pre-v0.4 `.pr-test.yml` files present.
+  - `step_regenerate_local_yml` — seed-local.sh present but `.proctor/local.yml` missing.
+  - `step_bump_action_pin` — workflow pin older than `--current-tag`.
+  - `step_supplement_setup` — `cmd/*/main.go` binaries not yet referenced in `.proctor/setup-block.yml` or `.proctor/local.yml setup:`. Smarter trigger than v0.7.8's `amend-daemons`: only fires when there's actually a binary to add (no false offer when the repo has no Go binaries).
+  - `step_fresh_install` — none of the above and no `.proctor/` directory.
+
+  Execution order preserves v0.7.8 mode-priority semantics for the backward-compat single-`mode` field (regenerate-local-yml beats bump-action-pin, etc.).
+- **`scripts/wizard_decide_mode.py` becomes a thin backward-compat shim.** Re-exports `detect_state` / `decide_mode` (returns first-step alias). Existing tests + prose that import from it keep working.
+- **`scripts/wizard_run.py` becomes a step iterator.** State file gains `pending_steps` / `current_step` / `current_step_substate` / `completed_steps` / `step_data`. Each step is its own self-contained state machine with handlers registered via `@_register("step_<id>")`. When a step completes, the iterator either silently advances to the next pending step (no envelope) or emits a per-step `show` envelope before advancing. Terminal `done` fires ONLY when pending_steps is empty AND current_step is None — intermediate per-step summaries don't delete the state file.
+
+  Legacy state-file schema (v0.5.0–v0.7.8 top-level `step` key) resets to fresh state on load rather than crashing.
+
+### Fix B — neutral category terminology
+
+- **`scripts/wizard_detect_binaries.py`** `looks_like` labels renamed:
+  - `http-server` → `serves-http`
+  - `daemon` → `runs-loop`
+  - `one-shot` → `runs-once`
+  - `unknown` unchanged
+
+  Classifier LOGIC is unchanged (runs-loop still trumps serves-http when both patterns match, the v0.7.8 broadened `<pkg>.ListenAndServe[TLS]?` regex stays). The evidence field is enriched: each entry is prefixed `matches '<pattern>'`, repeated matches show `(×N)` counts, and when runs-loop precedence applies over a serves-http pattern the evidence carries an explicit `ALSO matches '<http-pattern>' — runs-loop precedence applied` line so the user sees the heuristic at work.
+
+  Downstream code that reads `looks_like` accepts both v0.7.9 labels (preferred) and v0.7.8 legacy labels (`daemon` / `http-server` / `one-shot`) so any cached wizard JSON keeps working.
+
+- **`scripts/plan_smells.py`** renames:
+  - Rule `missing-runtime-verify-when-daemon-present` → `missing-runtime-verify-when-supplementary-binary-present`.
+  - `setup_context.daemons_running` → `setup_context.supplementary_binaries_running` (v0.7.7/v0.7.8 alias still accepted).
+  - `setup_context.daemon_touched` → `setup_context.supplementary_binary_touched` (alias still accepted).
+
+- **`skills/planning-pr-tests/SKILL.md`** prose audit: section header `Detect which daemons run in local setup` → `Detect which supplementary binaries run in local setup`. Skip reason `no-daemon-in-setup` → `no-supplementary-binary-in-setup` (v0.7.7/v0.7.8 still accepted at the reporter level for backward-compat).
+
+- **`skills/reporting-pr-test-results/SKILL.md`** updates the skip reason name accordingly. The user-facing "Runtime verification gaps" section header was already generic (v0.7.7) and stays unchanged.
+
+- **`commands/proctor-init.md`** Step 7.5 rewritten with neutral category labels. The AskUserQuestion prompt now reads "Select which supplementary binaries..." and lists each candidate with its neutral `(runs-loop)` / `(serves-http)` / `(runs-once)` category plus concrete pattern evidence (`Evidence: matches 'time.Tick(time.Minute)' + 'utils.RunJob' (×15); also matches 'http.ListenAndServe' — runs-loop precedence applied`). The prose explicitly bans `daemon` / `worker` / `publish` / `cron` as category labels in user-facing text; project-specific filenames (e.g. `cmd/mcd-daemon`) remain in evidence/citations as they're the project's actual files.
+
+### Fix C — `.proctor/setup-block.yml` as canonical source
+
+- **New file type `.proctor/setup-block.yml`**, committed alongside other `.proctor/` files. Shape: top-level `setup:` key with a list of command strings. `schema.validate_setup_block(content)` enforces the structure.
+- **`step_supplement_setup`** writes to `.proctor/setup-block.yml` (the canonical source) AND amends `.proctor/local.yml setup:` for the current run (a convenience to avoid forcing a seed-script re-run inside the same wizard invocation). The setup-block.yml write is idempotent — re-running with the same selection adds nothing.
+- **`commands/proctor-init.md`** Section 8b's seed-script template updated: instead of a hardcoded SETUP_BLOCK heredoc, the seed script reads `.proctor/setup-block.yml` when present (via `awk '/^setup:/,0' .proctor/setup-block.yml | tail -n +2`) and falls back to the wizard-template default heredoc when the file is absent (first-time install).
+- The supplement step's completion `show` envelope tells the user: "Wrote `.proctor/setup-block.yml` with N supplementary binaries. Run `./.proctor/seed-local.sh` to regenerate `.proctor/local.yml` and pick up the new setup."
+
+### Tests 360 → 396
+
+New coverage:
+- `wizard_decide_steps.py`: step list contract, all applies-conditions, ordering, multi-step scenarios (bump + supplement, regen before bump), short-circuit for fresh install, idempotent suppression when binaries already in setup.
+- `wizard_run.py` step iterator: multi-step flow (bump + supplement in one invocation), terminal `done` only after all steps, state file v0.7.9 schema, legacy schema resets to fresh, completed_steps audit trail.
+- `wizard_detect_binaries.py`: new `serves-http` / `runs-loop` / `runs-once` labels, evidence prefix + ×N count format, ALSO-matches precedence note.
+- `schema.validate_setup_block`: shape validation (top-level key only `setup:`, list of strings, rejects non-dict / extra keys / non-list / non-string items).
+- Setup-block.yml integration: end-to-end wizard write, idempotent re-write.
+- Terminology audit: strict checks that user-facing prose in the three skill files + proctor-init.md uses neutral category labels (`serves-http` / `runs-loop` / `runs-once`) and not the v0.7.8 project-specific ones.
+- Backward-compat: `plan_smells.py` accepts both v0.7.9 and v0.7.7/v0.7.8 setup_context keys.
+
+### Backward compatibility
+
+Every v0.7.8 entry point keeps working:
+- `wizard_decide_mode.py` still importable; `decide_mode()` returns the v0.7.8 envelope shape (`{mode, next_action, ask_user}`).
+- The legacy `mode` field is preserved as a backward-compat alias for the first applicable step (`step_supplement_setup` → `amend-daemons`, `step_bump_action_pin` → `bump-only`, etc.).
+- v0.7.8 classifier labels (`http-server` / `daemon` / `one-shot`) still recognized when read from cached JSON.
+- v0.7.7/v0.7.8 setup_context keys (`daemons_running` / `daemon_touched`) and skip reason (`no-daemon-in-setup`) still produce the same lint behavior; only user-visible rule/skip-reason names changed.
+
 ## v0.7.8 — 2026-05-15
 
 ### Wizard daemon detection wired into state machine + two classifier fixes from mcd-website e2e

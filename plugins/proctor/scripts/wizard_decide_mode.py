@@ -1,186 +1,61 @@
-"""Deterministic MODE decision for the /proctor:proctor-init wizard.
+"""DEPRECATED in v0.7.9 — backward-compatibility shim for the v0.7.8
+single-mode wizard decision API.
 
-Replaces the v0.3-and-earlier "AI walks a bulleted list of conditions
-and picks the first match" decision flow. Real runs showed the AI
-silently skipping bullets whose conditions were stated in terms of
-detection-block-computed variables (`NEEDS_LOCAL_REGEN=yes`) and
-falling through to later bullets whose conditions were observable
-file-facts (bump-only-by-pin-age). The wizard then took the wrong
-branch, ran bump-only, and left the user with a missing
-`.proctor/local.yml`.
+The wizard's decision logic moved to ``wizard_decide_steps.py`` in
+v0.7.9, which returns an ORDERED LIST of steps rather than a single
+mode. The shape change was forced by real upgrade scenarios that
+trigger multiple legitimate steps at once: a stale action pin AND a
+new ``cmd/<X>-daemon`` to supplement the setup block, for instance —
+the v0.7.8 single-mode dispatcher always picked one and silently
+dropped the other.
 
-This script (v0.4.5+) reads the actual file state and prints a
-single unambiguous JSON object describing what the wizard should do
-next. The AI's only job is to run this script, surface the
-indicated AskUserQuestion (if any), execute the chosen action, then
-re-run the script if the wizard continues.
+This module re-exports the v0.7.8 names (``detect_state``,
+``decide_mode``) backed by the new step walker, so existing tests
+and any prose that imports from here keeps working. New code should
+import from ``wizard_decide_steps`` directly.
 
-Stdin: nothing.
-Stdout: a single JSON object — see the dataclass below for the
-shape. Exit code is always 0; decisions never fail (no-action is
-itself a valid decision).
+Equivalence rules:
+- ``decide_mode(state, current_tag, repo_root=...)`` returns the
+  v0.7.8 ``{mode, next_action, ask_user}`` envelope corresponding to
+  the FIRST step in the step walker's output.
+- When the step walker returns an empty list, ``mode`` is
+  ``"current"`` (same as v0.7.8).
+- ``mode`` values use the v0.7.8 names via the alias table in
+  ``wizard_decide_steps._MODE_ALIASES``.
 
-Usage:
-
-    python3 wizard_decide_mode.py \\
-        --current-tag v0.4.4 \\
-        --repo-root .
-
-The `--current-tag` value comes from the wizard's earlier
-`gh release view zealllot/proctor` call. Pass null / omit if the
-fetch failed — we fall back to "treat as already current" rather
-than firing a spurious bump-only.
+The CLI entry point (``python3 wizard_decide_mode.py``) is preserved
+and forwards to the step walker.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import sys
 from pathlib import Path
 
+# Ensure the sibling `wizard_decide_steps` script is importable both
+# when this module is run as a CLI (`python3 wizard_decide_mode.py`)
+# and when it's imported under its package name from the test suite
+# (`from plugins.proctor.scripts.wizard_decide_mode import ...`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# v0.4.0 layout paths (canonical) + v0.3.x legacy paths (deprecated).
-# We check both because the wizard's first job is to detect which
-# layout the consumer is on.
-_NEW_CONFIG = Path(".proctor") / "config.yml"
-_NEW_LOCAL = Path(".proctor") / "local.yml"
-_NEW_SEED = Path(".proctor") / "seed-local.sh"
-_NEW_LOCAL_EXAMPLE = Path(".proctor") / "local.yml.example"
-
-_OLD_CONFIG = Path(".pr-test.yml")
-_OLD_LOCAL = Path(".pr-test.local.yml")
-_OLD_SEED_CANDIDATES = [
-    Path("hack") / "proctor-seed-local.sh",
-    Path("scripts") / "proctor-seed-local.sh",
-    Path("proctor-seed-local.sh"),
-]
-
-_WORKFLOW = Path(".github") / "workflows" / "proctor.yml"
-
-# Regex for the action-pin line in the workflow. Matches `vX.Y.Z`.
-_PIN_RE = re.compile(
-    r"zealllot/proctor/github-action@(v\d+\.\d+\.\d+(?:[-\w.]+)?)"
+# Re-export the v0.7.9 implementations.
+from wizard_decide_steps import (  # noqa: E402,F401
+    detect_state,
+    decide_steps,
+    STEP_BUMP_ACTION_PIN,
+    STEP_FRESH_INSTALL,
+    STEP_LEGACY_LAYOUT_MIGRATE,
+    STEP_REGENERATE_LOCAL_YML,
+    STEP_SUPPLEMENT_SETUP,
+    STEP_ORDER,
 )
-
-
-def detect_state(repo_root: Path) -> dict:
-    """Read the consumer repo's actual file state. Returns a flat
-    dict of booleans + the workflow pin string (or None)."""
-    has_new_config = (repo_root / _NEW_CONFIG).exists()
-    has_old_config = (repo_root / _OLD_CONFIG).exists()
-    has_workflow = (repo_root / _WORKFLOW).exists()
-
-    has_new_seed = _is_executable(repo_root / _NEW_SEED)
-    has_old_seed = any(
-        _is_executable(repo_root / c) for c in _OLD_SEED_CANDIDATES
-    )
-
-    # Layout flags. `legacy_layout` fires when ANY v0.3.x marker is
-    # present without the corresponding v0.4.0 path — the migration
-    # branch needs to fire.
-    legacy_layout = (has_old_config and not has_new_config) or (
-        has_old_seed and not has_new_seed
-    )
-    new_layout = has_new_config or has_new_seed
-
-    # Auth block — true if EITHER layout's config file has `auth:`.
-    # We check both so a partially-migrated repo doesn't fail-open.
-    has_auth_block = (
-        _grep_qE(r"^auth:", repo_root / _NEW_CONFIG)
-        or _grep_qE(r"^auth:", repo_root / _OLD_CONFIG)
-    )
-
-    return {
-        "has_new_config": has_new_config,
-        "has_old_config": has_old_config,
-        "has_workflow": has_workflow,
-        "has_auth_block": has_auth_block,
-        "has_seed_script": has_new_seed or has_old_seed,
-        "has_new_seed": has_new_seed,
-        "has_old_seed": has_old_seed,
-        "has_local_yml": (repo_root / _NEW_LOCAL).exists()
-            or (repo_root / _OLD_LOCAL).exists(),
-        "legacy_layout": legacy_layout,
-        "new_layout": new_layout,
-        "current_pin": _extract_pin(repo_root / _WORKFLOW),
-    }
-
-
-def _is_executable(path: Path) -> bool:
-    return path.is_file() and os.access(path, os.X_OK)
-
-
-def _grep_qE(pattern: str, path: Path) -> bool:
-    """Multiline-anchored regex search on the file's content. Returns
-    False when the file doesn't exist (mirrors `grep -qE … 2>/dev/null`
-    behaviour the wizard's shell snippets use)."""
-    if not path.exists():
-        return False
-    try:
-        text = path.read_text(errors="replace")
-    except OSError:
-        return False
-    return bool(re.search(pattern, text, re.MULTILINE))
-
-
-def _extract_pin(workflow_path: Path) -> str | None:
-    if not workflow_path.exists():
-        return None
-    m = _PIN_RE.search(workflow_path.read_text(errors="replace"))
-    return m.group(1) if m else None
-
-
-def _local_setup_missing_cmd_daemons(local_yml_path: Path) -> bool:
-    """v0.7.8 amend-daemons trigger. Read ``.proctor/local.yml`` and
-    return True when the file's ``setup:`` array contains content
-    (i.e. it's a real setup, not an empty stub) but NO line mentions
-    ``go run ./cmd/`` — the marker line that v0.7.7+ multi-binary
-    detection emits per selected daemon.
-
-    Intentionally a substring check, not a full YAML parse. The
-    setup array's lines are quoted strings; ``go run ./cmd/`` (with
-    the trailing slash) is distinctive enough that no other Go
-    invocation collides with it. A literal substring match keeps
-    this helper dependency-free (no PyYAML import at the top of
-    wizard_decide_mode)."""
-    try:
-        text = local_yml_path.read_text(errors="replace")
-    except OSError:
-        return False
-    # No `setup:` block at all → can't amend; we'd need fresh-mode
-    # for that. Skip the offer.
-    if "setup:" not in text:
-        return False
-    # Has setup but already a cmd-daemon line → nothing to add.
-    if "go run ./cmd/" in text:
-        return False
-    # Setup present with no cmd-daemon line. But only fire when the
-    # setup actually has content — empty `setup: []` shouldn't
-    # trigger the offer either (likely an existing-env-mode consumer
-    # who deliberately has no setup).
-    return _has_setup_content(text)
-
-
-def _has_setup_content(local_yml_text: str) -> bool:
-    """True when `setup:` appears to have at least one non-empty
-    list item. Heuristic: look for ``setup:\n`` followed (within
-    ~50 lines) by a ``  - `` list-item marker. Defensive against
-    `setup: []` and `setup: ~`."""
-    idx = local_yml_text.find("setup:")
-    if idx < 0:
-        return False
-    tail = local_yml_text[idx:]
-    # Inline empty form, `setup: []` / `setup: ~`.
-    first_line_end = tail.find("\n")
-    first_line = tail[:first_line_end] if first_line_end >= 0 else tail
-    if first_line.strip() in ("setup: []", "setup: ~", "setup: null"):
-        return False
-    # Walk the next ~50 lines looking for a list marker.
-    lines = tail.split("\n")[1:50]
-    return any(line.lstrip().startswith("- ") for line in lines)
+from wizard_decide_steps import (  # noqa: E402
+    _STEP_INFO,
+    _build_envelope,
+    _mode_alias,
+)
 
 
 def decide_mode(
@@ -188,284 +63,52 @@ def decide_mode(
     current_tag: str | None,
     repo_root: Path | None = None,
 ) -> dict:
-    """Walk the priority-ordered decision rules. Return the FIRST
-    matching one. Each rule is fully-described — no fall-through to
-    later rules once one fires. The order encodes which scenarios
-    "win" when multiple are technically true (e.g. legacy_layout +
-    needs-local-regen → migrate first; local-regen happens on the
-    re-run after migration).
+    """Return the v0.7.8 ``{mode, next_action, ask_user}`` envelope.
 
-    ``repo_root`` is required for the v0.7.8 amend-daemons rule
-    (which needs to read the actual ``.proctor/local.yml`` contents,
-    not just file-exists). When omitted, that rule is skipped —
-    older callers that don't pass repo_root keep the v0.7.7
-    behaviour."""
-    s = state
-    if repo_root is None:
-        repo_root = Path(".")
+    Implementation: delegate to ``decide_steps``; envelope follows
+    the first step (or ``"current"`` when no steps fire). The
+    behavior matches v0.7.8's first-match-wins decision tree
+    (step_order in ``wizard_decide_steps`` mirrors the v0.7.8 rule
+    priority).
 
-    # Rule 1: brand-new repo (neither config nor workflow). Most
-    # common first-time install.
-    if not s["has_new_config"] and not s["has_old_config"] and not s["has_workflow"]:
-        return _decision(
-            mode="fresh",
-            next_action=(
-                "Run the full wizard from Section 1 onward to set up "
-                "PRoctor from scratch."
+    Note: the v0.7.8 ``bump-only-with-seed`` and ``migrate`` modes
+    are NOT directly reproduced — they were special-cased in v0.7.8
+    but the step walker handles their underlying conditions via
+    different steps (``step_bump_action_pin`` fires whenever the
+    pin is stale; ``step_regenerate_local_yml`` covers the
+    seed-script-missing or auth-block-missing case). Callers that
+    care about the legacy mode names can read ``state`` directly
+    and decide.
+    """
+    steps = decide_steps(state, current_tag, repo_root=repo_root)
+    if not steps:
+        return {
+            "mode": "current",
+            "next_action": (
+                "PRoctor is already integrated and up to date. "
+                "No action needed."
             ),
-            ask_user=None,
-        )
-
-    # Rule 2: v0.3.x layout still in place — migrate to v0.4.0 first.
-    if s["legacy_layout"] and not s["has_new_config"]:
-        return _decision(
-            mode="legacy-migration",
-            next_action=(
-                "Walk the layout-migration block to git-mv the v0.3.x "
-                "files into .proctor/ and update .gitignore."
-            ),
-            ask_user={
-                "header": "Layout migration",
-                "question": (
-                    "Detected v0.3.x config layout "
-                    "(`.pr-test.yml`, `hack/proctor-seed-local.sh`). "
-                    "v0.4.0 consolidated everything under `.proctor/`. "
-                    "Migrate?"
-                ),
-                "options": [
-                    {
-                        "label": "Migrate to v0.4.0 layout (Recommended)",
-                        "description": (
-                            "git mv the files into .proctor/, update "
-                            ".gitignore. Plugin reads either layout at "
-                            "runtime, but new layout is cleaner."
-                        ),
-                    },
-                    {
-                        "label": "Keep current layout",
-                        "description": (
-                            "Compatibility shim keeps reading old paths "
-                            "with a deprecation warning each run."
-                        ),
-                    },
-                ],
-            },
-        )
-
-    # Rule 3: NEEDS_LOCAL_REGEN — seed script exists, but
-    # .proctor/local.yml is missing. The developer either never ran
-    # the seed script, or deleted it because it was broken. This
-    # rule's priority is HIGH so the wizard doesn't silently
-    # fall-through to bump-only and leave the user with a missing
-    # local.yml.
-    if s["has_seed_script"] and not s["has_local_yml"]:
-        return _decision(
-            mode="needs-local-regen",
-            next_action=(
-                "Ask the user how to regenerate .proctor/local.yml. "
-                "After their answer the wizard runs the chosen action."
-            ),
-            ask_user={
-                "header": "Local config",
-                "question": (
-                    "Detected `.proctor/seed-local.sh` exists but "
-                    "`.proctor/local.yml` is missing. The local "
-                    "config is what PRoctor reads at runtime "
-                    "(setup commands + credentials). How would "
-                    "you like to proceed?"
-                ),
-                "options": [
-                    {
-                        "label": "Regenerate seed-local.sh AND re-run it (Recommended)",
-                        "description": (
-                            "Walks Step 7f to confirm env-source + "
-                            "setup commands, regenerates the seed "
-                            "script, then prompts you to run it. "
-                            "Catches the case where existing seed "
-                            "script was built with wrong env-source."
-                        ),
-                    },
-                    {
-                        "label": "Just run the existing seed-local.sh",
-                        "description": (
-                            "Faster. Uses whatever setup commands "
-                            "are baked into the seed script — won't "
-                            "pick up v0.4.x setup-confirmation "
-                            "improvements."
-                        ),
-                    },
-                    {
-                        "label": "Skip — I'll handle .proctor/local.yml myself",
-                        "description": (
-                            "Wizard does nothing extra; falls through "
-                            "to the pin-bump check."
-                        ),
-                    },
-                ],
-            },
-        )
-
-    # Rule 4: seed script missing but auth block present. Generate
-    # the seed script via Step 8c-pre. No user input needed.
-    if not s["has_seed_script"] and s["has_auth_block"]:
-        return _decision(
-            mode="bump-only-with-seed",
-            next_action=(
-                "Bump pin if needed AND run Step 8c-pre to generate "
-                "the missing seed script."
-            ),
-            ask_user=None,
-        )
-
-    # Rule 5: pre-v0.3 config — no auth block. Offer v0.2 → v0.3
-    # migration via AskUserQuestion (matches the existing 'migrate'
-    # MODE prose).
-    if not s["has_auth_block"] and (s["has_new_config"] or s["has_old_config"]):
-        return _decision(
-            mode="migrate",
-            next_action=(
-                "Existing v0.2.x consumer. Offer migration to v0.3 "
-                "existing-env mode (add auth block, drop setup:)."
-            ),
-            ask_user={
-                "header": "PRoctor migration",
-                "question": (
-                    "Detected existing PRoctor integration without an "
-                    "`auth:` block (v0.2.x). v0.3.0 added auth + "
-                    "multi-account testing. How would you like to "
-                    "proceed?"
-                ),
-                "options": [
-                    {
-                        "label": "Migrate to v0.3 existing-env mode (Recommended)",
-                        "description": (
-                            "Add auth: block, drop setup:, bump pin. "
-                            "Run sections 7 to capture login + accounts."
-                        ),
-                    },
-                    {
-                        "label": "Keep v0.2 setup-based config, just bump the pin",
-                        "description": "Minimal change.",
-                    },
-                    {
-                        "label": "Start fresh",
-                        "description": (
-                            "Discard existing config and re-run the "
-                            "wizard from scratch."
-                        ),
-                    },
-                ],
-            },
-        )
-
-    # Rule 6: pin out of date — bump-only.
-    if (
-        current_tag
-        and s["current_pin"]
-        and s["current_pin"] != current_tag
-    ):
-        return _decision(
-            mode="bump-only",
-            next_action=(
-                f"Bump action pin {s['current_pin']} → {current_tag}. "
-                "No other changes."
-            ),
-            ask_user=None,
-        )
-
-    # Rule 7 (v0.7.8): the consumer is on the v0.4+ layout, has a
-    # `.proctor/local.yml`, but its `setup:` has no `go run ./cmd/`
-    # lines — i.e. they pre-date the multi-binary detection that
-    # v0.7.7 added in fresh mode. Offer to scan + amend.
-    #
-    # This rule fires AFTER bump-only so a pin-bump still wins
-    # (action pin is more urgent than a setup augmentation). We
-    # don't want to nag every wizard run forever, so if the user
-    # later picks "Skip" the wizard exits cleanly and the only way
-    # back into the daemon flow is a fresh invocation — that's
-    # fine; we're not persisting "already-asked" state.
-    if s.get("has_local_yml") and s.get("has_new_config"):
-        local_path = repo_root / _NEW_LOCAL
-        if not local_path.exists():
-            local_path = repo_root / _OLD_LOCAL
-        if local_path.exists() and _local_setup_missing_cmd_daemons(local_path):
-            return _decision(
-                mode="amend-daemons",
-                next_action=(
-                    "Offer to scan cmd/*/main.go binaries and amend "
-                    ".proctor/local.yml setup: with daemon start lines."
-                ),
-                ask_user={
-                    "header": "Daemon scan",
-                    "question": (
-                        "Detected `.proctor/local.yml` exists but its "
-                        "`setup:` has no `go run ./cmd/*` lines. Your "
-                        "project may have daemons (publish loops, "
-                        "workers) PRoctor should start during local "
-                        "setup so the planner can verify their output "
-                        "at runtime. Scan now?"
-                    ),
-                    "options": [
-                        {
-                            "label": "Scan for daemon binaries you may want to start in setup",
-                            "description": (
-                                "Runs the multi-main classifier "
-                                "against cmd/*/main.go + root main.go, "
-                                "then asks which ones to add to "
-                                "setup. New in v0.7.8."
-                            ),
-                        },
-                        {
-                            "label": "Skip — my setup is fine",
-                            "description": (
-                                "Wizard exits. Re-run /proctor:proctor-init "
-                                "later to revisit."
-                            ),
-                        },
-                    ],
-                },
-            )
-
-    # Rule 8: fully configured + up to date. Nothing to do.
-    return _decision(
-        mode="current",
-        next_action=(
-            "PRoctor is already integrated and up to date. No action "
-            "needed; the wizard exits with a summary."
-        ),
-        ask_user=None,
-    )
-
-
-def _decision(mode: str, next_action: str, ask_user: dict | None) -> dict:
+            "ask_user": None,
+        }
+    first = steps[0]
+    info = _STEP_INFO.get(first, {})
     return {
-        "mode": mode,
-        "next_action": next_action,
-        "ask_user": ask_user,
+        "mode": _mode_alias(first),
+        "next_action": info.get("next_action", ""),
+        "ask_user": info.get("ask_user"),
     }
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--current-tag",
-        default=None,
-        help="The latest PRoctor release tag (e.g. v0.4.4); used to "
-             "decide whether bump-only fires. Pass null/omit when the "
-             "wizard couldn't fetch it.",
-    )
-    p.add_argument(
-        "--repo-root",
-        default=".",
-        help="Consumer repo root (default: cwd).",
-    )
+    p.add_argument("--current-tag", default=None)
+    p.add_argument("--repo-root", default=".")
     args = p.parse_args()
-
     root = Path(args.repo_root).resolve()
     state = detect_state(root)
-    decision = decide_mode(state, args.current_tag, repo_root=root)
-
-    sys.stdout.write(json.dumps({"state": state, **decision}, indent=2))
+    steps = decide_steps(state, args.current_tag, repo_root=root)
+    envelope = _build_envelope(state, steps, args.current_tag)
+    sys.stdout.write(json.dumps(envelope, indent=2))
     sys.stdout.write("\n")
     return 0
 

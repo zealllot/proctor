@@ -152,70 +152,70 @@ The followed docs feed the same `rationale:` discipline above — when a plannin
    - When `requirement_hints` and the diff disagree, plan items for BOTH: one that verifies the body's stated behavior, one that verifies the diff's actual behavior. The mismatch is itself useful signal in the report.
    - If `pr_context` is empty or absent, fall back to inferring tests from the diff alone — same as before.
 
-## Detect which daemons run in local setup (v0.7.7+)
+## Detect which supplementary binaries run in local setup (v0.7.7+)
 
-**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap: projects with multiple `cmd/*/main.go` binaries (HTTP server + publish-loop daemon + sitemap one-shot) typically had ONLY the HTTP server in `.proctor/local.yml setup:`. PRs claiming "Published JSON include_tags is an array of trimmed tokens" couldn't be verified at runtime because the daemon doing the publishing wasn't started; the planner had to fall back to a lint-only "grep that the wiring exists" item and the actual published-JSON-on-S3 contract went unchecked.
+**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap: projects with multiple `cmd/*/main.go` binaries (HTTP server + a long-running supplementary binary on a 1-minute ticker + a single-pass sitemap CLI) typically had ONLY the HTTP server in `.proctor/local.yml setup:`. PRs claiming "Published JSON include_tags is an array of trimmed tokens" couldn't be verified at runtime because the supplementary binary doing the publishing wasn't started; the planner had to fall back to a lint-only "grep that the wiring exists" item and the actual published-JSON-on-S3 contract went unchecked.
 
-v0.7.7's wizard half (`/proctor:proctor-init`) now offers to bring up ALL the project's daemons in setup. The planner half — this section — uses that signal to plan a real runtime verify item when the diff touches daemon code.
+v0.7.7's wizard half (`/proctor:proctor-init`) now offers to bring up ALL the project's long-running supplementary binaries in setup. The planner half — this section — uses that signal to plan a real runtime verify item when the diff touches code reachable from a supplementary binary.
 
 **Procedure.** Before writing items, read `.proctor/local.yml` (when local mode) or `.proctor/config.yml` (CI mode); parse the `setup:` array; classify each command by the binary it invokes:
 
 - `go run . <args>` → HTTP server (the repo's main binary). Don't list separately — that's the default.
-- `go run ./cmd/<name>` or `go run ./cmd/<name> <args>` → record `<name>` as a daemon running in setup.
-- Skip docker-compose lines, sleep / wait loops, pidfile cleanup commands, db-seed scripts, env-source lines — they aren't daemons.
+- `go run ./cmd/<name>` or `go run ./cmd/<name> <args>` → record `<name>` as a supplementary binary running in setup.
+- Skip docker-compose lines, sleep / wait loops, pidfile cleanup commands, db-seed scripts, env-source lines — they aren't supplementary binaries.
 
-Build a `setup_context.daemons_running = ["<name1>", "<name2>"]` list.
+Build a `setup_context.supplementary_binaries_running = ["<name1>", "<name2>"]` list. (v0.7.7/v0.7.8 also accepted the key `daemons_running` — kept as a backward-compat alias in `plan_smells.py`.)
 
-Then for each daemon in `daemons_running`, determine whether the diff touches code reachable from `cmd/<name>/main.go`:
+Then for each binary in `supplementary_binaries_running`, determine whether the diff touches code reachable from `cmd/<name>/main.go`:
 
 - File under `cmd/<name>/` itself → directly reachable.
 - File under `models/` / `services/` / `pkg/` that's imported (transitively) by `cmd/<name>/main.go` → reachable. Heuristic: grep `cmd/<name>/main.go` for `import` lines, follow one level (read each imported package's files for the changed file's package).
-- File under `cmd/<other>/` only → NOT reachable from this daemon.
-- File under `web/` / `templates/` / `frontend/` → typically frontend-only; reachable only if `cmd/<name>/main.go` serves those (unusual for daemons).
+- File under `cmd/<other>/` only → NOT reachable from this binary.
+- File under `web/` / `templates/` / `frontend/` → typically frontend-only; reachable only if `cmd/<name>/main.go` serves those (unusual for runs-loop binaries).
 
-Record the set as `setup_context.daemon_touched`.
+Record the set as `setup_context.supplementary_binary_touched` (v0.7.7/v0.7.8 alias: `daemon_touched`).
 
-**When `daemon_touched ∩ daemons_running` is non-empty AND the PR body mentions output keywords** (publish / JSON / endpoint / output / serialize / emit / "writes to S3"), plan a runtime verify item — the daemon is in setup, it WILL produce output, and the PR is claiming that output looks a specific way. Don't lint-only it.
+**When `supplementary_binary_touched ∩ supplementary_binaries_running` is non-empty AND the PR body mentions output keywords** (publish / JSON / endpoint / output / serialize / emit / "writes to S3"), plan a runtime verify item — the supplementary binary is in setup, it WILL produce output, and the PR is claiming that output looks a specific way. Don't lint-only it. The planner's rationale should name the specific binary (e.g. "depends on mcd-daemon being in setup for its publish ticker to fire") so reviewers see the consumer-specific cause, but the SKILL-LEVEL CATEGORY here stays generic (`supplementary binary`).
 
 The item's shape:
 
 ```jsonc
 {
   "id": "t-N",
-  "what": "HAPPY: published output reflects PR changes after daemon ticker fires",
+  "what": "HAPPY: published output reflects PR changes after supplementary binary's loop iteration",
   "how": "for i in $(seq 1 120); do RESP=$(curl -sf \"<published-url>\"); if [ -n \"$RESP\" ] && echo \"$RESP\" | jq -e '<assertion derived from PR body>'; then echo OK; break; fi; sleep 1; done; [ -n \"$RESP\" ] || { echo FAIL; exit 1; }",
   "tool": "bash",
   "category": "api",
   "risk": "high",
   "depends_on": [],
-  "rationale": "Auto-planned because `<daemon-name>` is in setup_context.daemons_running AND diff touches <file-list>. PR body says <quoted output claim>; the daemon should publish that within its tick interval (60s for a 1-minute ticker; the loop above tries for 120s as a safety margin)."
+  "rationale": "Auto-planned because `<binary-name>` is in setup_context.supplementary_binaries_running AND diff touches <file-list>. PR body says <quoted output claim>; the binary should publish that within its loop interval (60s for a 1-minute ticker; the loop above tries for 120s as a safety margin)."
 }
 ```
 
 Derive `<published-url>` from the diff or repo conventions (search for `apiURL = ` / `publishedURL` / `bucket.PutObject` patterns; ask `BASE_URL` env-var only if both lead nowhere). Derive `<assertion derived from PR body>` from the body's concrete claim — e.g. "include_tags is a JSON array" → `jq -e '.include_tags | type == "array"'`.
 
-**When the necessary daemon is NOT in `daemons_running`** but the diff touches code under `cmd/<name>/` or paths reachable from it AND the PR body mentions output keywords, the planner MUST NOT silently lint-only. Do BOTH:
+**When the necessary supplementary binary is NOT in `supplementary_binaries_running`** but the diff touches code under `cmd/<name>/` or paths reachable from it AND the PR body mentions output keywords, the planner MUST NOT silently lint-only. Do BOTH:
 
-1. Plan the lint item (source-level wire-up — like v0.7.6's t-010 style: grep that the changed function is called from the daemon's loop).
-2. AND emit an additional item with `tool: "skip"` and `reason: "no-daemon-in-setup"` pointing at the missing binary. This makes the gap visible in the report rather than hiding it under a passing lint-only.
+1. Plan the lint item (source-level wire-up — like v0.7.6's t-010 style: grep that the changed function is called from the supplementary binary's loop body).
+2. AND emit an additional item with `tool: "skip"` and `reason: "no-supplementary-binary-in-setup"` pointing at the missing binary. This makes the gap visible in the report rather than hiding it under a passing lint-only.
 
 ```jsonc
 {
   "id": "t-N+1",
-  "what": "SKIPPED: runtime verify against <daemon-name>'s published output",
-  "how": "Would run: curl <published-url> | jq <assertion>. Skipped because `<daemon-name>` is NOT in .proctor/local.yml setup: — the daemon isn't started during PRoctor runs, so its output doesn't exist to verify.",
+  "what": "SKIPPED: runtime verify against <binary-name>'s published output",
+  "how": "Would run: curl <published-url> | jq <assertion>. Skipped because `<binary-name>` is NOT in .proctor/local.yml setup: — the binary isn't started during PRoctor runs, so its output doesn't exist to verify.",
   "tool": "skip",
-  "reason": "no-daemon-in-setup",
+  "reason": "no-supplementary-binary-in-setup",
   "category": "api",
   "risk": "high",
   "depends_on": [],
-  "rationale": "Surfacing the gap explicitly. To enable runtime verification, re-run `/proctor:proctor-init` and select the `<daemon-name>` binary when prompted."
+  "rationale": "Surfacing the gap explicitly. To enable runtime verification, re-run `/proctor:proctor-init` and select the `<binary-name>` binary when prompted."
 }
 ```
 
-The reporter skill (see `reporting-pr-test-results/SKILL.md`) collects every item with `reason: "no-daemon-in-setup"` into a dedicated "Runtime verification gaps" section so the reviewer sees the missing-daemon problem AND the path to fix it (re-run the init wizard).
+The reporter skill (see `reporting-pr-test-results/SKILL.md`) collects every item with `reason: "no-supplementary-binary-in-setup"` into a dedicated "Runtime verification gaps" section so the reviewer sees the missing-binary problem AND the path to fix it (re-run the init wizard).
 
-`plan_smells.py`'s `missing-runtime-verify-when-daemon-present` rule (v0.7.7+) checks the satisfied half — it fires WARN when the daemon IS in setup AND the diff touches it AND the PR talks about output AND no bash/curl item verifies the published output. The check uses the `setup_context` JSON the planner emits.
+`plan_smells.py`'s `missing-runtime-verify-when-supplementary-binary-present` rule (v0.7.7+; renamed from `missing-runtime-verify-when-daemon-present` in v0.7.9) checks the satisfied half — it fires WARN when the supplementary binary IS in setup AND the diff touches it AND the PR talks about output AND no bash/curl item verifies the published output. The check uses the `setup_context` JSON the planner emits.
 
 ## Coverage balance (read this BEFORE writing the items array)
 
@@ -796,7 +796,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
     < .proctor/runs/<run-id>/test-plan.json
 ```
 
-The `--change-map` and `--diff` flags (v0.7.6+) enable the additional `pr-body-coverage` and `new-symbol-not-exercised` checks. The `--setup-context` flag (v0.7.7+) enables the `missing-runtime-verify-when-daemon-present` check — the file should have shape `{"daemons_running": [...], "daemon_touched": [...]}` produced by the daemon-detection step above. When any of these files is absent (legacy runs), the corresponding check silently no-ops and only the v0.7.5 plan-internal lints run.
+The `--change-map` and `--diff` flags (v0.7.6+) enable the additional `pr-body-coverage` and `new-symbol-not-exercised` checks. The `--setup-context` flag (v0.7.7+; rule renamed in v0.7.9) enables the `missing-runtime-verify-when-supplementary-binary-present` check — the file should have shape `{"supplementary_binaries_running": [...], "supplementary_binary_touched": [...]}` produced by the supplementary-binary-detection step above. (The v0.7.7/v0.7.8 keys `daemons_running` / `daemon_touched` are still accepted as aliases.) When any of these files is absent (legacy runs), the corresponding check silently no-ops and only the v0.7.5 plan-internal lints run.
 
 - **Exit 0** → plan is clean. Print `[proctor:plan] done — N items planned, plan_smells clean` and return.
 - **Exit 1** → READ the warnings on stdout. Each warning tells you exactly what's wrong: items combining happy+negative phrasing, write actions without a `data_from` sibling doing round-trip verification, or 2+ negative items with zero happy-path saves (the "all-negative plan" coverage gap). Regenerate the plan addressing every warning:
