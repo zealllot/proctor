@@ -878,6 +878,60 @@ Free-text input. Pre-fill example shape: `https://<service>.<env>.<your-org-dev-
 
 Save as `BASE_URL`.
 
+### Step 7.5 — Multi-binary detection (v0.7.7+, fresh mode only)
+
+**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap. The project ships multiple `cmd/*/main.go` binaries — the HTTP server (root `main.go`) AND `cmd/mcd-daemon/main.go` (a 1-minute ticker that republishes banners/categories to S3) AND one-shot CLI tools (`cmd/mcd-publisher`, `cmd/mcd-sitemap`). Pre-v0.7.7 `.proctor/local.yml setup:` ran `go run .` which started the HTTP server but NOT mcd-daemon. PRs that claimed "Published JSON include_tags/exclude_tags are arrays of trimmed tokens" couldn't be verified at runtime because mcd-daemon — the binary that DOES the publishing — wasn't running.
+
+The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, classify each as `http-server` / `daemon` / `one-shot` / `unknown`, and ask the user which ones PRoctor should start during setup. Daemons selected here get appended to `setup:`, so they run during PRoctor invocations and produce output the planner can runtime-verify with a plain `curl`.
+
+**Runs only in `MODE=fresh`** — a brand-new install. Skip in `MODE=migrate` (existing consumer; their `setup:` was already set up by hand) and `MODE=bump-only` (pin bump only). v0.7.8 may add an "amend daemons" subcommand for existing consumers; v0.7.7 deliberately doesn't.
+
+**Procedure:**
+
+1. Detect candidates:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_detect_binaries.py \
+       --repo-root .
+   ```
+
+   Output: `{"candidates": [{"path", "binary_name", "looks_like", "evidence"}, ...]}`. Empty `candidates` → skip the whole step (no Go binaries; this is a Node/Python/etc. repo).
+
+2. Surface as AskUserQuestion (multi-select). Defaults:
+   - All `http-server` entries are REQUIRED (can't deselect — the wizard re-adds them if the user tries).
+   - All `daemon` entries are PRESELECTED (user can untick if they explicitly don't want a daemon in setup — e.g. it requires an external dep they can't easily run locally).
+   - `one-shot` entries are NOT preselected.
+   - `unknown` entries are NOT preselected (let the user decide).
+
+   Question text:
+
+   > "Detected these binaries under cmd/. Select which PRoctor should start as part of local setup.
+   >
+   > For projects with publish loops / cron / async workers, selecting their daemons here is what makes runtime verification possible — admin save → daemon publishes → PRoctor can curl the output URL.
+   >
+   > [REQUIRED] root main.go (http-server)
+   > [recommended] cmd/<X>-daemon (looks like: daemon — ticker/job loop detected)
+   > [optional] cmd/<X>-worker (looks like: daemon — workerqueue/goroutine detected)
+   > [skip] cmd/<X>-publisher (looks like: one-shot — no ticker; run on-demand only)
+   > [skip] cmd/<X>-sitemap (looks like: one-shot — short, no ticker)"
+
+   Substitute the actual candidate paths and binary names from the detect output.
+
+3. For each selected daemon (not the root http-server — that's covered by the existing Step 7f wait-loop pattern), generate two lines for `.proctor/local.yml setup:`:
+
+   ```yaml
+   - bash -c '[ -f /tmp/proctor-<NAME>.pid ] && kill "$(cat /tmp/proctor-<NAME>.pid)" 2>/dev/null; true'
+   - bash -c 'set -a; . ./dev_env_local 2>/dev/null || . ./dev_env 2>/dev/null || true; set +a; nohup go run ./<PATH> > /tmp/proctor-<NAME>.log 2>&1 & echo $! > /tmp/proctor-<NAME>.pid'
+   ```
+
+   Where `<NAME>` is the binary's directory name (e.g. `mcd-daemon` from `cmd/mcd-daemon/main.go` → `proctor-mcd-daemon.pid`) and `<PATH>` is the candidate's `path` field. The pidfile names are scoped per-binary so multiple daemons don't collide.
+
+4. After the daemon `go run` lines, add a final `sleep 3` line. Daemons run async and don't expose HTTP, so the wait-for-port loop pattern doesn't work — give them 3 seconds to get past their init (DB connection, config load, first ticker setup) before tests start.
+
+5. The existing wait-for-port loop for the http-server (Step 7f) stays unchanged. The daemon lines slot in AFTER the http-server wait-loop and BEFORE the test execution begins.
+
+**Wiring note for the state machine.** `scripts/wizard_run.py`'s state machine currently falls back to legacy SKILL.md prose for `MODE=fresh`. v0.7.7 adds the helper script (`wizard_detect_binaries.py`) and describes the new step in this prose; full state-machine integration of the fresh path (which would let the wizard automate the AskUserQuestion + `.proctor/local.yml` write directly) is deferred to v0.7.8. For v0.7.7 the AI driving the fresh path runs `wizard_detect_binaries.py` directly, surfaces the multi-select, and writes the daemon lines into `.proctor/local.yml` as part of Step 8c-pre's seed-script emission.
+
 ### Step 7f — Confirm setup commands + env source (v0.3.41+)
 
 **Why this step exists**: previous wizard versions auto-generated `setup:` commands from stack detection and silently baked them into `.proctor/local.yml`. When detection was slightly wrong (the env-source file path, the build command, the right docker-compose path), the dev server would start in a misconfigured state and produce mysterious failures during `/proctor:proctor` runs (e.g. gRPC handshake errors talking to a backend with mismatched keys). The fix: show the proposed commands and ASK before writing.

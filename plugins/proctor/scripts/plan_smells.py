@@ -34,6 +34,35 @@ Two checks today:
 Conservative by design — false positives make the approval gate noisy
 and reviewers learn to ignore warnings. The two patterns are tuned to
 fire on the exact phrasings the planner has produced in practice.
+
+## v0.7.7 — daemon-output coverage
+
+The v0.7.6 e2e against mcd-website PR #1126 found that when a
+project ships multiple ``cmd/*/main.go`` binaries (HTTP server +
+publish-loop daemon), PRoctor's local setup only ran ``go run .``
+which started the HTTP server but NOT the daemon. PRs describing
+"published JSON includes trimmed tokens" never got verified at
+runtime because the daemon that does the publishing wasn't running.
+The planner shipped a lint-only item ("source-level: SplitTags
+calls Trim") and the runtime gap was invisible.
+
+The v0.7.7 fix has two halves:
+
+1. The /proctor:proctor-init wizard now detects ``cmd/*/main.go``
+   binaries and prompts the user to include their daemons in
+   ``.proctor/local.yml setup:`` — see
+   ``scripts/wizard_detect_binaries.py``.
+2. This module's ``missing-runtime-verify-when-daemon-present``
+   rule fires when ``setup_context.daemons_running`` is non-empty
+   AND the diff touches a file reachable from any of those daemons
+   AND PR body mentions output keywords (publish/JSON/endpoint/
+   output/serialize) AND the plan has no ``tool: bash`` / ``curl``
+   item that curls against the daemon's output URL.
+
+Combined, the wizard half makes runtime verification POSSIBLE (the
+daemon is in setup, so it publishes), and the lint half makes the
+planner ACCOUNTABLE for using that capability when the PR shape
+calls for it.
 """
 
 from __future__ import annotations
@@ -335,6 +364,116 @@ def _pr_body_coverage_warnings(
     return warnings
 
 
+# Keywords that signal the PR is talking about a daemon's produced
+# output (published JSON, serialized payload, HTTP response from an
+# output endpoint). When the diff touches daemon-reachable code AND
+# the PR body uses one of these vocabularies, the v0.7.7 rule
+# expects a runtime curl-against-output-URL item.
+_DAEMON_OUTPUT_KEYWORDS_RE = re.compile(
+    r"\b(?:publish(?:ed|ing|es)?|publis[s]?h|serializ(?:ed|es?|ing|ation)|"
+    r"output|endpoint|JSON|payload|emit(?:ted|s|ting)?|writ(?:es?|ten|ing)\s+to\s+S3|"
+    r"upload(?:ed|s|ing)?\s+to\s+S3|render(?:ed|s|ing)?\s+(?:JSON|response))\b",
+    re.IGNORECASE,
+)
+
+# Patterns identifying items that DO verify daemon output at runtime
+# — used to decide whether the rule has been satisfied. We accept
+# either a curl against a URL-shaped value OR a bash item whose
+# how:/what: explicitly mentions polling for daemon-published output.
+_RUNTIME_OUTPUT_VERIFY_RE = re.compile(
+    r"\bcurl\b|\bwget\b|\bhttp(?:s)?://|"
+    r"\bpoll(?:s|ed|ing)?\s+for\s+(?:publish|output|JSON|S3)|"
+    r"\bawait\s+(?:publish|output)|\bwait\s+for\s+(?:ticker|daemon|publish)",
+    re.IGNORECASE,
+)
+
+
+def _missing_runtime_verify_when_daemon_present_warnings(
+    plan: dict,
+    change_map: dict | None,
+    setup_context: dict | None,
+) -> list[str]:
+    """v0.7.7: when the project runs a daemon in local setup AND the
+    diff touches code reachable from that daemon AND the PR body
+    mentions output-producing keywords (publish / JSON / endpoint /
+    serialize / output), the plan MUST include at least one bash /
+    curl item that verifies the daemon's output at runtime.
+
+    The check is the lint half of the "daemons are in setup, plan a
+    real verify item" v0.7.7 contract. Without it, plans silently
+    fall back to lint-only items asserting source-level facts
+    ("SplitTags is called from RebuildBanners") when the actual
+    bug — would the published JSON come out trimmed? — never gets
+    runtime-exercised.
+
+    Inputs:
+    - ``setup_context.daemons_running`` — list of daemon names the
+      planner parsed from ``.proctor/local.yml`` / ``.proctor/
+      config.yml`` ``setup:`` block.
+    - ``setup_context.daemon_touched`` — list of daemon names whose
+      code path the diff touches (planner-computed; the SKILL
+      prose tells the planner to grep cmd/<name>/main.go imports
+      vs. diff-changed files).
+    - ``change_map.pr_context.body`` — PR body prose, scanned for
+      output-keyword mentions.
+    - ``plan.items[]`` — scanned for any bash / curl item whose
+      how/what contains a curl-against-URL pattern.
+
+    Rule fires only when all three conditions are met. False
+    positives are kept low by requiring the explicit daemon-touched
+    list rather than guessing from diff paths — the planner
+    already knows which daemons it's worth verifying because the
+    SKILL prose makes it think through that mapping.
+    """
+    if not setup_context or not isinstance(setup_context, dict):
+        return []
+    daemons_running = setup_context.get("daemons_running") or []
+    daemon_touched = setup_context.get("daemon_touched") or []
+    if not daemons_running or not daemon_touched:
+        return []
+
+    # Find a daemon that's both running AND touched by the diff.
+    touched_in_setup = [
+        d for d in daemon_touched if d in daemons_running
+    ]
+    if not touched_in_setup:
+        return []
+
+    # PR body must talk about output. Pull body from the change_map.
+    body = ""
+    if change_map and isinstance(change_map, dict):
+        ctx = change_map.get("pr_context") or {}
+        if isinstance(ctx, dict):
+            body = ctx.get("body") or ""
+    if not body or not _DAEMON_OUTPUT_KEYWORDS_RE.search(body):
+        return []
+
+    # Look for a runtime verify item — bash or curl tool that talks
+    # about hitting an output URL or polling for daemon output.
+    items = plan.get("items") or []
+    for it in items:
+        if it.get("tool") not in ("bash", "curl"):
+            continue
+        corpus = _item_corpus(it)
+        if _RUNTIME_OUTPUT_VERIFY_RE.search(corpus):
+            return []  # satisfied — at least one runtime verify item
+
+    daemons_str = ", ".join(repr(d) for d in touched_in_setup)
+    return [
+        f"missing-runtime-verify-when-daemon-present: daemon(s) "
+        f"{daemons_str} are in local setup AND touched by the diff, "
+        f"AND the PR body mentions output (publish/JSON/endpoint/"
+        f"serialize/output keywords), BUT the plan has no bash/curl "
+        f"item that curls against the daemon's output URL or polls "
+        f"for daemon-published output. Add a runtime verify item "
+        f"that waits for the daemon's ticker and asserts the "
+        f"published output reflects the PR's stated change. If the "
+        f"output URL is genuinely unverifiable in your environment, "
+        f"plan a tool='skip' item with reason explaining the gap so "
+        f"the report makes it visible — don't silently lint-only."
+    ]
+
+
 def _new_symbol_not_exercised_warnings(
     plan: dict, diff_text: str | None
 ) -> list[str]:
@@ -384,6 +523,7 @@ def check(
     plan: dict,
     change_map: dict | None = None,
     diff_text: str | None = None,
+    setup_context: dict | None = None,
 ) -> list[str]:
     """Return a list of warning strings. Empty list = clean plan.
 
@@ -399,7 +539,16 @@ def check(
     ``diff_text`` is provided, new-symbol-not-exercised fires for
     diff symbols only lint-checked, never runtime-exercised. Both
     inputs are optional — when absent, the v0.7.5 behavior is
-    preserved (backward compat)."""
+    preserved (backward compat).
+
+    v0.7.7+: when ``setup_context`` is provided, the
+    missing-runtime-verify-when-daemon-present check fires when
+    a daemon is in setup AND touched by the diff AND the PR body
+    mentions output keywords AND no runtime curl item exists. The
+    parameter shape is ``{"daemons_running": [...],
+    "daemon_touched": [...]}`` — both lists of daemon names
+    (binary names from ``cmd/<name>/main.go``). Absent: no-op
+    (backward compat)."""
     items = plan.get("items") or []
     combined_warnings: list[str] = []
     missing_roundtrip_warnings: list[str] = []
@@ -514,18 +663,26 @@ def check(
     # compat).
     pr_body_warnings = _pr_body_coverage_warnings(plan, change_map)
     new_symbol_warnings = _new_symbol_not_exercised_warnings(plan, diff_text)
+    # v0.7.7 new check — same pattern, no-op when setup_context absent.
+    daemon_verify_warnings = (
+        _missing_runtime_verify_when_daemon_present_warnings(
+            plan, change_map, setup_context,
+        )
+    )
 
     combined_warnings.sort()
     missing_roundtrip_warnings.sort()
     coverage_warnings.sort()
     pr_body_warnings.sort()
     new_symbol_warnings.sort()
+    daemon_verify_warnings.sort()
     return (
         combined_warnings
         + missing_roundtrip_warnings
         + coverage_warnings
         + pr_body_warnings
         + new_symbol_warnings
+        + daemon_verify_warnings
     )
 
 
@@ -568,6 +725,17 @@ def _main() -> int:
               "provided, the new-symbol-not-exercised check fires for "
               "new top-level symbols only lint-checked by the plan."),
     )
+    p.add_argument(
+        "--setup-context",
+        default=None,
+        help=("Optional path to setup-context.json with shape "
+              "{daemons_running: [...], daemon_touched: [...]}. "
+              "When provided AND both lists overlap AND the PR body "
+              "mentions output keywords, the v0.7.7 "
+              "missing-runtime-verify-when-daemon-present rule fires "
+              "if the plan has no bash/curl item against the "
+              "daemon's output URL."),
+    )
     args = p.parse_args()
 
     plan = json.load(sys.stdin)
@@ -594,7 +762,24 @@ def _main() -> int:
                     f"warning: --diff at {args.diff} could not be read "
                     f"({e}); skipping new-symbol-not-exercised check.\n"
                 )
-    warnings = check(plan, change_map=change_map, diff_text=diff_text)
+    setup_context = None
+    if args.setup_context:
+        sc_path = Path(args.setup_context)
+        if sc_path.exists():
+            try:
+                setup_context = json.loads(sc_path.read_text())
+            except json.JSONDecodeError as e:
+                sys.stderr.write(
+                    f"warning: --setup-context at {args.setup_context} "
+                    f"could not be parsed ({e}); skipping "
+                    f"missing-runtime-verify-when-daemon-present check.\n"
+                )
+    warnings = check(
+        plan,
+        change_map=change_map,
+        diff_text=diff_text,
+        setup_context=setup_context,
+    )
     for w in warnings:
         sys.stdout.write(w + "\n")
     if args.strict and warnings:
