@@ -205,18 +205,22 @@ def _count_screenshots(result_item: dict) -> int:
     return 0
 
 
-# v0.6.8: identical-negative-screenshot lint. Two negative items
-# producing byte-identical primary screenshots above this floor is
-# the empirical signature of "the same pre-submit form was captured
-# twice instead of the rendered validator-reject states". The
-# v0.6.6 mcd-website run shipped t-007/008/009 with three 244252-
-# byte PNGs (the blank Add-Digital-Content form) because the Pattern
-# A submit used fetch() — server returns 422 + error HTML but the
-# browser DOM never re-renders, so take_screenshot captures the
-# pre-submit form. The floor exists so tiny legitimately-shared
-# stubs (a 4-byte sentinel, an empty PNG sentinel) don't trip the
-# check.
-_IDENTICAL_NEG_MIN_BYTES = 50 * 1024
+# v0.6.8: identical-screenshot lint. Originally only checked negative
+# items (v0.6.6 t-007/008/009 bug: three byte-identical pre-submit
+# blank forms claiming three different error states).
+#
+# v0.7.5 extension: applies to ALL chrome-devtools items, not just
+# negatives, AND uses MD5 (not just byte size) for the comparison.
+# The v0.7.4 PR-1126 run shipped 11 screenshot files across 5
+# different chrome items (t-005..t-009) where 7 of them shared the
+# same MD5 (a viewport-top capture taken before scrollIntoView
+# completed for any of the asserted fields). Byte size alone wouldn't
+# catch ALL cases — different page chrome can produce same byte size
+# coincidentally — but MD5 is decisive.
+#
+# The floor exists so tiny legitimately-shared stubs (an empty PNG
+# sentinel) don't trip the check.
+_IDENTICAL_MIN_BYTES = 50 * 1024
 
 
 def _primary_screenshot_path(result_item: dict) -> str | None:
@@ -277,61 +281,174 @@ def _resolve_screenshot_size(
     return None
 
 
-def _check_identical_negative_screenshots(
+def _md5_of(path: Path) -> str | None:
+    """Compute MD5 of a file's bytes. Returns None on read error."""
+    import hashlib
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(64 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, FileNotFoundError):
+        return None
+
+
+def _resolve_screenshot_path(
+    run_dir: Path | None, ref: str
+) -> Path | None:
+    """Resolve a screenshot ref to an absolute Path that exists.
+
+    Mirrors ``_resolve_screenshot_size``'s candidate list but returns
+    the Path so the caller can compute MD5 / read content / etc.
+    """
+    if not ref or run_dir is None:
+        return None
+    ref_path = Path(ref)
+    candidates: list[Path] = []
+    if ref_path.is_absolute():
+        candidates.append(ref_path)
+    else:
+        candidates.append(run_dir / "screenshots" / ref_path.name)
+        candidates.append(run_dir / ref_path.name)
+        candidates.append(Path.cwd() / ref_path)
+    for c in candidates:
+        try:
+            if c.exists() and c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _check_identical_screenshots(
     plan: dict,
     results: dict,
     run_dir: Path | None,
 ) -> list[str]:
-    """Flag pairs of negative items whose primary screenshot is byte-
-    identical (and above the floor). Returns a list of violation
-    strings — one per pair.
+    """Flag screenshots across any chrome-devtools items in a run that
+    share the same MD5 (and are above the byte-size floor).
 
-    The v0.6.6 t-007/008/009 bug: three negative items, three
-    byte-identical 244252-byte PNGs (the blank Add-Digital-Content
-    form). Each evidence string claimed an error chip rendered;
-    each screenshot proved it had not. The Pattern A submit used
-    fetch() — server returned 422 + error HTML but the browser DOM
-    did not re-render. This O(n²) pairwise scan (negatives are
-    typically n ≤ 5, so ≤ 10 comparisons) catches that pattern
-    mechanically before the report is rendered.
+    v0.6.8 originally checked this for negative items only. v0.7.5
+    extends to ALL chrome items + all screenshot entries (not just
+    the primary). The v0.7.4 PR-1126 run shipped 11 screenshot files
+    across 5 happy-save / round-trip / render-check items where 7
+    shared the same MD5 — the viewport-top capture taken before
+    scrollIntoView completed for any of the asserted fields. The
+    label/focus fields claimed different states; the bytes proved
+    the agent took the same screenshot multiple times.
+
+    Returns a list of violation strings — one per cluster of duplicates.
     """
     if run_dir is None:
-        # Without a run_dir we can't resolve paths to bytes; skip
-        # this check rather than emit false negatives.
         return []
     by_id_results = {it["id"]: it for it in results.get("items", [])
                      if isinstance(it, dict) and "id" in it}
-    # Gather (id, size) for all negative items with a resolvable
-    # primary screenshot whose size meets the floor.
-    neg: list[tuple[str, int]] = []
+    chrome_item_ids = {
+        item["id"] for item in plan.get("items", [])
+        if isinstance(item, dict) and "id" in item
+        and item.get("tool") == "chrome-devtools"
+    }
+    # Map MD5 -> list of (item_id, screenshot_idx, path) tuples for
+    # every screenshot referenced by a chrome item whose file exists
+    # and is above the byte-size floor.
+    by_md5: dict[str, list[tuple[str, int, Path]]] = {}
+    for item_id in chrome_item_ids:
+        result = by_id_results.get(item_id)
+        if result is None or result.get("status") not in ("pass", "fail"):
+            continue
+        # Walk every screenshot entry (not just primary). For legacy
+        # results emitting screenshot_ref singular, treat it as index 0.
+        refs: list[tuple[int, str]] = []
+        ss = result.get("screenshots")
+        if isinstance(ss, list):
+            for idx, s in enumerate(ss):
+                if isinstance(s, dict):
+                    p = s.get("path")
+                    if isinstance(p, str) and p.strip():
+                        refs.append((idx, p))
+        legacy = result.get("screenshot_ref")
+        if not refs and isinstance(legacy, str) and legacy.strip():
+            refs.append((0, legacy))
+        for idx, ref in refs:
+            path = _resolve_screenshot_path(run_dir, ref)
+            if path is None:
+                continue
+            try:
+                if path.stat().st_size < _IDENTICAL_MIN_BYTES:
+                    continue
+            except OSError:
+                continue
+            md5 = _md5_of(path)
+            if md5 is None:
+                continue
+            by_md5.setdefault(md5, []).append((item_id, idx, path))
+    violations: list[str] = []
+    for md5, hits in by_md5.items():
+        if len(hits) < 2:
+            continue
+        # Cluster of byte-identical screenshots — single violation
+        # listing every member so the executor can re-shoot all of them.
+        members = ", ".join(f"{h[0]}[{h[1]}]" for h in hits)
+        first_path = hits[0][2]
+        try:
+            size = first_path.stat().st_size
+        except OSError:
+            size = -1
+        violations.append(
+            f"{members}: {len(hits)} screenshots share MD5 {md5} "
+            f"({size} bytes). This is the v0.7.4 pattern — the "
+            f"executor took the same viewport-top screenshot "
+            f"multiple times instead of capturing each asserted "
+            f"state. Re-shoot using element-scoped take_screenshot "
+            f"(uid parameter from take_snapshot) after scrollIntoView "
+            f"of the asserted field. See agents/pr-test-executor.md "
+            f"v0.7.5 'Pre-screenshot requirements' section."
+        )
+    return violations
+
+
+def _check_legacy_screenshot_ref(plan: dict, results: dict) -> list[str]:
+    """v0.7.5+: chrome-devtools items must NOT use the legacy
+    ``screenshot_ref`` singular field. The v0.6.4+ ``screenshots: [{
+    path, label, focus}]`` array is mandatory.
+
+    The PR-1126 v0.7.4 run shipped every chrome item with just
+    ``screenshot_ref`` and a bare path — no ``label``, no ``focus``,
+    no way for the reviewer to tell what the screenshot was supposed
+    to show. The count-based contract caught insufficient count for
+    save/round-trip but render-check items satisfied legacy count=1
+    and slipped through.
+
+    Returns violation strings for any chrome item where
+    ``screenshots`` is missing AND ``screenshot_ref`` is set.
+    """
+    by_id_results = {it["id"]: it for it in results.get("items", [])
+                     if isinstance(it, dict) and "id" in it}
+    violations: list[str] = []
     for item in plan.get("items", []):
         if not isinstance(item, dict) or "id" not in item:
             continue
-        if classify_item(item) != "negative":
+        if item.get("tool") != "chrome-devtools":
             continue
         result = by_id_results.get(item["id"])
         if result is None or result.get("status") not in ("pass", "fail"):
             continue
-        ref = _primary_screenshot_path(result)
-        if not ref:
+        # New shape present → pass.
+        if isinstance(result.get("screenshots"), list) and result["screenshots"]:
             continue
-        size = _resolve_screenshot_size(run_dir, ref)
-        if size is None or size < _IDENTICAL_NEG_MIN_BYTES:
-            continue
-        neg.append((item["id"], size))
-    violations: list[str] = []
-    for (a_id, a_size), (b_id, b_size) in combinations(neg, 2):
-        if a_size != b_size:
-            continue
-        violations.append(
-            f"{a_id} + {b_id}: negative-item screenshots are "
-            f"identical ({a_size} bytes) - almost certainly the "
-            f"same pre-submit blank form was captured twice instead "
-            f"of the rendered validator-reject states. Re-take "
-            f"screenshots AFTER form.submit() renders the error "
-            f"in DOM. See satisfying-form-preconditions SKILL "
-            f"\"Negative-test screenshot\" section."
-        )
+        # Legacy shape present without new shape → reject.
+        legacy = result.get("screenshot_ref")
+        if isinstance(legacy, str) and legacy.strip():
+            violations.append(
+                f"{item['id']}: chrome-devtools result uses legacy "
+                f"`screenshot_ref` singular field instead of the "
+                f"v0.6.4+ `screenshots: [{{path, label, focus}}]` "
+                f"array. Reviewers can't tell what the screenshot is "
+                f"supposed to show without `label` + `focus`. "
+                f"Re-emit with the new shape — see "
+                f"agents/pr-test-executor.md 'Result-field shape'."
+            )
     return violations
 
 
@@ -390,18 +507,22 @@ def check(
                 f"evidence the test asserts on. See the per-item-"
                 f"type matrix in the agent doc."
             )
-    # v0.6.8: identical-negative-screenshot lint. Run after the
-    # count check so a count-deficient item is reported once for the
-    # primary failure (no screenshot) without also being flagged by
-    # this comparison (it has no resolvable file anyway).
+    # v0.7.5: identical-screenshot lint across ALL chrome items.
+    # (v0.6.8 was negative-only.) Run after the count check so a
+    # count-deficient item is reported once for the primary failure
+    # (no screenshot) without also being flagged by this comparison
+    # (it has no resolvable file anyway).
     rd: Path | None
     if isinstance(run_dir, str):
         rd = Path(run_dir)
     else:
         rd = run_dir
     violations.extend(
-        _check_identical_negative_screenshots(plan, results, rd)
+        _check_identical_screenshots(plan, results, rd)
     )
+    # v0.7.5: legacy `screenshot_ref` singular field is forbidden for
+    # chrome items. Force the v0.6.4+ `screenshots: [...]` array.
+    violations.extend(_check_legacy_screenshot_ref(plan, results))
     return violations
 
 

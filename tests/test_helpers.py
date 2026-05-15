@@ -3652,14 +3652,15 @@ def test_ss_check_happy_save_two_screenshots_ok():
 
 def test_ss_check_happy_save_one_screenshot_flagged():
     """The exact pre-v0.6.4 bug pattern: save items shipped with one
-    screenshot."""
+    screenshot. v0.7.5: even when expressed in the new shape, count<2
+    is flagged."""
     plan, results = _make_plan_results(
         [{"id": "t-2", "tool": "chrome-devtools",
           "what": "HAPPY: create reward — save succeeds",
           "how": "fill+save", "category": "api", "risk": "high",
           "depends_on": []}],
         [{"id": "t-2", "status": "pass", "evidence": "ok",
-          "screenshot_ref": ".proctor/runs/x/t-2.png"}],
+          "screenshots": [{"path": "x.png", "label": "filled", "focus": "fl"}]}],
     )
     violations = ss_check(plan, results)
     assert len(violations) == 1
@@ -3688,7 +3689,8 @@ def test_ss_check_edit_and_switch_one_screenshot_flagged_the_t006_bug():
     introduced to prevent: 1 screenshot of a post-save detail page
     when the test asserted on a form-state switch. v0.6.4 prose
     contract failed to prevent it; v0.6.5 mechanical check catches
-    it before report render."""
+    it before report render. v0.7.5: same pattern in the new shape
+    (count=1) still fires."""
     plan, results = _make_plan_results(
         [{"id": "t-006", "tool": "chrome-devtools",
           "what": "edit reward, switch Digital Content Type from Image to Game",
@@ -3696,7 +3698,8 @@ def test_ss_check_edit_and_switch_one_screenshot_flagged_the_t006_bug():
           "category": "api", "risk": "high", "depends_on": []}],
         [{"id": "t-006", "status": "pass",
           "evidence": "Reloaded; type=Game.",
-          "screenshot_ref": ".proctor/runs/x/t-006.png"}],
+          "screenshots": [{"path": "x.png", "label": "post-save",
+                           "focus": "type"}]}],
     )
     violations = ss_check(plan, results)
     assert len(violations) == 1
@@ -3726,7 +3729,8 @@ def test_ss_check_round_trip_one_screenshot_flagged():
           "how": "navigate + hard-reload", "category": "api",
           "risk": "high", "depends_on": []}],
         [{"id": "t-3", "status": "pass", "evidence": "ok",
-          "screenshot_ref": "x.png"}],
+          "screenshots": [{"path": "x.png", "label": "reloaded",
+                           "focus": "field-values-after-reload"}]}],
     )
     violations = ss_check(plan, results)
     assert len(violations) == 1
@@ -3790,11 +3794,14 @@ def test_ss_check_skipped_item_exempt():
     assert ss_check(plan, results) == []
 
 
-def test_ss_check_legacy_screenshot_ref_counted_for_render_check():
-    """v0.6.3-and-earlier results may legitimately set only the
-    legacy `screenshot_ref` field. For render-check (min 1) that
-    is sufficient; for happy-save (min 2) it is not. Backward
-    compatibility preserved at the floor, not above it."""
+def test_ss_check_legacy_screenshot_ref_rejected_v075():
+    """v0.7.5 reverses v0.6.4's "legacy ref counts toward count
+    contract" rule for chrome items. The PR-1126 v0.7.4 run shipped
+    every chrome item with just `screenshot_ref` (no label, no focus
+    metadata) and reviewers couldn't tell what the screenshot was
+    supposed to show. Now legacy `screenshot_ref` alone is rejected
+    on chrome items — the v0.6.4+ `screenshots: [{path, label, focus}]`
+    array is required."""
     plan, results = _make_plan_results(
         [{"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
           "how": "navigate", "category": "frontend", "risk": "low",
@@ -3802,7 +3809,13 @@ def test_ss_check_legacy_screenshot_ref_counted_for_render_check():
         [{"id": "t-1", "status": "pass", "evidence": "ok",
           "screenshot_ref": ".proctor/runs/x/t-1.png"}],
     )
-    assert ss_check(plan, results) == []
+    violations = ss_check(plan, results)
+    # One violation — the legacy-shape check flags it. Count check
+    # passes because legacy ref counts as 1 and render-check needs >=1.
+    assert len(violations) == 1
+    assert "t-1" in violations[0]
+    assert "screenshot_ref" in violations[0]
+    assert "label" in violations[0] and "focus" in violations[0]
 
 
 def test_ss_check_screenshots_entry_missing_focus_not_counted():
@@ -3831,7 +3844,9 @@ def test_ss_check_pinned_pre_v064_run_flagged_top_to_bottom():
     representative of the PR-#1115 plan. Without v0.6.5 every
     happy-save / round-trip / edit-and-switch item would render in
     a report with insufficient evidence — v0.6.5 flags every one
-    so the gap is visible BEFORE report render."""
+    so the gap is visible BEFORE report render. v0.7.5 adds the
+    legacy-shape flag on top so each item gets BOTH a count
+    violation AND a legacy-shape violation."""
     plan_items = [
         {"id": "t-002", "tool": "chrome-devtools",
          "what": "HAPPY: create Digital Download reward with type=Image — save succeeds",
@@ -3854,12 +3869,13 @@ def test_ss_check_pinned_pre_v064_run_flagged_top_to_bottom():
     ]
     plan, results = _make_plan_results(plan_items, result_items)
     violations = ss_check(plan, results)
-    # All three flagged.
-    assert len(violations) == 3
-    ids = "\n".join(violations)
-    assert "t-002" in ids and "happy-save" in ids
-    assert "t-003" in ids and "round-trip" in ids
-    assert "t-006" in ids and "edit-and-switch" in ids
+    msg = "\n".join(violations)
+    # Each item flagged for BOTH count AND legacy-shape (6 violations).
+    assert "happy-save" in msg and "t-002" in msg
+    assert "round-trip" in msg and "t-003" in msg
+    assert "edit-and-switch" in msg and "t-006" in msg
+    # Legacy-shape check also fires for all three.
+    assert msg.count("screenshot_ref") >= 3
 
 
 def test_ss_check_results_with_unmatched_plan_id_skipped():
@@ -3910,13 +3926,12 @@ def test_ss_check_plan_item_with_no_result_skipped():
 
 def test_ss_check_identical_negative_screenshots_warns(tmp_path):
     """Synthesize two negative items pointing at the SAME 100KB+ stub
-    file; check returns a violation containing both item IDs and the
-    byte size. This is the literal v0.6.6 t-007/t-008 signature
-    (244252-byte PNG used as both screenshots)."""
-    # Write a single 100KB+ stub file the two items will reference.
+    file; check returns a violation listing both item IDs and the MD5.
+    Originally the v0.6.6 t-007/t-008 signature (244252-byte PNG used
+    as both screenshots, all sharing the same MD5)."""
     stub = tmp_path / "screenshots" / "shared-blank-form.png"
     stub.parent.mkdir(parents=True, exist_ok=True)
-    payload = b"\x89PNG\r\n\x1a\n" + b"x" * 244244  # 244252 bytes, the t-006 signature
+    payload = b"\x89PNG\r\n\x1a\n" + b"x" * 244244  # 244252 bytes
     stub.write_bytes(payload)
     plan_items = [
         {"id": "t-7", "tool": "chrome-devtools",
@@ -3938,12 +3953,12 @@ def test_ss_check_identical_negative_screenshots_warns(tmp_path):
     ]
     plan, results = _make_plan_results(plan_items, result_items)
     violations = ss_check(plan, results, run_dir=tmp_path)
-    # Exactly one violation — the (t-7, t-8) pair.
+    # v0.7.5: one violation listing the cluster.
     assert len(violations) == 1
     msg = violations[0]
     assert "t-7" in msg and "t-8" in msg
-    assert str(len(payload)) in msg  # the byte size is reported
-    assert "identical" in msg.lower()
+    assert str(len(payload)) in msg  # byte size reported
+    assert "MD5" in msg or "md5" in msg.lower()
 
 
 def test_ss_check_distinct_negative_screenshots_ok(tmp_path):
@@ -4005,12 +4020,15 @@ def test_ss_check_identical_below_floor_not_flagged(tmp_path):
     assert ss_check(plan, results, run_dir=tmp_path) == []
 
 
-def test_ss_check_identical_happy_save_screenshots_ok(tmp_path):
-    """The lint targets NEGATIVE items only. Two happy-save items
-    legitimately sharing a 'before' screenshot (e.g. they both
-    start from the same blank form) must NOT be flagged — only
-    negatives are checked, because for negatives the asserted
-    artifact IS the rendered error."""
+def test_ss_check_identical_happy_save_screenshots_now_flagged_v075(tmp_path):
+    """v0.7.5 reverses the v0.6.8 'happy-save identical screenshots
+    OK' rule. The PR-1126 v0.7.4 run shipped t-005/006/007/008/009
+    where 7 out of 11 screenshots shared the same MD5 — same
+    viewport-top capture across different asserted states. The lint
+    now flags any chrome item's screenshots that share MD5 with
+    another chrome item's screenshot, regardless of bucket type.
+    Synthesized scenario: two happy-save items both with two
+    screenshots all pointing at the same large file."""
     ss_dir = tmp_path / "screenshots"
     ss_dir.mkdir(parents=True, exist_ok=True)
     (ss_dir / "shared-form.png").write_bytes(b"\x89PNG" + b"x" * 200000)
@@ -4037,9 +4055,13 @@ def test_ss_check_identical_happy_save_screenshots_ok(tmp_path):
          ]},
     ]
     plan, results = _make_plan_results(plan_items, result_items)
-    # No violations — the lint only flags identical NEGATIVE
-    # screenshots, and these are happy-save items.
-    assert ss_check(plan, results, run_dir=tmp_path) == []
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    # v0.7.5: all four entries cluster on one MD5; one violation.
+    assert len(violations) == 1
+    msg = violations[0]
+    # All four occurrences listed in the cluster.
+    assert msg.count("t-2") >= 1 and msg.count("t-4") >= 1
+    assert "MD5" in msg or "md5" in msg.lower()
 
 
 def test_ss_check_identical_no_run_dir_skipped(tmp_path):
@@ -4066,6 +4088,158 @@ def test_ss_check_identical_no_run_dir_skipped(tmp_path):
     # Even though they reference the same path, without run_dir the
     # byte-size lint is skipped. Both items satisfy the count
     # contract (negative needs >=1) so 0 violations.
+    assert ss_check(plan, results) == []
+
+
+# ===== v0.7.5: cross-item identical-screenshot lint + legacy reject =====
+
+
+def test_ss_check_pinned_pr1126_v074_seven_md5_collisions(tmp_path):
+    """Pin the literal v0.7.4 PR-1126 failure pattern: 5 chrome items
+    (t-005 render, t-006 happy-save, t-007 round-trip, t-008 happy-save,
+    t-009 round-trip), 11 total screenshot files, where 7 of them
+    shared the same MD5 (the same viewport-top capture taken before
+    scrollIntoView completed for ANY asserted field). The label/focus
+    claimed different states; the bytes proved otherwise. v0.7.5
+    mechanical check catches this before report render."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    # Three distinct PNGs — mimicking the v0.7.4 trace's 3 unique MD5s:
+    #  - viewport-top (used 7x, the bug)
+    #  - list-page (used 2x, legit because list views look the same)
+    #  - zoom-of-edit-page (used 2x, legit)
+    (ss_dir / "viewport-top.png").write_bytes(b"\x89PNG\r\n" + b"a" * 200000)
+    (ss_dir / "list-page.png").write_bytes(b"\x89PNG\r\n" + b"b" * 120000)
+    (ss_dir / "zoom-edit.png").write_bytes(b"\x89PNG\r\n" + b"c" * 130000)
+    plan_items = [
+        {"id": "t-005", "tool": "chrome-devtools",
+         "what": "Bonus Banner admin form displays IncludeTags / ExcludeTags",
+         "how": "navigate; assert visible", "category": "api",
+         "risk": "low", "depends_on": []},
+        {"id": "t-006", "tool": "chrome-devtools",
+         "what": "HAPPY: save tags with commas — succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-007", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open saved record — values round-trip",
+         "how": "navigate+reload", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-008", "tool": "chrome-devtools",
+         "what": "HAPPY: save with empty tags — backward compat",
+         "how": "clear+save", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-009", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open empty record — round-trip empty",
+         "how": "navigate+reload", "category": "api", "risk": "high",
+         "depends_on": []},
+    ]
+    # 7 of 11 share viewport-top; 2 share list-page; 2 share zoom-edit.
+    result_items = [
+        {"id": "t-005", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "viewport-top.png", "label": "form visible", "focus": "labels"},
+         ]},
+        {"id": "t-006", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "viewport-top.png", "label": "before save", "focus": "filled"},
+             {"path": "viewport-top.png", "label": "after save", "focus": "toast"},
+         ]},
+        {"id": "t-007", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "list-page.png", "label": "navigated away", "focus": "list URL"},
+             {"path": "viewport-top.png", "label": "after hard reload", "focus": "values"},
+             {"path": "zoom-edit.png", "label": "zoom tags", "focus": "values close-up"},
+         ]},
+        {"id": "t-008", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "viewport-top.png", "label": "tags cleared", "focus": "empty"},
+             {"path": "viewport-top.png", "label": "save success", "focus": "toast"},
+         ]},
+        {"id": "t-009", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "list-page.png", "label": "navigated away", "focus": "list URL"},
+             {"path": "viewport-top.png", "label": "empty after reload", "focus": "empty"},
+             {"path": "zoom-edit.png", "label": "zoom empty tags", "focus": "empty"},
+         ]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    # 3 MD5 clusters of size > 1, so 3 violations:
+    #   - viewport-top: 7 entries across t-005..t-009 (THE bug)
+    #   - list-page: 2 entries across t-007/t-009 (legit but flagged — review)
+    #   - zoom-edit: 2 entries across t-007/t-009 (legit but flagged — review)
+    cluster_violations = [v for v in violations if "MD5" in v or "md5" in v.lower()]
+    assert len(cluster_violations) == 3
+    # The biggest cluster (7 entries) must be in there and must
+    # mention the viewport-top bug pattern.
+    big = max(cluster_violations, key=lambda v: v.count("t-"))
+    assert big.count("t-") >= 7, (
+        f"Expected the viewport-top cluster to list 7 occurrences; "
+        f"got {big.count('t-')} in violation: {big}"
+    )
+
+
+def test_ss_check_cross_item_unique_screenshots_ok(tmp_path):
+    """When every chrome item's screenshots are byte-unique, no
+    violation. Confirms the lint doesn't false-positive on
+    legitimate runs where every state-change captures a different
+    image."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    for name, byte in [("a.png", b"a"), ("b.png", b"b"), ("c.png", b"c")]:
+        (ss_dir / name).write_bytes(b"\x89PNG\r\n" + byte * 100000)
+    plan_items = [
+        {"id": "t-1", "tool": "chrome-devtools", "what": "form renders",
+         "how": "navigate", "category": "frontend", "risk": "low",
+         "depends_on": []},
+        {"id": "t-2", "tool": "chrome-devtools",
+         "what": "HAPPY: create record — save succeeds",
+         "how": "fill+save", "category": "api", "risk": "high",
+         "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-1", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "a.png", "label": "f", "focus": "fl"}]},
+        {"id": "t-2", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "b.png", "label": "before", "focus": "form"},
+             {"path": "c.png", "label": "after", "focus": "toast"},
+         ]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_legacy_screenshot_ref_alone_rejected_even_for_render_check(tmp_path):
+    """v0.7.5: a render-check item whose ONLY screenshot evidence is
+    the legacy `screenshot_ref` singular field is rejected, even
+    though the count (1) satisfies render-check's minimum. The
+    review-readability of label+focus is mandatory."""
+    plan, results = _make_plan_results(
+        [{"id": "t-r", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-r", "status": "pass", "evidence": "ok",
+          "screenshot_ref": "x.png"}],
+    )
+    violations = ss_check(plan, results)
+    assert len(violations) == 1
+    assert "t-r" in violations[0]
+    assert "screenshot_ref" in violations[0]
+
+
+def test_ss_check_new_shape_one_entry_ok_for_render_check(tmp_path):
+    """Render-check with the new shape (one entry containing path+
+    label+focus) is fine. v0.7.5 doesn't add count requirements
+    beyond v0.6.5 — it just rejects the legacy bare-path shape."""
+    plan, results = _make_plan_results(
+        [{"id": "t-r", "tool": "chrome-devtools", "what": "form renders",
+          "how": "navigate", "category": "frontend", "risk": "low",
+          "depends_on": []}],
+        [{"id": "t-r", "status": "pass", "evidence": "ok",
+          "screenshots": [{"path": "x.png", "label": "rendered",
+                           "focus": "the new section is visible at top"}]}],
+    )
     assert ss_check(plan, results) == []
 
 
