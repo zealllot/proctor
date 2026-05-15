@@ -39,6 +39,7 @@ fire on the exact phrasings the planner has produced in practice.
 from __future__ import annotations
 
 import re
+from typing import Iterable
 
 # Phrases that signal a success outcome. Tense-agnostic (saves /
 # saved / saving all match) because the planner uses all of them.
@@ -111,14 +112,294 @@ _RELOAD_PHRASES = [
 _RE_RELOAD = re.compile("|".join(_RELOAD_PHRASES), re.IGNORECASE)
 
 
-def check(plan: dict) -> list[str]:
+# Stopwords filtered out of token-overlap comparisons (Fix C1). Kept
+# small so project-specific noun phrases like "DigitalContent",
+# "DCT", "tags" survive — those carry signal that "the" / "is" do not.
+_STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "to", "for", "in", "on", "at",
+    "by", "with", "from", "is", "are", "was", "were", "be", "been",
+    "being", "this", "that", "these", "those", "it", "its", "as",
+    "but", "if", "then", "than", "so", "do", "does", "did", "have",
+    "has", "had", "can", "could", "should", "would", "will", "shall",
+    "may", "might", "must", "not", "no", "yes", "any", "all", "some",
+    "i", "we", "you", "they", "he", "she", "them", "us", "me", "my",
+    "your", "our", "their", "his", "her",
+    # Common test-prose verbs that aren't content tokens
+    "verify", "check", "assert", "ensure", "make", "test", "tests",
+    "tested", "testing", "case", "cases",
+}
+
+# Token regex used by Fix C1 (token overlap) and Fix C2 (new symbol
+# detection). Permits alphanumerics + underscore — matches identifiers
+# and CamelCase phrases when used to extract words from prose text we
+# lowercase first.
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
+
+# Criterion-style lines inside a linked-content excerpt or PR body.
+# Conservative on purpose — only lines whose intent is clearly an
+# acceptance criterion get extracted. Matches:
+#   - markdown task list bullets: "- [ ] X" / "* [ ] X"
+#   - sentences starting with "must" / "should" / "verify that" /
+#     "the system shall" / "X is required"
+_CRITERION_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"[-*]\s*\[[ x]\]\s+(?P<bullet>.+)"
+    r"|(?P<must>(?:must|should|verify that|the system shall)\b.+)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Symbol-extraction regexes for Fix C2 (new-symbol-not-exercised).
+# Each pattern walks added lines (`+...`) of a unified diff and pulls
+# the new top-level symbol name. Conservative — over-extraction would
+# fire false coverage warnings; under-extraction silently lets bugs
+# through. The recall target: any user-callable surface added by the
+# diff (a function/class/method/constant the rest of the codebase can
+# reference by name). Local variables / unexported helpers are out of
+# scope.
+_SYMBOL_PATTERNS = [
+    # Go
+    re.compile(r"^\+\s*func\s+(?:\([^)]*\)\s+)?([A-Z][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\+\s*type\s+([A-Z][A-Za-z0-9_]*)\s+"),
+    # Python — top-level (no leading indent) only, exclude `_name`
+    re.compile(r"^\+(?!\s)def\s+([A-Za-z][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\+(?!\s)class\s+([A-Za-z][A-Za-z0-9_]*)\s*[(:]"),
+    # JS/TS exports
+    re.compile(r"^\+\s*export\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\+\s*export\s+class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<{]"),
+    re.compile(r"^\+\s*export\s+const\s+([A-Za-z_][A-Za-z0-9_]*)\s*="),
+    re.compile(r"^\+\s*export\s+default\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    # Ruby
+    re.compile(r"^\+\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\b"),
+]
+
+
+def _tokenize(text: str) -> set[str]:
+    """Extract content tokens from prose. Lowercases, filters stopwords,
+    drops tokens with fewer than 3 chars (one-letter / "ok" / "id"
+    noise). Returns a set so overlap math is symmetric."""
+    if not text:
+        return set()
+    return {
+        t.lower()
+        for t in _TOKEN_RE.findall(text)
+        if len(t) >= 3 and t.lower() not in _STOPWORDS
+    }
+
+
+def _extract_criteria_from_text(text: str) -> list[str]:
+    """Extract bullet/must-style criteria lines from prose. Each
+    returned string is the bullet's content (without the leading
+    `- [ ]` or `must ` marker). Used for both PR body
+    requirement_hints and linked-content excerpts."""
+    if not text:
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        m = _CRITERION_LINE_RE.match(line)
+        if not m:
+            continue
+        body = m.group("bullet") or m.group("must")
+        if body and body.strip():
+            out.append(body.strip())
+    return out
+
+
+def _gather_criteria(change_map: dict | None) -> list[tuple[str, str]]:
+    """Return (source_label, criterion_text) tuples from the change
+    map's requirement_hints + linked_content + comments. Used by Fix
+    C1 to compute coverage."""
+    if not change_map:
+        return []
+    ctx = change_map.get("pr_context") or {}
+    out: list[tuple[str, str]] = []
+    for hint in (ctx.get("requirement_hints") or []):
+        if isinstance(hint, str) and hint.strip():
+            out.append(("pr-body", hint.strip()))
+    for lc in (ctx.get("linked_content") or []):
+        if not isinstance(lc, dict):
+            continue
+        if not lc.get("fetched"):
+            continue
+        excerpt = lc.get("excerpt") or ""
+        src = lc.get("source_type") or "linked"
+        for crit in _extract_criteria_from_text(excerpt):
+            out.append((f"linked:{src}", crit))
+    for c in (ctx.get("comments") or []):
+        if not isinstance(c, dict):
+            continue
+        body = c.get("body") or ""
+        for crit in _extract_criteria_from_text(body):
+            out.append(("pr-comment", crit))
+    return out
+
+
+def _excused_inputs(plan: dict) -> set[str]:
+    """Return the set of lowercased criterion / symbol strings the
+    planner's coverage audit explicitly listed in `gaps[]`. Fix C1
+    and C2 skip flagging these so the lint doesn't double-warn the
+    reviewer about a gap the planner already surfaced."""
+    audit = (plan or {}).get("planner_coverage_audit") or {}
+    gaps = audit.get("gaps") if isinstance(audit, dict) else None
+    if not isinstance(gaps, list):
+        return set()
+    out: set[str] = set()
+    for g in gaps:
+        if not isinstance(g, dict):
+            continue
+        for key in ("input", "criterion", "symbol"):
+            v = g.get(key)
+            if isinstance(v, str) and v.strip():
+                out.add(v.strip().lower())
+    return out
+
+
+def _extract_new_symbols(diff_text: str) -> list[str]:
+    """Walk added lines of a unified diff and return new top-level
+    symbol names. De-duplicates, preserves first-seen order."""
+    if not diff_text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in diff_text.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        for pat in _SYMBOL_PATTERNS:
+            m = pat.match(line)
+            if not m:
+                continue
+            name = m.group(1)
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+            break
+    return out
+
+
+def _item_corpus(item: dict) -> str:
+    """Combine an item's prose fields into a single search corpus for
+    coverage / symbol-mention checks. Includes what + how + rationale
+    + preconditions so the analyst's intent in any of those fields
+    counts as coverage."""
+    parts: list[str] = []
+    for k in ("what", "how", "rationale", "preconditions"):
+        v = item.get(k)
+        if isinstance(v, str):
+            parts.append(v)
+    return "\n".join(parts)
+
+
+def _pr_body_coverage_warnings(
+    plan: dict, change_map: dict | None
+) -> list[str]:
+    """Fix C1: emit a warning per PR-body / linked-content / comment
+    criterion that no plan item covers. Two thresholds — coverage
+    counts when an item's corpus overlaps with the criterion's tokens
+    on EITHER:
+      - ≥ 50% of the criterion's content tokens, OR
+      - ≥ 3 named tokens
+    (both fire together when present; either alone qualifies). Items
+    with `tool=skip` count as coverage — the planner explicitly
+    surfaced the criterion as a gap, which is the lint's whole point.
+    """
+    criteria = _gather_criteria(change_map)
+    if not criteria:
+        return []
+    items = plan.get("items") or []
+    excused = _excused_inputs(plan)
+    warnings: list[str] = []
+    for source, criterion in criteria:
+        if criterion.lower() in excused:
+            continue
+        crit_tokens = _tokenize(criterion)
+        if not crit_tokens:
+            continue
+        covered_by: list[str] = []
+        for it in items:
+            item_tokens = _tokenize(_item_corpus(it))
+            if not item_tokens:
+                continue
+            overlap = crit_tokens & item_tokens
+            half_cover = len(overlap) >= max(1, len(crit_tokens) // 2)
+            named_cover = len(overlap) >= 3
+            if half_cover or named_cover:
+                covered_by.append(it.get("id", "?"))
+        if not covered_by:
+            warnings.append(
+                f"pr-body-coverage: criterion {criterion!r} (source: "
+                f"{source}) is not covered by any plan item. Add an "
+                f"item whose what:/how:/rationale: contains the "
+                f"criterion's key terms, or list it in "
+                f"planner_coverage_audit.gaps[] with a reason."
+            )
+    return warnings
+
+
+def _new_symbol_not_exercised_warnings(
+    plan: dict, diff_text: str | None
+) -> list[str]:
+    """Fix C2: emit a warning per new diff symbol that only
+    `lint-only` items mention. Items with `tool != "lint-only"` that
+    mention the symbol name in what/how/rationale count as
+    exercising. Items whose tool is `skip` are NOT counted as
+    exercising — they're explicit gaps."""
+    if not diff_text:
+        return []
+    symbols = _extract_new_symbols(diff_text)
+    if not symbols:
+        return []
+    items = plan.get("items") or []
+    excused = _excused_inputs(plan)
+    warnings: list[str] = []
+    for sym in symbols:
+        if sym.lower() in excused:
+            continue
+        # Word-boundary match, case-sensitive — symbols are
+        # identifiers, casing matters.
+        sym_re = re.compile(rf"\b{re.escape(sym)}\b")
+        lint_only_hits: list[str] = []
+        runtime_hits: list[str] = []
+        for it in items:
+            if not sym_re.search(_item_corpus(it)):
+                continue
+            tool = it.get("tool")
+            if tool == "lint-only":
+                lint_only_hits.append(it.get("id", "?"))
+            elif tool in ("chrome-devtools", "bash", "curl"):
+                runtime_hits.append(it.get("id", "?"))
+        if runtime_hits:
+            continue  # exercised
+        if lint_only_hits:
+            warnings.append(
+                f"new-symbol-not-exercised: new symbol {sym!r} is only "
+                f"mentioned by lint-only items ({', '.join(lint_only_hits)}). "
+                f"Add a runtime item (chrome-devtools / bash / curl) "
+                f"that actually exercises {sym!r}, or list it in "
+                f"planner_coverage_audit.gaps[] with a reason."
+            )
+    return warnings
+
+
+def check(
+    plan: dict,
+    change_map: dict | None = None,
+    diff_text: str | None = None,
+) -> list[str]:
     """Return a list of warning strings. Empty list = clean plan.
 
     Warnings are formatted ``<item_id>: <message>`` so the orchestrator
     can print them as a bullet list. Order: combined-happy-negative
     warnings first, missing-round-trip warnings second, plan-level
     coverage warnings last, all sorted by item id (or empty id for
-    plan-level) for stable output."""
+    plan-level) for stable output.
+
+    v0.7.6+: when ``change_map`` is provided, the pr-body-coverage
+    check fires for criteria from pr_context.requirement_hints /
+    linked_content / comments that no plan item covers. When
+    ``diff_text`` is provided, new-symbol-not-exercised fires for
+    diff symbols only lint-checked, never runtime-exercised. Both
+    inputs are optional — when absent, the v0.7.5 behavior is
+    preserved (backward compat)."""
     items = plan.get("items") or []
     combined_warnings: list[str] = []
     missing_roundtrip_warnings: list[str] = []
@@ -228,10 +509,24 @@ def check(plan: dict) -> list[str]:
             f"the report, not silently absent from the plan."
         )
 
+    # v0.7.6 new checks — independent of the v0.7.5 plan-internal
+    # ones above. Each is no-op when its input is absent (backward
+    # compat).
+    pr_body_warnings = _pr_body_coverage_warnings(plan, change_map)
+    new_symbol_warnings = _new_symbol_not_exercised_warnings(plan, diff_text)
+
     combined_warnings.sort()
     missing_roundtrip_warnings.sort()
     coverage_warnings.sort()
-    return combined_warnings + missing_roundtrip_warnings + coverage_warnings
+    pr_body_warnings.sort()
+    new_symbol_warnings.sort()
+    return (
+        combined_warnings
+        + missing_roundtrip_warnings
+        + coverage_warnings
+        + pr_body_warnings
+        + new_symbol_warnings
+    )
 
 
 def _main() -> int:
@@ -251,6 +546,7 @@ def _main() -> int:
     import argparse
     import json
     import sys
+    from pathlib import Path
 
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -258,10 +554,47 @@ def _main() -> int:
         action="store_true",
         help="Exit 1 if any warnings fired (default is exit 0 always).",
     )
+    p.add_argument(
+        "--change-map",
+        default=None,
+        help=("Optional path to change-map.json. When provided, the "
+              "pr-body-coverage check fires for criteria the plan "
+              "doesn't cover."),
+    )
+    p.add_argument(
+        "--diff",
+        default=None,
+        help=("Optional path to diff.patch (unified diff). When "
+              "provided, the new-symbol-not-exercised check fires for "
+              "new top-level symbols only lint-checked by the plan."),
+    )
     args = p.parse_args()
 
     plan = json.load(sys.stdin)
-    warnings = check(plan)
+    change_map = None
+    if args.change_map:
+        cm_path = Path(args.change_map)
+        if cm_path.exists():
+            try:
+                change_map = json.loads(cm_path.read_text())
+            except json.JSONDecodeError as e:
+                sys.stderr.write(
+                    f"warning: --change-map at {args.change_map} could "
+                    f"not be parsed ({e}); skipping pr-body-coverage "
+                    f"check.\n"
+                )
+    diff_text = None
+    if args.diff:
+        diff_path = Path(args.diff)
+        if diff_path.exists():
+            try:
+                diff_text = diff_path.read_text()
+            except OSError as e:
+                sys.stderr.write(
+                    f"warning: --diff at {args.diff} could not be read "
+                    f"({e}); skipping new-symbol-not-exercised check.\n"
+                )
+    warnings = check(plan, change_map=change_map, diff_text=diff_text)
     for w in warnings:
         sys.stdout.write(w + "\n")
     if args.strict and warnings:

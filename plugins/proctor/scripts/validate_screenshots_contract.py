@@ -321,44 +321,28 @@ def _resolve_screenshot_path(
     return None
 
 
-def _check_identical_screenshots(
+def _collect_md5_index(
     plan: dict,
     results: dict,
-    run_dir: Path | None,
-) -> list[str]:
-    """Flag screenshots across any chrome-devtools items in a run that
-    share the same MD5 (and are above the byte-size floor).
-
-    v0.6.8 originally checked this for negative items only. v0.7.5
-    extends to ALL chrome items + all screenshot entries (not just
-    the primary). The v0.7.4 PR-1126 run shipped 11 screenshot files
-    across 5 happy-save / round-trip / render-check items where 7
-    shared the same MD5 — the viewport-top capture taken before
-    scrollIntoView completed for any of the asserted fields. The
-    label/focus fields claimed different states; the bytes proved
-    the agent took the same screenshot multiple times.
-
-    Returns a list of violation strings — one per cluster of duplicates.
+    run_dir: Path,
+) -> dict[str, list[tuple[str, int, Path]]]:
+    """Walk every chrome-devtools item's screenshots and return a map
+    md5 → list of (item_id, screenshot_idx, path) tuples. Files below
+    the byte-size floor are skipped (legitimate tiny stubs shouldn't
+    trip the check). Used by both within-item and cross-item lints.
     """
-    if run_dir is None:
-        return []
     by_id_results = {it["id"]: it for it in results.get("items", [])
                      if isinstance(it, dict) and "id" in it}
-    chrome_item_ids = {
+    chrome_item_ids = [
         item["id"] for item in plan.get("items", [])
         if isinstance(item, dict) and "id" in item
         and item.get("tool") == "chrome-devtools"
-    }
-    # Map MD5 -> list of (item_id, screenshot_idx, path) tuples for
-    # every screenshot referenced by a chrome item whose file exists
-    # and is above the byte-size floor.
+    ]
     by_md5: dict[str, list[tuple[str, int, Path]]] = {}
     for item_id in chrome_item_ids:
         result = by_id_results.get(item_id)
         if result is None or result.get("status") not in ("pass", "fail"):
             continue
-        # Walk every screenshot entry (not just primary). For legacy
-        # results emitting screenshot_ref singular, treat it as index 0.
         refs: list[tuple[int, str]] = []
         ss = result.get("screenshots")
         if isinstance(ss, list):
@@ -383,12 +367,120 @@ def _check_identical_screenshots(
             if md5 is None:
                 continue
             by_md5.setdefault(md5, []).append((item_id, idx, path))
+    return by_md5
+
+
+def _check_within_item_identical_md5(
+    plan: dict,
+    results: dict,
+    run_dir: Path | None,
+) -> list[str]:
+    """v0.7.6 HARD violation: a single item's `screenshots[]` contains
+    2+ entries with the same MD5. The before/after pair claimed by
+    label/focus is actually before/before — the test captured the
+    same image twice and labeled them differently.
+
+    This is a hard violation because for a single item, multiple
+    identical screenshots can never represent multiple distinct
+    asserted states. Cross-item duplication (separate function below)
+    can be legitimate (a render-check + a post-empty-save can both
+    show the same blank form).
+    """
+    if run_dir is None:
+        return []
+    by_id_results = {it["id"]: it for it in results.get("items", [])
+                     if isinstance(it, dict) and "id" in it}
+    violations: list[str] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict) or "id" not in item:
+            continue
+        if item.get("tool") != "chrome-devtools":
+            continue
+        result = by_id_results.get(item["id"])
+        if result is None or result.get("status") not in ("pass", "fail"):
+            continue
+        ss = result.get("screenshots")
+        if not isinstance(ss, list) or len(ss) < 2:
+            continue
+        # Resolve each entry to (idx, md5).
+        md5_by_idx: list[tuple[int, str]] = []
+        for idx, s in enumerate(ss):
+            if not isinstance(s, dict):
+                continue
+            p = s.get("path")
+            if not (isinstance(p, str) and p.strip()):
+                continue
+            path = _resolve_screenshot_path(run_dir, p)
+            if path is None:
+                continue
+            try:
+                if path.stat().st_size < _IDENTICAL_MIN_BYTES:
+                    continue
+            except OSError:
+                continue
+            md5 = _md5_of(path)
+            if md5 is None:
+                continue
+            md5_by_idx.append((idx, md5))
+        # Cluster by md5; any cluster size >= 2 within this item is a
+        # hard violation.
+        clusters: dict[str, list[int]] = {}
+        for idx, md5 in md5_by_idx:
+            clusters.setdefault(md5, []).append(idx)
+        for md5, idxs in clusters.items():
+            if len(idxs) < 2:
+                continue
+            joined = ", ".join(f"[{i}]" for i in idxs)
+            violations.append(
+                f"{item['id']}: screenshots {joined} within the same "
+                f"item share MD5 {md5}. The before/after pair claimed "
+                f"by your labels is actually before/before — the "
+                f"executor took the same screenshot twice. Re-shoot "
+                f"the AFTER state at the moment the asserted change "
+                f"is on-screen, using element-scoped take_screenshot "
+                f"(uid parameter from take_snapshot)."
+            )
+    return violations
+
+
+# Cross-item cluster size that escalates from "advisory" to a WARN
+# violation. v0.7.4 PR-#1126 had a 7-share cluster — the audit pattern
+# this exists to surface. Clusters of 2 or 3 are common when distinct
+# items legitimately assert on the same visual state (render-check +
+# after-empty-save + after-reload-empty all look like "form with empty
+# inputs"), so the noise floor is set at 4.
+_CROSS_ITEM_WARN_THRESHOLD = 4
+
+
+def _check_cross_item_md5_cluster(
+    plan: dict,
+    results: dict,
+    run_dir: Path | None,
+) -> list[str]:
+    """v0.7.6 WARN-level violation (advisory, NOT pipeline-aborting):
+    when a cluster of ``_CROSS_ITEM_WARN_THRESHOLD`` or more
+    screenshots across DIFFERENT chrome items share the same MD5,
+    surface it. Clusters of size 2-3 across different items are
+    common in legitimate runs (multiple items naturally agree on
+    "form with empty inputs") so they don't fire.
+
+    Each violation is prefixed with `WARN ` so the orchestrator /
+    proctor_run.py can distinguish from hard violations and decide
+    whether to block the pipeline. The format keeps the cluster
+    listing identical to v0.7.5 so reviewers see the same evidence.
+    """
+    if run_dir is None:
+        return []
+    by_md5 = _collect_md5_index(plan, results, run_dir)
     violations: list[str] = []
     for md5, hits in by_md5.items():
-        if len(hits) < 2:
+        # Restrict to cross-item duplication — within-item is handled
+        # by the within-item check above (HARD).
+        unique_items = {h[0] for h in hits}
+        if len(unique_items) < 2:
             continue
-        # Cluster of byte-identical screenshots — single violation
-        # listing every member so the executor can re-shoot all of them.
+        if len(hits) < _CROSS_ITEM_WARN_THRESHOLD:
+            continue
         members = ", ".join(f"{h[0]}[{h[1]}]" for h in hits)
         first_path = hits[0][2]
         try:
@@ -396,16 +488,33 @@ def _check_identical_screenshots(
         except OSError:
             size = -1
         violations.append(
-            f"{members}: {len(hits)} screenshots share MD5 {md5} "
-            f"({size} bytes). This is the v0.7.4 pattern — the "
-            f"executor took the same viewport-top screenshot "
-            f"multiple times instead of capturing each asserted "
-            f"state. Re-shoot using element-scoped take_screenshot "
-            f"(uid parameter from take_snapshot) after scrollIntoView "
-            f"of the asserted field. See agents/pr-test-executor.md "
-            f"v0.7.5 'Pre-screenshot requirements' section."
+            f"WARN {members}: {len(hits)} screenshots across "
+            f"{len(unique_items)} chrome items share MD5 {md5} "
+            f"({size} bytes). This matches the v0.7.4 PR-#1126 "
+            f"viewport-top-collision pattern; the executor likely "
+            f"took the same screenshot for multiple asserted states "
+            f"instead of capturing each one individually. Inspect "
+            f"the screenshots; re-shoot any that don't show distinct "
+            f"asserted content using element-scoped take_screenshot "
+            f"(uid parameter from take_snapshot)."
         )
     return violations
+
+
+def _check_identical_screenshots(
+    plan: dict,
+    results: dict,
+    run_dir: Path | None,
+) -> list[str]:
+    """v0.7.6 facade — combines within-item HARD violations and
+    cross-item WARN violations. Kept as a single entry point so
+    proctor_run.py's existing call site doesn't need to change; the
+    WARN-prefixed entries are still pipeline-aborting today but the
+    prefix means a future proctor_run.py upgrade can distinguish."""
+    return (
+        _check_within_item_identical_md5(plan, results, run_dir)
+        + _check_cross_item_md5_cluster(plan, results, run_dir)
+    )
 
 
 def _check_legacy_screenshot_ref(plan: dict, results: dict) -> list[str]:

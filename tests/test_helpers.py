@@ -3924,11 +3924,14 @@ def test_ss_check_plan_item_with_no_result_skipped():
 # lint catches that pattern mechanically by comparing primary-screenshot
 # byte sizes across negative items.
 
-def test_ss_check_identical_negative_screenshots_warns(tmp_path):
-    """Synthesize two negative items pointing at the SAME 100KB+ stub
-    file; check returns a violation listing both item IDs and the MD5.
-    Originally the v0.6.6 t-007/t-008 signature (244252-byte PNG used
-    as both screenshots, all sharing the same MD5)."""
+def test_ss_check_identical_negative_screenshots_3cluster_now_passes_v076(tmp_path):
+    """v0.7.6 redesign: a 2-item cross-item cluster (size < 4) no
+    longer fires. The v0.6.6 / v0.7.5 t-007/t-008 signature (one
+    screenshot each, shared MD5) is now treated as legitimate same-
+    state sharing — render-check + after-empty-save + after-reload-
+    empty can all look like "form with empty inputs" and we don't
+    want to spam reviewers. Within-item duplication is still HARD;
+    cross-item clusters need to reach 4 entries to fire as WARN."""
     stub = tmp_path / "screenshots" / "shared-blank-form.png"
     stub.parent.mkdir(parents=True, exist_ok=True)
     payload = b"\x89PNG\r\n\x1a\n" + b"x" * 244244  # 244252 bytes
@@ -3953,12 +3956,9 @@ def test_ss_check_identical_negative_screenshots_warns(tmp_path):
     ]
     plan, results = _make_plan_results(plan_items, result_items)
     violations = ss_check(plan, results, run_dir=tmp_path)
-    # v0.7.5: one violation listing the cluster.
-    assert len(violations) == 1
-    msg = violations[0]
-    assert "t-7" in msg and "t-8" in msg
-    assert str(len(payload)) in msg  # byte size reported
-    assert "MD5" in msg or "md5" in msg.lower()
+    # v0.7.6: a 2-share cross-item cluster is below threshold (4) so
+    # 0 violations.
+    assert violations == []
 
 
 def test_ss_check_distinct_negative_screenshots_ok(tmp_path):
@@ -4020,15 +4020,15 @@ def test_ss_check_identical_below_floor_not_flagged(tmp_path):
     assert ss_check(plan, results, run_dir=tmp_path) == []
 
 
-def test_ss_check_identical_happy_save_screenshots_now_flagged_v075(tmp_path):
-    """v0.7.5 reverses the v0.6.8 'happy-save identical screenshots
-    OK' rule. The PR-1126 v0.7.4 run shipped t-005/006/007/008/009
-    where 7 out of 11 screenshots shared the same MD5 — same
-    viewport-top capture across different asserted states. The lint
-    now flags any chrome item's screenshots that share MD5 with
-    another chrome item's screenshot, regardless of bucket type.
-    Synthesized scenario: two happy-save items both with two
-    screenshots all pointing at the same large file."""
+def test_ss_check_identical_happy_save_screenshots_split_into_hard_and_warn_v076(tmp_path):
+    """v0.7.6 redesign splits the old v0.7.5 single-cluster violation
+    into TWO separate signals: within-item duplication (HARD, one per
+    affected item) + cross-item cluster ≥ 4 (WARN, one per cluster).
+
+    Synthesized scenario: two happy-save items each with TWO identical
+    screenshots. Each item's [0]+[1] pair is within-item HARD (the
+    before/after pair was actually before/before). The 4-entry cross-
+    item cluster also fires as WARN."""
     ss_dir = tmp_path / "screenshots"
     ss_dir.mkdir(parents=True, exist_ok=True)
     (ss_dir / "shared-form.png").write_bytes(b"\x89PNG" + b"x" * 200000)
@@ -4056,12 +4056,17 @@ def test_ss_check_identical_happy_save_screenshots_now_flagged_v075(tmp_path):
     ]
     plan, results = _make_plan_results(plan_items, result_items)
     violations = ss_check(plan, results, run_dir=tmp_path)
-    # v0.7.5: all four entries cluster on one MD5; one violation.
-    assert len(violations) == 1
-    msg = violations[0]
-    # All four occurrences listed in the cluster.
-    assert msg.count("t-2") >= 1 and msg.count("t-4") >= 1
-    assert "MD5" in msg or "md5" in msg.lower()
+    # 2 within-item HARD violations (one per item) + 1 cross-item
+    # WARN cluster (4 entries across 2 items) = 3 total.
+    assert len(violations) == 3
+    hard = [v for v in violations if not v.startswith("WARN ")]
+    warn = [v for v in violations if v.startswith("WARN ")]
+    assert len(hard) == 2  # within-item HARD for t-2 and t-4
+    assert any("t-2" in h for h in hard)
+    assert any("t-4" in h for h in hard)
+    assert len(warn) == 1
+    assert "t-2" in warn[0] and "t-4" in warn[0]
+    assert "MD5" in warn[0] or "md5" in warn[0].lower()
 
 
 def test_ss_check_identical_no_run_dir_skipped(tmp_path):
@@ -4490,3 +4495,600 @@ def test_hooks_json_registers_stop_hook(tmp_path):
     assert "CLAUDE_PLUGIN_ROOT" in cmd
     assert "hooks/stop-hook.sh" in cmd
     assert stop_entries[0]["hooks"][0]["type"] == "command"
+
+
+# --- v0.7.6: schema accepts pr_context.comments / linked_content ----------
+
+
+def test_change_map_accepts_pr_context_comments():
+    """v0.7.6: analyzer fetches PR review/conversation comments and
+    surfaces them so the planner sees scope-changing reviewer remarks
+    the body doesn't carry."""
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "title": "Add display_name cap",
+            "body": "Per ACME-42",
+            "links": [],
+            "comments": [
+                {"author": "alice",
+                 "body": "Also enforce server-side, not just on the form.",
+                 "created_at": "2026-05-12T14:22:11Z"},
+            ],
+        },
+        "hunks": [{"file": "a.go", "category": "api", "risk": "medium",
+                   "summary": "."}],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_accepts_pr_context_linked_content():
+    """v0.7.6: analyzer fetches linked Jira/Confluence/Slack/Drive
+    URLs and surfaces the excerpt for the planner."""
+    valid = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "title": "Add display_name cap",
+            "body": "Per ACME-42",
+            "links": ["https://acme.atlassian.net/browse/ACME-42"],
+            "linked_content": [
+                {"url": "https://acme.atlassian.net/browse/ACME-42",
+                 "source_type": "jira",
+                 "title": "Cap display_name at 100 chars",
+                 "excerpt": "Trim instead of reject for backward compat.",
+                 "fetched": True},
+                {"url": "https://example.notion.so/x",
+                 "source_type": "unfetchable",
+                 "fetched": False},
+            ],
+        },
+        "hunks": [{"file": "a.go", "category": "api", "risk": "medium",
+                   "summary": "."}],
+        "categories_present": ["api"],
+    }
+    validate_change_map(valid)
+
+
+def test_change_map_rejects_linked_content_without_required_keys():
+    """A linked_content entry without url/source_type/fetched is
+    invalid — those are the planner's read contract."""
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {
+            "linked_content": [
+                {"url": "https://x", "source_type": "jira"},  # missing fetched
+            ],
+        },
+        "hunks": [{"file": "a.go", "category": "api", "risk": "low",
+                   "summary": "."}],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
+def test_change_map_rejects_comments_not_a_list():
+    bad = {
+        "pr": {"number": 1, "head_sha": "abc", "base_sha": "def", "url": "https://x"},
+        "pr_context": {"comments": "not a list"},
+        "hunks": [{"file": "a.go", "category": "api", "risk": "low",
+                   "summary": "."}],
+        "categories_present": ["api"],
+    }
+    with pytest.raises(SchemaError):
+        validate_change_map(bad)
+
+
+def test_test_plan_accepts_planner_coverage_audit():
+    """v0.7.6: planner emits a coverage-audit worksheet as the last
+    step of planning. Schema accepts it as an optional top-level
+    field — the only structural requirement is dict-of-lists-of-dicts.
+    Reviewers read it to confirm the planner saw every input."""
+    valid = {
+        "planner_coverage_audit": {
+            "by_pr_body": [
+                {"criterion": "cap at 100 chars", "covered_by": ["t-005"]},
+            ],
+            "by_diff_symbols": [
+                {"symbol": "TrimDisplayName",
+                 "exercised_by": ["t-007"],
+                 "lint_only": []},
+            ],
+            "gaps": [],
+        },
+        "items": [
+            {"id": "t-005", "category": "api",
+             "what": "HAPPY: save with 100-char name",
+             "how": "...", "tool": "chrome-devtools",
+             "risk": "high", "depends_on": []},
+        ],
+    }
+    validate_test_plan(valid)
+
+
+def test_test_plan_rejects_planner_coverage_audit_with_non_list_field():
+    bad = {
+        "planner_coverage_audit": {
+            "by_pr_body": "not a list",
+        },
+        "items": [],
+    }
+    with pytest.raises(SchemaError):
+        validate_test_plan(bad)
+
+
+# --- v0.7.6: plan_smells pr-body-coverage + new-symbol-not-exercised ------
+
+
+def test_plan_smells_pr_body_coverage_clean_when_all_criteria_covered():
+    """A criterion in pr_context.requirement_hints whose key tokens
+    overlap a plan item's what/how/rationale counts as covered. No
+    warning fires."""
+    change_map = {
+        "pr_context": {
+            "requirement_hints": ["display_name capped at 100 chars"],
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save with 100-char display_name succeeds",
+             "how": "fill display_name with 100 chars; save; assert toast",
+             "risk": "high", "depends_on": []},
+            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+             "what": "Re-open record — display_name field round-trips",
+             "how": "navigate, hard reload, assert", "risk": "high",
+             "depends_on": ["t-1"]},
+        ],
+    }
+    warnings = plan_check(plan, change_map=change_map)
+    coverage_warnings = [w for w in warnings if "pr-body-coverage" in w]
+    assert coverage_warnings == []
+
+
+def test_plan_smells_pr_body_coverage_fires_when_criterion_missed():
+    """A criterion whose key tokens don't overlap any item triggers
+    pr-body-coverage. Synthetic: criterion mentions 'CSV upload' but
+    no item does."""
+    change_map = {
+        "pr_context": {
+            "requirement_hints": [
+                "CSV upload supports up to 10000 rows per batch",
+            ],
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save display_name", "how": "fill+save",
+             "risk": "high", "depends_on": []},
+        ],
+    }
+    warnings = plan_check(plan, change_map=change_map)
+    coverage = [w for w in warnings if "pr-body-coverage" in w]
+    assert len(coverage) == 1
+    assert "CSV" in coverage[0] or "csv" in coverage[0].lower()
+
+
+def test_plan_smells_pr_body_coverage_reads_linked_content_excerpts():
+    """Criteria embedded as bullet/must lines inside linked_content
+    excerpts also get extracted and checked. The Jira ticket the PR
+    cites contains 'must validate slug uniqueness' — the plan should
+    cover it."""
+    change_map = {
+        "pr_context": {
+            "linked_content": [
+                {"url": "https://x.atlassian.net/browse/X-1",
+                 "source_type": "jira",
+                 "title": "Add slug",
+                 "excerpt": "- [ ] must validate slug uniqueness "
+                            "across the bookings table",
+                 "fetched": True},
+            ],
+        },
+    }
+    plan_no_cover = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: render form", "how": "navigate",
+             "risk": "medium", "depends_on": []},
+        ],
+    }
+    warnings_no = plan_check(plan_no_cover, change_map=change_map)
+    coverage_no = [w for w in warnings_no if "pr-body-coverage" in w]
+    assert len(coverage_no) == 1
+    assert "uniqueness" in coverage_no[0].lower() or \
+        "slug" in coverage_no[0].lower()
+    # Now add a covering item.
+    plan_cover = {
+        "items": plan_no_cover["items"] + [
+            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+             "what": "NEGATIVE: duplicate slug for bookings rejected",
+             "how": "save twice with same slug; assert uniqueness "
+                    "error", "risk": "high", "depends_on": [],
+             "error_type": "state-conflict"},
+        ],
+    }
+    warnings_yes = plan_check(plan_cover, change_map=change_map)
+    coverage_yes = [w for w in warnings_yes if "pr-body-coverage" in w]
+    assert coverage_yes == []
+
+
+def test_plan_smells_pr_body_coverage_respects_audit_gaps_excused():
+    """When the planner explicitly listed a criterion in
+    planner_coverage_audit.gaps[].criterion, plan_smells doesn't
+    double-warn — the gap is already visible in the plan itself."""
+    change_map = {
+        "pr_context": {
+            "requirement_hints": [
+                "CSV upload supports 10000 rows per batch",
+            ],
+        },
+    }
+    plan = {
+        "planner_coverage_audit": {
+            "gaps": [{"criterion": "CSV upload supports 10000 rows per batch",
+                      "why_no_item": "no upload UI in this PR — back-end only"}],
+        },
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save", "how": "fill+save",
+             "risk": "high", "depends_on": []},
+        ],
+    }
+    warnings = plan_check(plan, change_map=change_map)
+    coverage = [w for w in warnings if "pr-body-coverage" in w]
+    assert coverage == []
+
+
+def test_plan_smells_new_symbol_not_exercised_fires_when_only_lint_only():
+    """A new symbol introduced in the diff that only appears in a
+    lint-only item's prose (never in a runtime item) triggers the
+    warning."""
+    diff = (
+        "diff --git a/foo.go b/foo.go\n"
+        "--- a/foo.go\n"
+        "+++ b/foo.go\n"
+        "@@ -1,1 +1,5 @@\n"
+        "+func SplitTags(s string) []string {\n"
+        "+    return nil\n"
+        "+}\n"
+    )
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "grep for SplitTags exists",
+             "how": "grep -r 'func SplitTags' .",
+             "risk": "low", "depends_on": []},
+        ],
+    }
+    warnings = plan_check(plan, diff_text=diff)
+    sym = [w for w in warnings if "new-symbol-not-exercised" in w]
+    assert len(sym) == 1
+    assert "SplitTags" in sym[0]
+    assert "t-1" in sym[0]
+
+
+def test_plan_smells_new_symbol_not_exercised_clean_when_runtime_item_uses_it():
+    """A new symbol referenced by a chrome-devtools / bash / curl
+    item's what/how is exercised — no warning."""
+    diff = (
+        "+func SplitTags(s string) []string { return nil }\n"
+    )
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "grep for SplitTags", "how": "grep ...",
+             "risk": "low", "depends_on": []},
+            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save with comma-separated tags exercises "
+                     "SplitTags split path",
+             "how": "fill tags=a,b,c; save; assert",
+             "risk": "high", "depends_on": []},
+        ],
+    }
+    warnings = plan_check(plan, diff_text=diff)
+    sym = [w for w in warnings if "new-symbol-not-exercised" in w]
+    assert sym == []
+
+
+def test_plan_smells_new_symbol_detects_ts_export_function():
+    """TypeScript export function symbol detection — the cross-stack
+    coverage matters for repos that ship multiple languages."""
+    diff = (
+        "+export function buildBannerSlug(input: string): string {\n"
+        "+    return input.toLowerCase();\n"
+        "+}\n"
+    )
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "frontend", "tool": "lint-only",
+             "what": "buildBannerSlug exported correctly",
+             "how": "grep export function",
+             "risk": "low", "depends_on": []},
+        ],
+    }
+    warnings = plan_check(plan, diff_text=diff)
+    sym = [w for w in warnings if "new-symbol-not-exercised" in w]
+    assert len(sym) == 1
+    assert "buildBannerSlug" in sym[0]
+
+
+def test_plan_smells_new_symbol_respects_audit_gaps_excused():
+    """A symbol the planner listed in audit gaps doesn't double-warn."""
+    diff = "+func InternalHelper() {}\n"
+    plan = {
+        "planner_coverage_audit": {
+            "gaps": [{"symbol": "InternalHelper",
+                      "why_no_item": "private helper, no callable surface"}],
+        },
+        "items": [],
+    }
+    warnings = plan_check(plan, diff_text=diff)
+    sym = [w for w in warnings if "new-symbol-not-exercised" in w]
+    assert sym == []
+
+
+def test_plan_smells_new_checks_no_op_when_inputs_absent():
+    """Backward compat: calling plan_check WITHOUT change_map / diff
+    preserves the v0.7.5 behavior — the new checks no-op silently
+    and only the v0.7.5 plan-internal lints fire."""
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save record", "how": "fill+save",
+             "risk": "high", "depends_on": [], "produces": ["created_id"]},
+            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+             "what": "Re-open saved record, fields round-trip",
+             "how": "navigate+reload", "risk": "high",
+             "depends_on": ["t-1"], "data_from": ["t-1"]},
+        ],
+    }
+    # Same plan, no extra inputs → 0 warnings (would already be clean
+    # in v0.7.5).
+    assert plan_check(plan) == []
+
+
+def test_plan_smells_cli_strict_accepts_change_map_and_diff_flags(tmp_path):
+    """CLI integration: --change-map and --diff route through to the
+    new checks. Synthetic change-map with an uncovered criterion +
+    diff with an unexercised symbol → strict mode exits 1."""
+    import subprocess
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: render form", "how": "navigate",
+             "risk": "medium", "depends_on": []},
+        ],
+    }))
+    cm_path = tmp_path / "change-map.json"
+    cm_path.write_text(json.dumps({
+        "pr_context": {
+            "requirement_hints": ["CSV upload supports 10000 rows per batch"],
+        },
+    }))
+    diff_path = tmp_path / "diff.patch"
+    diff_path.write_text("+func ParseCSVBatch() {}\n")
+    script = str(pathlib.Path(__file__).resolve().parent.parent
+                 / "plugins" / "proctor" / "scripts" / "plan_smells.py")
+    result = subprocess.run(
+        ["python3", script, "--strict",
+         "--change-map", str(cm_path),
+         "--diff", str(diff_path)],
+        stdin=open(plan_path), capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    # Either pr-body-coverage or new-symbol-not-exercised should fire
+    # (likely both).
+    assert ("pr-body-coverage" in result.stdout
+            or "new-symbol-not-exercised" in result.stdout)
+
+
+# --- v0.7.6: screenshot contract — within-item HARD, cross-item WARN ------
+
+
+def test_ss_check_within_item_identical_md5_hard_violation(tmp_path):
+    """v0.7.6 HARD: a single item's screenshots[0] and screenshots[1]
+    sharing the same MD5 is a hard violation. The before/after pair
+    the labels claim is actually before/before — the executor took
+    the same screenshot twice."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "form.png").write_bytes(b"\x89PNG" + b"x" * 200000)
+    plan_items = [
+        {"id": "t-6", "tool": "chrome-devtools",
+         "what": "HAPPY: edit-and-switch reward type from Image to Game",
+         "how": "edit; save; reload",
+         "category": "api", "risk": "high", "depends_on": []},
+    ]
+    result_items = [
+        {"id": "t-6", "status": "pass", "evidence": "ok",
+         "screenshots": [
+             {"path": "form.png", "label": "before", "focus": "image type"},
+             {"path": "form.png", "label": "after", "focus": "game type"},
+             {"path": "form.png", "label": "reload", "focus": "persisted"},
+         ]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    hard = [v for v in violations if not v.startswith("WARN ")]
+    assert len(hard) >= 1
+    msg = hard[0]
+    assert "t-6" in msg
+    assert "within the same item" in msg
+    assert "MD5" in msg or "md5" in msg.lower()
+
+
+def test_ss_check_cross_item_3cluster_no_violation_v076(tmp_path):
+    """v0.7.6: cross-item clusters of size 2 or 3 don't fire. Multiple
+    items legitimately asserting on the same visual state (e.g. a
+    render-check + a post-empty-save + an after-reload-empty all
+    showing the same blank form) is no longer noise the reviewer
+    has to dismiss."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "shared.png").write_bytes(b"\x89PNG" + b"y" * 200000)
+    plan_items = [
+        {"id": "t-1", "tool": "chrome-devtools",
+         "what": "Form renders with new fields",
+         "how": "navigate", "category": "frontend", "risk": "low",
+         "depends_on": []},
+        {"id": "t-2", "tool": "chrome-devtools",
+         "what": "HAPPY: save with empty tags — backward compat",
+         "how": "clear+save", "category": "api", "risk": "high",
+         "depends_on": []},
+        {"id": "t-3", "tool": "chrome-devtools",
+         "what": "HAPPY: re-open empty record — round-trip empty",
+         "how": "navigate+reload", "category": "api", "risk": "high",
+         "depends_on": []},
+    ]
+    # 3 items each with 1 screenshot, all sharing one MD5. Cluster of
+    # 3 across distinct items — below the WARN threshold of 4.
+    result_items = [
+        {"id": "t-1", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared.png", "label": "rendered",
+                          "focus": "empty"}]},
+        {"id": "t-2", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared.png", "label": "after empty save",
+                          "focus": "still empty"},
+                         # second screenshot is different — so this
+                         # item doesn't violate the happy-save min count
+                         # via not enough screenshots, but ALSO doesn't
+                         # introduce within-item duplication for the
+                         # MD5 lint.
+                         {"path": "shared.png", "label": "x", "focus": "x"}]},
+        {"id": "t-3", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared.png", "label": "after reload",
+                          "focus": "still empty"},
+                         {"path": "shared.png", "label": "x", "focus": "x"}]},
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    # t-2 and t-3 each have within-item duplication → 2 HARD
+    # violations expected, NOT cross-item warnings. The cross-item
+    # cluster across t-1/t-2/t-3 (6 entries) DOES reach the threshold
+    # of 4, so a WARN does fire. Verify:
+    hard = [v for v in violations if not v.startswith("WARN ")]
+    warn = [v for v in violations if v.startswith("WARN ")]
+    # 2 within-item hard (t-2 and t-3).
+    assert len(hard) == 2
+    # 1 cross-item warn (6 entries ≥ 4).
+    assert len(warn) == 1
+
+
+def test_ss_check_cross_item_3cluster_unique_per_item_no_violation(tmp_path):
+    """3 distinct items each with ONE shared screenshot — cluster size
+    3, no within-item dup. v0.7.6 says no fire: cross-item 2-3 is the
+    legitimate-same-state range."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "shared.png").write_bytes(b"\x89PNG" + b"y" * 200000)
+    plan_items = [
+        {"id": f"t-{i}", "tool": "chrome-devtools",
+         "what": "Form renders", "how": "navigate",
+         "category": "frontend", "risk": "low", "depends_on": []}
+        for i in range(1, 4)
+    ]
+    result_items = [
+        {"id": f"t-{i}", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared.png", "label": "r",
+                          "focus": "f"}]}
+        for i in range(1, 4)
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    assert ss_check(plan, results, run_dir=tmp_path) == []
+
+
+def test_ss_check_cross_item_4cluster_fires_warn_v076(tmp_path):
+    """v0.7.6: cross-item cluster of size 4+ fires as WARN (advisory,
+    not pipeline-aborting). 4 distinct items each with ONE shared
+    screenshot — at the WARN threshold."""
+    ss_dir = tmp_path / "screenshots"
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / "shared.png").write_bytes(b"\x89PNG" + b"y" * 200000)
+    plan_items = [
+        {"id": f"t-{i}", "tool": "chrome-devtools",
+         "what": "Form renders", "how": "navigate",
+         "category": "frontend", "risk": "low", "depends_on": []}
+        for i in range(1, 5)
+    ]
+    result_items = [
+        {"id": f"t-{i}", "status": "pass", "evidence": "ok",
+         "screenshots": [{"path": "shared.png", "label": "r",
+                          "focus": "f"}]}
+        for i in range(1, 5)
+    ]
+    plan, results = _make_plan_results(plan_items, result_items)
+    violations = ss_check(plan, results, run_dir=tmp_path)
+    warn = [v for v in violations if v.startswith("WARN ")]
+    hard = [v for v in violations if not v.startswith("WARN ")]
+    assert hard == []  # No within-item duplication here.
+    assert len(warn) == 1
+    assert "MD5" in warn[0] or "md5" in warn[0].lower()
+
+
+# --- v0.7.6: analyzer SKILL prose carries link-classification table -------
+
+
+def test_analyzer_skill_md_documents_link_fetch_table_v076():
+    """The analyzing-pr-changes SKILL.md must document the v0.7.6+
+    link-fetch table (Jira / Confluence / Slack / Google Drive /
+    GitHub issue / unfetchable). Without this prose, the AI driving
+    the skill won't know to call the connectors at all."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills" / "analyzing-pr-changes"
+        / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    # The v0.7.6 entry-point prose.
+    assert "Fetch PR comments" in text
+    assert "Fetch linked external content" in text
+    # Connector tool names — at least three of the four classes.
+    assert "mcp__claude_ai_Atlassian__getJiraIssue" in text
+    assert "mcp__claude_ai_Atlassian__getConfluencePage" in text
+    assert "mcp__claude_ai_Slack__slack_read_thread" in text
+    assert "mcp__claude_ai_Google_Drive__read_file_content" in text
+    # The 4KB cap + truncation marker.
+    assert "4KB" in text or "4 KB" in text
+    assert "truncated" in text
+    # ToolSearch pre-load directive.
+    assert "ToolSearch" in text
+    # Output shape: linked_content + comments fields.
+    assert "linked_content" in text
+    assert "source_type" in text
+
+
+def test_planner_skill_md_documents_coverage_audit_worksheet_v076():
+    """The planning-pr-tests SKILL.md must document the new
+    planner_coverage_audit worksheet contract."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
+        / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    assert "planner_coverage_audit" in text
+    assert "by_pr_body" in text
+    assert "by_diff_symbols" in text
+    assert "gaps" in text
+    # The doc-link traversal section.
+    assert "Doc-link traversal" in text
+
+
+def test_executor_md_documents_evaluate_script_batching_v076():
+    """The pr-test-executor.md agent doc must carry the v0.7.6+ chrome
+    batching section so the executor knows to fold multiple DOM ops
+    into one evaluate_script call."""
+    agent_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "agents" / "pr-test-executor.md"
+    )
+    text = agent_path.read_text()
+    assert "Batch DOM ops" in text or "batch DOM ops" in text.lower()
+    # Boundary list — navigate / click / wait_for / take_snapshot.
+    assert "navigate_page" in text
+    assert "wait_for" in text
+    assert "take_snapshot" in text

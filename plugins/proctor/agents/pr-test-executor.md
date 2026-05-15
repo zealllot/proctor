@@ -214,6 +214,46 @@ Match your item's category to one of the templates below. Use the multi-screensh
 
 7. **Sanity-check after each screenshot** before declaring the item done: compute `md5sum` of the new file and compare against every other screenshot from THIS run. If two screenshots within a single item — or across two items in the same run — have identical bytes, the take_screenshot was wrong (likely captured the same viewport twice without state changing). Retake with a different `uid` or after the state change actually completed. v0.7.5+ contract validator (`validate_screenshots_contract.py`) hard-fails on identical bytes across any chrome items in a run.
 
+### Batch DOM ops in one `evaluate_script` (v0.7.6+, performance)
+
+Each `mcp__chrome-devtools__*` call adds ~5-15 sec of AI turn overhead (model has to read the tool result and emit the next call). When you need multiple DOM operations in the SAME page state (e.g. fill A, fill B, scroll to C, verify D), do them in ONE `evaluate_script` call instead of N separate `fill` / `click` / `evaluate_script` calls. The PR-#1126 v0.7.5 e2e wall-clock came in at 30:31 — the per-turn overhead dominated; v0.7.6's executor batching halves chrome-driven items' turn count.
+
+Anti-pattern (4 turns, ~20-60 sec):
+
+```
+mcp__chrome-devtools__fill(uid=A, value="x")
+mcp__chrome-devtools__fill(uid=B, value="y")
+mcp__chrome-devtools__evaluate_script(() => target.scrollIntoView({...}))
+mcp__chrome-devtools__evaluate_script(() => ({a: A.value, b: B.value}))
+```
+
+Preferred (1 turn, ~5-15 sec):
+
+```js
+mcp__chrome-devtools__evaluate_script(() => {
+  const a = document.querySelector('[name="..."]');
+  a.value = "x";
+  a.dispatchEvent(new Event('input', {bubbles:true}));
+  const b = document.querySelector('[name="..."]');
+  b.value = "y";
+  b.dispatchEvent(new Event('input', {bubbles:true}));
+  document.querySelector('[data-target]').scrollIntoView({block:'center', behavior:'instant'});
+  return { a: a.value, b: b.value };
+})
+```
+
+Boundary that requires separate calls — DON'T merge across these:
+
+- `navigate_page` (page changes state — next batch lives on a fresh DOM)
+- `click` on a submit button (triggers server roundtrip; the next batch must follow the server response)
+- `wait_for` (waits for new content to appear; batching before it is pointless)
+- `take_screenshot` (needs the prior state to settle visually before capture)
+- `take_snapshot` (needs prior state to settle; the returned uids must reflect the post-state DOM)
+
+Within one "page state slice" (page hasn't navigated, no click on submit, no async waits between), batch as much as possible. The boundary is "did the page change state from the server / from a wait"; batch everything that happens BETWEEN such events.
+
+This is purely a performance optimization — the same set of DOM ops, just folded into one tool call. The assertion / screenshot contract is unchanged.
+
 ### Result-field shape (v0.6.4+)
 
 For multi-screenshot items use `screenshots`:

@@ -135,6 +135,41 @@ def validate_change_map(cm: dict) -> None:
         if "requirement_hints" in ctx:
             _require(isinstance(ctx["requirement_hints"], list),
                      "ChangeMap.pr_context.requirement_hints must be a list")
+        # comments (v0.7.6+) — PR review/conversation comments fetched
+        # via `gh pr view --json comments,reviews`. Each entry is a
+        # dict; concrete keys (author/body/created_at) are advisory —
+        # only the list-of-dicts shape is enforced here so the planner
+        # can read whatever the analyzer produced without schema
+        # churn. Always optional.
+        if "comments" in ctx and ctx["comments"] is not None:
+            _require(isinstance(ctx["comments"], list),
+                     "ChangeMap.pr_context.comments must be a list of dicts")
+            for j, c in enumerate(ctx["comments"]):
+                _require(isinstance(c, dict),
+                         f"ChangeMap.pr_context.comments[{j}] must be a dict")
+        # linked_content (v0.7.6+) — fetched body for each entry in
+        # `links`. Required keys per entry: `url`, `source_type`,
+        # `fetched`. Other fields (title, excerpt, error) optional —
+        # populated only when the fetch succeeded / failed in a way
+        # the planner cares about.
+        if "linked_content" in ctx and ctx["linked_content"] is not None:
+            _require(isinstance(ctx["linked_content"], list),
+                     "ChangeMap.pr_context.linked_content must be a list of dicts")
+            for j, lc in enumerate(ctx["linked_content"]):
+                _require(isinstance(lc, dict),
+                         f"ChangeMap.pr_context.linked_content[{j}] must be a dict")
+                _require_keys(lc, {"url", "source_type", "fetched"},
+                              f"ChangeMap.pr_context.linked_content[{j}]")
+                _require(isinstance(lc["url"], str) and lc["url"].strip(),
+                         f"ChangeMap.pr_context.linked_content[{j}].url "
+                         f"must be a non-empty string")
+                _require(isinstance(lc["source_type"], str)
+                         and lc["source_type"].strip(),
+                         f"ChangeMap.pr_context.linked_content[{j}].source_type "
+                         f"must be a non-empty string")
+                _require(isinstance(lc["fetched"], bool),
+                         f"ChangeMap.pr_context.linked_content[{j}].fetched "
+                         f"must be a bool")
         # directives: user-provided HTML-comment overrides extracted from
         # the PR body. Added in v0.2.3. All sub-fields optional.
         if "directives" in ctx:
@@ -154,6 +189,29 @@ def validate_test_plan(tp: dict) -> None:
     _require(isinstance(tp, dict), "TestPlan: must be a dict")
     _require_keys(tp, {"items"}, "TestPlan")
     _require(isinstance(tp["items"], list), "TestPlan.items must be a list")
+
+    # planner_coverage_audit (v0.7.6+) — optional top-level worksheet
+    # the planner writes as its FINAL step before returning. Documents
+    # which plan items cover which inputs (PR body criteria, linked
+    # content excerpts, PR review comments, new diff symbols). The
+    # `gaps` array surfaces uncovered inputs the planner couldn't (or
+    # wouldn't) add an item for. Shape is intentionally loose — the
+    # planner can use whatever sub-fields fit; only the dict-of-lists-
+    # of-dicts skeleton is enforced.
+    if (
+        "planner_coverage_audit" in tp
+        and tp["planner_coverage_audit"] is not None
+    ):
+        audit = tp["planner_coverage_audit"]
+        _require(isinstance(audit, dict),
+                 "TestPlan.planner_coverage_audit must be a dict if present")
+        for k, v in audit.items():
+            _require(isinstance(v, list),
+                     f"TestPlan.planner_coverage_audit.{k} must be a list")
+            for j, entry in enumerate(v):
+                _require(isinstance(entry, dict),
+                         f"TestPlan.planner_coverage_audit.{k}[{j}] "
+                         f"must be a dict")
 
     # Structured journeys (v0.3.28+) — optional top-level array.
     # Each entry is {id, goal, terminal_state}; items reference via

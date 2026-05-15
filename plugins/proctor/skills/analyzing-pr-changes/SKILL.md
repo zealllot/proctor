@@ -28,7 +28,56 @@ on stdout with no surrounding prose, headings, or code fences.
      - `<!-- proctor:max-items 5 -->` → `directives.max_items` is an int the planner will respect as a soft cap on item count.
      Omit `directives` from `pr_context` entirely if no recognized comment is present. Unknown keys are silently dropped.
 
-   This step is purely textual — do not follow the URLs and do not fetch anything external. Just record them.
+2a. **Fetch PR comments (v0.7.6+, mandatory).** Always retrieve the PR's review comments and conversation comments — they routinely contain decisive "wait we also need X" updates the body doesn't have, plus follow-up requirements added after the description was first written. Run:
+
+    ```bash
+    gh pr view <PR_NUMBER> --repo <owner>/<repo> --json comments,reviews
+    ```
+
+    Map every comment/review into `pr_context.comments[]` as `{author, body, created_at}` objects. Reviews carry their own body (the overall review remark) plus per-line review comments; flatten both into the array. Cap at 30 entries (most recent wins if more) so context doesn't explode. Skip empty bodies. If `gh` returns 403 / auth-required, log to stderr and emit `pr_context.comments: []`.
+
+2b. **Fetch linked external content (v0.7.6+, best-effort).** After populating `links`, attempt to fetch each one through the appropriate Claude.ai MCP connector and store the result in `pr_context.linked_content[]`. PR authors put real requirements in Slack threads, Jira tickets, Google docs, and earlier issues; the planner needs that text, not just the URL.
+
+    **Pre-load the connector tools via ToolSearch at the start of this skill** so the actual fetch calls don't fail with InputValidationError. Run once:
+
+    ```
+    ToolSearch query: "select:mcp__claude_ai_Atlassian__getJiraIssue,mcp__claude_ai_Atlassian__getConfluencePage,mcp__claude_ai_Slack__slack_read_thread,mcp__claude_ai_Google_Drive__read_file_content"
+    ```
+
+    Link-classification table (apply in order; first match wins):
+
+    | URL pattern | `source_type` | Fetch tool |
+    |---|---|---|
+    | `*.atlassian.net/browse/<KEY>` | `jira` | `mcp__claude_ai_Atlassian__getJiraIssue` (cloud_id + issue key) |
+    | `*.atlassian.net/wiki/spaces/...` | `confluence` | `mcp__claude_ai_Atlassian__getConfluencePage` |
+    | `*.slack.com/archives/<CHAN>/p<TS>` | `slack` | `mcp__claude_ai_Slack__slack_read_thread` (parse `<CHAN>` and `<TS>` from the URL — Slack URL timestamps are e.g. `p1714000000123456` → ts `1714000000.123456`) |
+    | `docs.google.com/document/d/<ID>` (also `/spreadsheets/d/<ID>`, `/presentation/d/<ID>`) | `google_drive` | `mcp__claude_ai_Google_Drive__read_file_content` (pass `<ID>`) |
+    | `github.com/<owner>/<repo>/issues/<N>` | `github_issue` | Bash: `gh issue view <N> --repo <owner>/<repo> --json title,body,comments` |
+    | `github.com/<owner>/<repo>/pull/<N>` (DIFFERENT PR than the one under analysis) | `github_pr` | Bash: `gh pr view <N> --repo <owner>/<repo> --json title,body,comments` |
+    | anything else (Notion, Loom, Figma, Sheets in a non-recognized form, etc.) | `unfetchable` | record URL only |
+
+    Each entry shape:
+
+    ```jsonc
+    { "url": "...",
+      "source_type": "jira|confluence|slack|google_drive|github_issue|github_pr|unfetchable",
+      "title": "...",                     // short title / page name / issue summary
+      "excerpt": "<= 4KB of content body, truncated at paragraph boundary with '... [truncated]'",
+      "fetched": true,                    // false when auth-fail / rate-limit / unfetchable
+      "error": "auth-required" }         // omit when fetched=true
+    ```
+
+    **Error handling — DO NOT abort the run.**
+    - Auth-fail / 403 → record `{url, source_type, fetched: false, error: "auth-required"}` and continue.
+    - Rate-limit → `{url, source_type, fetched: false, error: "rate-limited"}` and continue.
+    - Tool-not-loaded (the user hasn't authorized that MCP connector) → `{url, source_type, fetched: false, error: "connector-unavailable"}` and continue.
+    - Unknown URL pattern → `{url, source_type: "unfetchable", fetched: false}` — no error string.
+
+    **Limits to keep context bounded:**
+    - Each `excerpt` ≤ 4KB. Truncate cleanly at paragraph boundary (closest `\n\n` before the cap), then append `"... [truncated]"`. If no paragraph boundary, cut at the cap and append `"... [truncated]"`.
+    - Total `linked_content` entries: cap at 8. If more `links` exist, prefer the first 8 the body cites in order (these are usually the most authoritative — the PR author leads with the spec).
+
+    This step IS allowed to make external fetches. The v0.7.5 prose forbade them; v0.7.6 reverses that because the planner kept missing requirements that only appeared in Slack threads and Jira tickets.
 
 3. **Apply path directives BEFORE classifying.** If `pr_context.directives.skip_paths` is non-empty, drop any hunk whose `file` matches one of those globs. If `directives.focus_paths` is non-empty, keep only hunks matching at least one focus glob. The remaining hunks are what gets classified.
 
@@ -177,7 +226,21 @@ on stdout with no surrounding prose, headings, or code fences.
     "title": "...",
     "body": "...",
     "links": ["https://acme.atlassian.net/browse/PROJ-42", "https://acme.slack.com/archives/C0/p123"],
-    "requirement_hints": ["display name max length 100", "rate limit endpoint at 60/min"]
+    "requirement_hints": ["display name max length 100", "rate limit endpoint at 60/min"],
+    "comments": [
+      { "author": "alice", "body": "Wait — we also need to enforce the 100-char cap at API-level, not just on the form.",
+        "created_at": "2026-05-12T14:22:11Z" }
+    ],
+    "linked_content": [
+      { "url": "https://acme.atlassian.net/browse/PROJ-42",
+        "source_type": "jira",
+        "title": "Cap display_name at 100 chars",
+        "excerpt": "Decision (2026-05-11): display_name must be capped at 100 chars, enforced server-side. Trim instead of reject for backward compat.\n... [truncated]",
+        "fetched": true },
+      { "url": "https://example.notion.so/some-page",
+        "source_type": "unfetchable",
+        "fetched": false }
+    ]
   },
   "hunks": [
     {
