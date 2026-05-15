@@ -54,7 +54,7 @@ The script emits one JSON envelope to stdout. Parse the `type` field.
 
 **1b. Branch on `type`** — exactly one action per iteration:
 
-- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. After the user answers, save `PREV_ANSWER=<selected-label>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
+- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. If the envelope has `"multi_select": true` (v0.7.8+, used by the amend-daemons binary-picker), call AskUserQuestion in multi-select mode and join the selected labels with `", "` before passing back as `--answer`. After the user answers, save `PREV_ANSWER=<selected-label(s)>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
 
 - **`type=show`**: emit the `markdown` field verbatim to chat. Save `PREV_ANSWER=` (clear) and `PREV_BASH_RC=`. **Continue to next iteration (1a)** in the same response — don't end the turn.
 
@@ -884,7 +884,7 @@ Save as `BASE_URL`.
 
 The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, classify each as `http-server` / `daemon` / `one-shot` / `unknown`, and ask the user which ones PRoctor should start during setup. Daemons selected here get appended to `setup:`, so they run during PRoctor invocations and produce output the planner can runtime-verify with a plain `curl`.
 
-**Runs only in `MODE=fresh`** — a brand-new install. Skip in `MODE=migrate` (existing consumer; their `setup:` was already set up by hand) and `MODE=bump-only` (pin bump only). v0.7.8 may add an "amend daemons" subcommand for existing consumers; v0.7.7 deliberately doesn't.
+**Runs in `MODE=fresh` (full new install — the v0.7.7 path) AND `MODE=amend-daemons` (v0.7.8+ — existing consumer whose `setup:` lacks `go run ./cmd/` lines).** Skip in `MODE=migrate` (existing consumer; their `setup:` was already set up by hand) and `MODE=bump-only` (pin bump only).
 
 **Procedure:**
 
@@ -930,7 +930,16 @@ The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, cl
 
 5. The existing wait-for-port loop for the http-server (Step 7f) stays unchanged. The daemon lines slot in AFTER the http-server wait-loop and BEFORE the test execution begins.
 
-**Wiring note for the state machine.** `scripts/wizard_run.py`'s state machine currently falls back to legacy SKILL.md prose for `MODE=fresh`. v0.7.7 adds the helper script (`wizard_detect_binaries.py`) and describes the new step in this prose; full state-machine integration of the fresh path (which would let the wizard automate the AskUserQuestion + `.proctor/local.yml` write directly) is deferred to v0.7.8. For v0.7.7 the AI driving the fresh path runs `wizard_detect_binaries.py` directly, surfaces the multi-select, and writes the daemon lines into `.proctor/local.yml` as part of Step 8c-pre's seed-script emission.
+**Wiring note for the state machine.** `MODE=fresh` still falls back to legacy SKILL.md prose for the full install. But v0.7.8 adds a NEW `MODE=amend-daemons` that the state machine drives end-to-end for an existing v0.7.6-era consumer (local.yml exists, `setup:` is non-empty, no `go run ./cmd/` line):
+
+1. State `INIT` → `wizard_decide_mode.py` returns `mode=amend-daemons` → wizard emits `ask_user` (`header=Daemon scan`) offering Scan / Skip.
+2. If user picks "Skip" → wizard emits `done`.
+3. If user picks "Scan" → wizard emits a `bash` envelope running `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_detect_binaries.py --repo-root . > /tmp/proctor-wizard-binaries.json` and the AI runs it.
+4. After `--bash-rc 0` → wizard reads the JSON, sorts candidates (daemon → unknown → http-server → one-shot), emits `ask_user` (`header=Daemons to start in setup`, `multi_select=true`).
+5. AI calls `AskUserQuestion` in multi-select mode. AI passes the user's picks back as `--answer "label1, label2"` (comma-separated). Wizard amends `.proctor/local.yml setup:` with the two-line group per pick (kill + start) via the helper `_amend_local_yml_with_daemons` (string-level edit; preserves comments; idempotent — re-running skips entries already in setup).
+6. Wizard emits `done` with a summary citing the added binaries.
+
+For `MODE=fresh` the legacy SKILL.md prose still applies (Step 7.5 procedure above runs in the AI's hands, then Step 8c-pre writes the seed script). State-machine integration of fresh-mode is deferred.
 
 ### Step 7f — Confirm setup commands + env source (v0.3.41+)
 

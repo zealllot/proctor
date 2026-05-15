@@ -73,7 +73,10 @@ heuristics) but defaults them to NOT-preselected.
 - ``http-server`` — HTTP listener pattern:
   ``http.ListenAndServe`` / ``http.Server`` / ``router.Run`` /
   ``router.ListenAndServe`` / ``fasthttp`` / ``gin.New`` /
-  ``echo.New``.
+  ``echo.New`` / ``<pkg>.ListenAndServe[TLS]?`` (any package
+  exposing a ListenAndServe method — appkit's ``server.ListenAndServe``,
+  etc.). A short file (<200 lines) that matches this pattern is
+  still ``http-server`` (the root ``main.go`` thin-wrapper case).
 - ``daemon`` — ticker / cron / async worker pattern:
   ``time.Tick`` / ``time.NewTicker`` / ``cron.AddFunc`` /
   ``cron.New`` / ``RunJob`` / ``workerqueue`` /
@@ -85,11 +88,16 @@ heuristics) but defaults them to NOT-preselected.
 - ``unknown`` — none of the above matched and the file is non-
   trivial in size. Classifier punts; user decides.
 
-Order matters: ``http-server`` checked first so an HTTP server
-that ALSO has a ticker (rare but possible — health-check beacon
-inside the same binary) classifies as http-server (the user-facing
-role wins). Daemon-only binaries don't expose HTTP listeners by
-definition, so the check order is unambiguous in practice.
+Order matters (v0.7.8 reversal vs v0.7.7): ``daemon`` checked
+FIRST so a binary with BOTH a publish loop AND an HTTP admin /
+health-check endpoint classifies as ``daemon`` — the long-running
+side-effect-emitting work is the primary purpose; the HTTP listener
+is auxiliary. v0.7.7 had ``http-server`` win when both were
+present; v0.7.6 e2e against mcd-website's ``cmd/mcd-daemon/main.go``
+(15 publish-on-tick goroutines + a 4-line ``/health-check``
+``http.ListenAndServe``) showed this picked the wrong primary
+role — the daemon code path is what PRoctor needs to start to
+verify "admin save → daemon publishes → S3 URL has new JSON".
 
 ## CLI
 
@@ -114,6 +122,13 @@ from pathlib import Path
 
 # Patterns checked in priority order — first match wins.
 # Listed as (pattern, label, classification).
+#
+# v0.7.8: broadened the ListenAndServe regex to catch any
+# `<pkg>.ListenAndServe[TLS]?` call. mcd-website's root main.go
+# uses `server.ListenAndServe(config.Config.HTTP, ...)` — appkit's
+# wrapper. v0.7.7's regex only matched the literal `http.ListenAndServe`
+# / `router.ListenAndServe` and missed appkit-style wrappers, so a
+# 29-line root main.go got classified as `one-shot`.
 _HTTP_SERVER_PATTERNS = [
     (r"\bhttp\.ListenAndServe\b", "http.ListenAndServe"),
     (r"\bhttp\.Server\b", "http.Server"),
@@ -121,6 +136,12 @@ _HTTP_SERVER_PATTERNS = [
     (r"\bfasthttp\b", "fasthttp"),
     (r"\bgin\.New\b", "gin.New"),
     (r"\becho\.New\b", "echo.New"),
+    # Generic `<lowercase-pkg>.ListenAndServe[TLS]?` — catches
+    # `server.ListenAndServe`, `proxy.ListenAndServe`, etc. Excludes
+    # the http/router/fasthttp matches above (they're more specific
+    # and emit a cleaner evidence label). The `[a-z]` start prevents
+    # matching constants / structs (CamelCase / UPPER_CASE).
+    (r"\b[a-z][A-Za-z0-9_]*\.ListenAndServe(?:TLS)?\b", "<pkg>.ListenAndServe"),
 ]
 
 _DAEMON_PATTERNS = [
@@ -143,26 +164,45 @@ _ONE_SHOT_LINE_THRESHOLD = 200
 
 def _matches(text: str, patterns: list[tuple[str, str]]) -> list[str]:
     """Return the labels of every pattern that matched the text.
-    Empty list = no match."""
+    Empty list = no match. Labels appear in input order; the generic
+    ``<pkg>.ListenAndServe`` label is suppressed when a more
+    specific HTTP label already matched (avoids redundant evidence
+    like ``["http.ListenAndServe", "<pkg>.ListenAndServe"]`` when
+    the source contains just ``http.ListenAndServe(...)``)."""
     hits: list[str] = []
     for pat, label in patterns:
         if re.search(pat, text):
             hits.append(label)
+    # Dedupe: when a specific http-server label fired, drop the
+    # generic `<pkg>.ListenAndServe` fallback. Specific labels
+    # quoted to the user in evidence lists read cleaner.
+    if "<pkg>.ListenAndServe" in hits and any(
+        h in hits for h in ("http.ListenAndServe", "router.Run/ListenAndServe")
+    ):
+        hits.remove("<pkg>.ListenAndServe")
     return hits
 
 
 def _classify(content: str) -> tuple[str, list[str]]:
     """Return ``(looks_like, evidence)`` for a main.go's source.
 
-    Priority: http-server > daemon > one-shot > unknown. See module
-    docstring for rationale on the ordering.
+    Priority (v0.7.8): daemon > http-server > one-shot > unknown.
+
+    Daemon trumps http-server when BOTH patterns are present in the
+    same file. The motivating real-world case is
+    ``cmd/mcd-daemon/main.go`` on mcd-website — 15 publish-on-tick
+    goroutines + a tail-end 4-line ``/health-check`` HTTP listener.
+    v0.7.7 classified it as http-server (first-match-wins on the
+    http-server list); v0.7.8 fixes by checking daemon first. A
+    long-running side-effect job is the file's primary purpose;
+    the HTTP listener is auxiliary (admin / health-check).
     """
-    http_hits = _matches(content, _HTTP_SERVER_PATTERNS)
-    if http_hits:
-        return "http-server", http_hits
     daemon_hits = _matches(content, _DAEMON_PATTERNS)
+    http_hits = _matches(content, _HTTP_SERVER_PATTERNS)
     if daemon_hits:
         return "daemon", daemon_hits
+    if http_hits:
+        return "http-server", http_hits
     line_count = content.count("\n") + 1
     if line_count < _ONE_SHOT_LINE_THRESHOLD:
         return "one-shot", [f"short ({line_count} lines), no ticker/server"]

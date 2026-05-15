@@ -133,14 +133,76 @@ def _extract_pin(workflow_path: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def decide_mode(state: dict, current_tag: str | None) -> dict:
+def _local_setup_missing_cmd_daemons(local_yml_path: Path) -> bool:
+    """v0.7.8 amend-daemons trigger. Read ``.proctor/local.yml`` and
+    return True when the file's ``setup:`` array contains content
+    (i.e. it's a real setup, not an empty stub) but NO line mentions
+    ``go run ./cmd/`` — the marker line that v0.7.7+ multi-binary
+    detection emits per selected daemon.
+
+    Intentionally a substring check, not a full YAML parse. The
+    setup array's lines are quoted strings; ``go run ./cmd/`` (with
+    the trailing slash) is distinctive enough that no other Go
+    invocation collides with it. A literal substring match keeps
+    this helper dependency-free (no PyYAML import at the top of
+    wizard_decide_mode)."""
+    try:
+        text = local_yml_path.read_text(errors="replace")
+    except OSError:
+        return False
+    # No `setup:` block at all → can't amend; we'd need fresh-mode
+    # for that. Skip the offer.
+    if "setup:" not in text:
+        return False
+    # Has setup but already a cmd-daemon line → nothing to add.
+    if "go run ./cmd/" in text:
+        return False
+    # Setup present with no cmd-daemon line. But only fire when the
+    # setup actually has content — empty `setup: []` shouldn't
+    # trigger the offer either (likely an existing-env-mode consumer
+    # who deliberately has no setup).
+    return _has_setup_content(text)
+
+
+def _has_setup_content(local_yml_text: str) -> bool:
+    """True when `setup:` appears to have at least one non-empty
+    list item. Heuristic: look for ``setup:\n`` followed (within
+    ~50 lines) by a ``  - `` list-item marker. Defensive against
+    `setup: []` and `setup: ~`."""
+    idx = local_yml_text.find("setup:")
+    if idx < 0:
+        return False
+    tail = local_yml_text[idx:]
+    # Inline empty form, `setup: []` / `setup: ~`.
+    first_line_end = tail.find("\n")
+    first_line = tail[:first_line_end] if first_line_end >= 0 else tail
+    if first_line.strip() in ("setup: []", "setup: ~", "setup: null"):
+        return False
+    # Walk the next ~50 lines looking for a list marker.
+    lines = tail.split("\n")[1:50]
+    return any(line.lstrip().startswith("- ") for line in lines)
+
+
+def decide_mode(
+    state: dict,
+    current_tag: str | None,
+    repo_root: Path | None = None,
+) -> dict:
     """Walk the priority-ordered decision rules. Return the FIRST
     matching one. Each rule is fully-described — no fall-through to
     later rules once one fires. The order encodes which scenarios
     "win" when multiple are technically true (e.g. legacy_layout +
     needs-local-regen → migrate first; local-regen happens on the
-    re-run after migration)."""
+    re-run after migration).
+
+    ``repo_root`` is required for the v0.7.8 amend-daemons rule
+    (which needs to read the actual ``.proctor/local.yml`` contents,
+    not just file-exists). When omitted, that rule is skipped —
+    older callers that don't pass repo_root keep the v0.7.7
+    behaviour."""
     s = state
+    if repo_root is None:
+        repo_root = Path(".")
 
     # Rule 1: brand-new repo (neither config nor workflow). Most
     # common first-time install.
@@ -311,7 +373,60 @@ def decide_mode(state: dict, current_tag: str | None) -> dict:
             ask_user=None,
         )
 
-    # Rule 7: fully configured + up to date. Nothing to do.
+    # Rule 7 (v0.7.8): the consumer is on the v0.4+ layout, has a
+    # `.proctor/local.yml`, but its `setup:` has no `go run ./cmd/`
+    # lines — i.e. they pre-date the multi-binary detection that
+    # v0.7.7 added in fresh mode. Offer to scan + amend.
+    #
+    # This rule fires AFTER bump-only so a pin-bump still wins
+    # (action pin is more urgent than a setup augmentation). We
+    # don't want to nag every wizard run forever, so if the user
+    # later picks "Skip" the wizard exits cleanly and the only way
+    # back into the daemon flow is a fresh invocation — that's
+    # fine; we're not persisting "already-asked" state.
+    if s.get("has_local_yml") and s.get("has_new_config"):
+        local_path = repo_root / _NEW_LOCAL
+        if not local_path.exists():
+            local_path = repo_root / _OLD_LOCAL
+        if local_path.exists() and _local_setup_missing_cmd_daemons(local_path):
+            return _decision(
+                mode="amend-daemons",
+                next_action=(
+                    "Offer to scan cmd/*/main.go binaries and amend "
+                    ".proctor/local.yml setup: with daemon start lines."
+                ),
+                ask_user={
+                    "header": "Daemon scan",
+                    "question": (
+                        "Detected `.proctor/local.yml` exists but its "
+                        "`setup:` has no `go run ./cmd/*` lines. Your "
+                        "project may have daemons (publish loops, "
+                        "workers) PRoctor should start during local "
+                        "setup so the planner can verify their output "
+                        "at runtime. Scan now?"
+                    ),
+                    "options": [
+                        {
+                            "label": "Scan for daemon binaries you may want to start in setup",
+                            "description": (
+                                "Runs the multi-main classifier "
+                                "against cmd/*/main.go + root main.go, "
+                                "then asks which ones to add to "
+                                "setup. New in v0.7.8."
+                            ),
+                        },
+                        {
+                            "label": "Skip — my setup is fine",
+                            "description": (
+                                "Wizard exits. Re-run /proctor:proctor-init "
+                                "later to revisit."
+                            ),
+                        },
+                    ],
+                },
+            )
+
+    # Rule 8: fully configured + up to date. Nothing to do.
     return _decision(
         mode="current",
         next_action=(
@@ -348,7 +463,7 @@ def main() -> int:
 
     root = Path(args.repo_root).resolve()
     state = detect_state(root)
-    decision = decide_mode(state, args.current_tag)
+    decision = decide_mode(state, args.current_tag, repo_root=root)
 
     sys.stdout.write(json.dumps({"state": state, **decision}, indent=2))
     sys.stdout.write("\n")
