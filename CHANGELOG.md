@@ -2,6 +2,27 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.4 — 2026-05-15
+
+### Plugin-shipped Stop hook auto-continues mid-flight pipelines
+
+The /proctor:proctor pipeline is a state-machine loop where each stage transition is one tool call + one AI turn. The Claude Code platform's turn-model lets the AI naturally end its turn after any tool call, so users have been hitting a "wait for `继续` between every stage" experience since v0.6.0. v0.6.x tried tightening the slash-command prose ("DO NOT END YOUR TURN MID-LOOP") — real runs (user feedback against v0.7.3) showed prose doesn't stick.
+
+Real fix: a plugin-shipped Stop hook that intervenes structurally.
+
+**Files**:
+- `plugins/proctor/hooks/hooks.json` — declares the Stop hook so Claude Code auto-registers it when the plugin is installed (same mechanism ralph-loop uses; no user `settings.json` edit needed).
+- `plugins/proctor/hooks/stop-hook.sh` — the hook script. Looks for `.proctor/runs/*/pipeline-state.json` in `$CLAUDE_PROJECT_DIR`, picks the most-recent by mtime, and:
+  - If `step == "done"` → exit 0 (allow stop; pipeline finished cleanly).
+  - If mtime > 5 minutes old → exit 0 (abandoned run; don't trap the user).
+  - Otherwise → exit 2 + stderr telling the AI to re-invoke `proctor_run.py` with the exact `--state-file` arg. Claude Code interprets exit 2 as "block stop" and feeds stderr to the AI as a continuation prompt.
+
+The 5-minute mtime cutoff is the safety valve: `proctor_run.py` touches the state file on every iteration, so an active pipeline always has fresh mtime; a session the user walked away from eventually frees up.
+
+**Tests 293 → 300** — pin the 6 decision branches (mid-flight blocks / done allows / no .proctor allows / stale allows / multiple runs picks newest / corrupted state degrades gracefully) plus a hooks.json manifest sanity check.
+
+**Cleanup note**: `commands/proctor.md` v0.7.3 said "if it stalls, type `continue`". v0.7.4 keeps that as a fallback if the hook is somehow disabled, but the expected new behavior is "no manual continue needed".
+
 ## v0.7.3 — 2026-05-14
 
 ### Wizard auto-cleans `wizard-state.json` on `step=done`

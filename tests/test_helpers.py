@@ -1,7 +1,9 @@
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import time
 import pytest
 from unittest import mock
 from plugins.proctor.scripts.schema import (
@@ -4176,3 +4178,141 @@ def test_satisfying_form_preconditions_skill_file_present():
     # gone.
     assert "Pattern A" in body
     assert "existing-record reuse" in body
+
+
+# --- v0.7.4: Stop hook auto-continues mid-flight pipelines -----------------
+
+_HOOK_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "plugins" / "proctor" / "hooks" / "stop-hook.sh"
+)
+_HOOKS_JSON = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "plugins" / "proctor" / "hooks" / "hooks.json"
+)
+
+
+def _run_stop_hook(project_dir):
+    """Invoke the bundled Stop hook script with CLAUDE_PROJECT_DIR set,
+    return (exit_code, stderr_text)."""
+    proc = subprocess.run(
+        ["bash", str(_HOOK_PATH)],
+        env={**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)},
+        input="",
+        capture_output=True, text=True,
+    )
+    return proc.returncode, proc.stderr
+
+
+def test_stop_hook_blocks_when_pipeline_mid_flight(tmp_path):
+    """The hook's whole purpose: when proctor_run.py is between stages,
+    the AI tends to end its turn. The hook detects this via the live
+    pipeline-state.json and exits 2 so Claude Code treats it as 'block
+    stop' + feeds stderr back to the AI as a continuation prompt."""
+    run_dir = tmp_path / ".proctor" / "runs" / "pr1-abc"
+    run_dir.mkdir(parents=True)
+    state = run_dir / "pipeline-state.json"
+    state.write_text(json.dumps({
+        "step": "analyzed",
+        "run_id": "pr1-abc",
+        "run_dir": str(run_dir),
+        "pr_number": 1,
+    }))
+    rc, err = _run_stop_hook(tmp_path)
+    assert rc == 2
+    assert "mid-flight" in err.lower()
+    assert "step: analyzed" in err.lower() or "current step: analyzed" in err.lower()
+    # The continuation prompt must name the script to re-invoke + the
+    # state-file arg; otherwise the AI doesn't know what to run next.
+    assert "proctor_run.py" in err
+    assert str(state) in err
+
+
+def test_stop_hook_allows_stop_when_pipeline_done(tmp_path):
+    """step=done is the terminal state. Hook MUST allow stop or the
+    session can never end after a successful run."""
+    run_dir = tmp_path / ".proctor" / "runs" / "pr1-abc"
+    run_dir.mkdir(parents=True)
+    (run_dir / "pipeline-state.json").write_text(json.dumps({
+        "step": "done",
+        "run_id": "pr1-abc",
+    }))
+    rc, _ = _run_stop_hook(tmp_path)
+    assert rc == 0
+
+
+def test_stop_hook_allows_stop_when_no_proctor_dir(tmp_path):
+    """Hook fires on every assistant stop in every Claude Code session.
+    A project without .proctor/runs/ must be a clean no-op — otherwise
+    we trap every session in every consumer."""
+    # tmp_path has no .proctor/ at all.
+    rc, _ = _run_stop_hook(tmp_path)
+    assert rc == 0
+
+
+def test_stop_hook_allows_stop_when_state_file_stale(tmp_path):
+    """A pipeline-state.json from a session the user walked away from
+    (e.g. crashed mid-run, never cleaned up) must not trap future
+    sessions in that project. Cutoff: 5 minutes since last mtime."""
+    run_dir = tmp_path / ".proctor" / "runs" / "pr1-abc"
+    run_dir.mkdir(parents=True)
+    state = run_dir / "pipeline-state.json"
+    state.write_text(json.dumps({"step": "analyzed", "run_id": "pr1-abc"}))
+    # Backdate mtime to 10 minutes ago.
+    old_ts = time.time() - 600
+    os.utime(state, (old_ts, old_ts))
+    rc, _ = _run_stop_hook(tmp_path)
+    assert rc == 0
+
+
+def test_stop_hook_picks_most_recent_run_when_multiple_exist(tmp_path):
+    """A consumer may have many runs accumulated over time. The hook
+    must pick the most-recently-modified one (the active session),
+    not an old one. Otherwise restarting the loop on a NEW PR with an
+    old run still on disk wouldn't trigger continuation."""
+    runs = tmp_path / ".proctor" / "runs"
+    runs.mkdir(parents=True)
+    # Older run: done.
+    old_run = runs / "pr1-old"
+    old_run.mkdir()
+    old_state = old_run / "pipeline-state.json"
+    old_state.write_text(json.dumps({"step": "done", "run_id": "pr1-old"}))
+    os.utime(old_state, (time.time() - 60, time.time() - 60))
+    # Newer run: active.
+    new_run = runs / "pr2-new"
+    new_run.mkdir()
+    new_state = new_run / "pipeline-state.json"
+    new_state.write_text(json.dumps({
+        "step": "planned", "run_id": "pr2-new",
+    }))
+    # Newer state is current — should be picked, should block.
+    rc, err = _run_stop_hook(tmp_path)
+    assert rc == 2
+    assert "pr2-new" in err  # the new run's state file is named
+
+
+def test_stop_hook_handles_corrupted_state_file(tmp_path):
+    """Garbage in the state file should not crash the hook — allow stop
+    gracefully so the user isn't stuck in a session they can't exit."""
+    run_dir = tmp_path / ".proctor" / "runs" / "pr1-abc"
+    run_dir.mkdir(parents=True)
+    (run_dir / "pipeline-state.json").write_text("not valid json {{")
+    rc, _ = _run_stop_hook(tmp_path)
+    # Either 0 (gracefully no-op'd) or 2 (defensively blocked) is
+    # defensible. The script's actual choice: empty step → exit 0.
+    assert rc == 0
+
+
+def test_hooks_json_registers_stop_hook(tmp_path):
+    """Plugin's hooks.json declares the Stop hook so Claude Code auto-
+    loads it when the plugin is installed. No user settings.json edit
+    needed — that's the whole point of shipping it inside the plugin."""
+    cfg = json.loads(_HOOKS_JSON.read_text())
+    assert "Stop" in cfg["hooks"]
+    stop_entries = cfg["hooks"]["Stop"]
+    assert len(stop_entries) == 1
+    # Must call the shipped stop-hook.sh via CLAUDE_PLUGIN_ROOT.
+    cmd = stop_entries[0]["hooks"][0]["command"]
+    assert "CLAUDE_PLUGIN_ROOT" in cmd
+    assert "hooks/stop-hook.sh" in cmd
+    assert stop_entries[0]["hooks"][0]["type"] == "command"

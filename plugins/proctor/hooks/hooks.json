@@ -1,0 +1,15 @@
+{
+  "description": "PRoctor Stop hook — auto-continue when a /proctor:proctor pipeline is mid-flight. Without this, Claude Code's turn-model has the AI naturally end its turn after each tool call, stalling the state-machine loop between every stage and forcing the user to type '继续' / 'continue'. The hook detects an active pipeline-state.json (step != 'done', mtime within 5 minutes) and exits 2 with stderr so Claude Code treats it as a 'continue' instruction.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-hook.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
