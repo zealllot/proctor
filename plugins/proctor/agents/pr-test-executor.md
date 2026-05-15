@@ -176,18 +176,43 @@ Match your item's category to one of the templates below. Use the multi-screensh
 
 ### Pre-screenshot requirements (every screenshot, every time)
 
-1. **Scroll the asserted target into view.** Long admin forms put fields off-screen. Before `take_screenshot`, do:
+**The MUST in v0.7.5+: element-scoped, not viewport-scoped.** The PR-1126 v0.7.4 run produced 11 screenshots that all turned out byte-identical at the form's top viewport (`md5` match = same image), even though the tests asserted on fields located far down the page. The labels claimed "before save / after save / after reload"; the bytes proved otherwise. Two patterns converged into the same broken behavior — full-page screenshot from a non-anchored viewport, AND screenshot before scrollIntoView completed. The fix below makes both physically impossible.
+
+1. **Take a `take_snapshot` FIRST.** Confirms the field is on the page and gives you DOM uids. If the field isn't in the snapshot, the test premise is wrong — fail with `reason: "missing"` and cite which field the form lacks. Don't take a screenshot of an absent field.
+
+2. **Scroll the asserted target into view** via `evaluate_script`:
    ```javascript
    document.querySelector('<selector for the asserted field>')
      .scrollIntoView({block: 'center', behavior: 'instant'});
    ```
-   via `evaluate_script`. The field's label + value must be visible in the captured image.
+   For multi-field assertions (e.g. "both IncludeTags and ExcludeTags visible"), scroll the closest common parent into view.
 
-2. **Take a `take_snapshot` first** to confirm the field is on the page and find its DOM node. If the field isn't in the snapshot, the test premise is wrong — fail with `reason: "missing"` and cite which field the form lacks. Don't take a screenshot of an absent field.
+3. **Use the element-uid `take_screenshot` form, NOT the page form.** chrome-devtools `take_screenshot` accepts a `uid` parameter from the snapshot:
+   ```python
+   take_screenshot(uid="<uid of element containing the asserted field>",
+                   filePath="<logs_dir>/screenshots/<id>__<n>__<label>.png")
+   ```
+   This bounds the captured image to the element's rectangle, guaranteeing the asserted content is in-frame. Element scope is the only screenshot form allowed for chrome-devtools test items where the assertion is on a SPECIFIC field or component.
+   
+   Pick the uid so the bounding rectangle includes:
+   - The label text of the asserted field (so the reviewer can see WHICH field), AND
+   - The field's value (input value / select option / rendered text), AND
+   - When the assertion is "X shows alongside Y", a parent that contains both.
+   
+   Wrong-uid example: snapshot returned `uid_42 = <input name="ExcludeTags">` (just the bare input, no label). The screenshot shows a value but reviewer can't tell which field it's for. Pick the parent `<div class="form-field-group">` uid instead.
 
-3. **Format: PNG, fullPage: false** (viewport-cropped). FullPage screenshots make the asserted target tiny — viewport-cropped after scroll-into-view keeps the target large enough for the reviewer to actually see.
+4. **Page-scoped `take_screenshot` is ALLOWED in only three cases:**
+   - **Render-check items** where the assertion is "the page exists with the new sections visible" — page screenshot captures the layout. Even here: scroll the assertion target into view first so the section is in the captured viewport.
+   - **Save-success toast** captured as a second screenshot in a happy-save item — the toast is positioned at viewport edge, not bound to a form element. Page screenshot OK; but the FIRST screenshot (the form before save) MUST be element-scoped.
+   - **List-page navigation evidence** in a round-trip item — proving you genuinely left the edit page before returning. Page screenshot OK because the assertion is "URL is now the list page", not "field X has value Y".
+   
+   In all other cases: element-scoped via `uid`.
 
-4. **Save each screenshot under `<logs_dir>/screenshots/<id>__<n>__<short-label>.png`** where `<n>` is the 1-based ordinal. E.g. `t-006__1__form-image-original.png`, `t-006__2__form-game-changed.png`, `t-006__3__detail-game-persisted.png`. The label makes the filename self-documenting.
+5. **Format: PNG, `fullPage: false`** for any page-scope shot. FullPage screenshots make the asserted target tiny — viewport-cropped or element-cropped after scroll-into-view keeps the target large enough for the reviewer to actually see.
+
+6. **Save each screenshot under `<logs_dir>/screenshots/<id>__<n>__<short-label>.png`** where `<n>` is the 1-based ordinal. E.g. `t-006__1__form-image-original.png`, `t-006__2__form-game-changed.png`, `t-006__3__detail-game-persisted.png`. The label makes the filename self-documenting.
+
+7. **Sanity-check after each screenshot** before declaring the item done: compute `md5sum` of the new file and compare against every other screenshot from THIS run. If two screenshots within a single item — or across two items in the same run — have identical bytes, the take_screenshot was wrong (likely captured the same viewport twice without state changing). Retake with a different `uid` or after the state change actually completed. v0.7.5+ contract validator (`validate_screenshots_contract.py`) hard-fails on identical bytes across any chrome items in a run.
 
 ### Result-field shape (v0.6.4+)
 
@@ -213,7 +238,7 @@ For multi-screenshot items use `screenshots`:
 ]
 ```
 
-For single-screenshot items (render-check, negative): set BOTH `screenshots` (with one entry) AND the legacy `screenshot_ref` + `screenshot_focus` fields. Reporter prefers `screenshots` when present; legacy fields are read for v0.6.3-and-earlier results.
+For single-screenshot items (render-check, negative): use `screenshots: [{ ... }]` with a single entry. **Do NOT use the legacy `screenshot_ref` + `screenshot_focus` singular fields** — v0.7.5+ schema rejects them on chrome-devtools items because they encourage shipping a single bare path with no label/focus. The v0.7.4 PR-1126 run produced exactly this: every item had `screenshot_ref` pointing at a path, the count satisfied legacy contract, but reviewers couldn't tell what they were looking at because no label or focus existed. v0.6.4+ `screenshots: [...]` is mandatory; legacy fields removed.
 
 ### Anti-patterns (real ones we've seen)
 

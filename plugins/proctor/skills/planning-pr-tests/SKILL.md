@@ -67,6 +67,30 @@ When a behavior can ONLY be verified at runtime but `setup:` is
 missing, plan a `lint-only` item that grep-checks the source AND
 mark `risk: high` so the operator sees an environment was missing.
 
+## Read the repo's docs FIRST (v0.7.5+, mandatory)
+
+**Before writing any plan items, scan the consumer repo's documentation** — `README.md`, `CLAUDE.md` (and any other `CLAUDE.md` files under subdirs), `AGENTS.md`, `GEMINI.md`, the `docs/` tree, and any in-tree `*.md` files mentioned by the PR body. These typically encode:
+
+- Project conventions (test naming, fixture layout, how to run things locally)
+- Domain rules the diff is implementing against (validators, business invariants, role permissions)
+- Acceptance criteria for the type of change at hand (e.g. "all admin form changes need a round-trip test")
+- Architectural constraints the diff must respect (e.g. "validators are registered in `<file>:<func>`; new ones go there")
+
+Read targeted, not exhaustive:
+
+| What | Why |
+|---|---|
+| `README.md` (root) | Stack / how-to-run / convention pointers |
+| `CLAUDE.md` (root + any subdir CLAUDE.md the diff touches) | AI-collaboration rules + domain notes the maintainers want you to obey |
+| `docs/<topic>.md` when filename clearly relates to the diff (e.g. diff touches `models/foo/` → check `docs/foo.md` or `docs/models.md`) | Authoritative behavior spec |
+| Any path the PR body explicitly cites | The PR author already pointed at the doc; not reading it is a planning gap |
+
+Skip when none of these exist — small repos don't carry docs.
+
+**Use what you find in `rationale:` and `how:`.** Each item's `rationale:` field should cite the doc/spec that defines the behavior being verified (e.g. `Per CLAUDE.md "All admin form changes need round-trip", t-006 covers reload after save.`). `how:` can reference doc-stated values directly (e.g. `validator at api.go:88-104 rejects empty Title per <docs/validators.md>`). Reviewers trust the plan more when items trace back to documented intent, not just diff inference.
+
+**When repo docs conflict with the diff**, plan items for BOTH — same rule as `pr_context.requirement_hints` vs diff. The mismatch is signal.
+
 ## Procedure
 
 1. For each hunk in `change-map.json`, decide what behavior changed,

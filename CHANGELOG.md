@@ -2,6 +2,33 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.5 — 2026-05-15
+
+### Fix screenshot quality + plan doc-awareness + legacy shape rejection
+
+The v0.7.4 PR-#1126 e2e (run-id `pr1126-977d89c-951a1608`) surfaced three real problems user audit caught:
+
+1. **Plan didn't read repo docs.** The planner only consumed `pr.json`/`diff.patch`/`change-map.json`; never opened the consumer's `README.md`/`CLAUDE.md`/`docs/`. Items missed documented conventions and acceptance criteria.
+2. **Screenshots still wrong.** 11 screenshot files across 5 chrome items; `md5` showed 7 of them were byte-identical — the same viewport-top capture taken before scrollIntoView completed for any asserted field. Labels claimed different states; bytes proved otherwise. t-006's "save success toast" screenshot was the form's TOP viewport with no toast and the asserted IncludeTags/ExcludeTags inputs not even in frame. Same complaint as v0.6.4's t-006 bug in a new shape.
+3. **Wall-clock 41 min** — slower than v0.7.1's 19 min baseline. ~10 min of the regression was the screenshot-contract failing → orchestrator re-shooting all chrome work; the rest was a redis-not-started server-bring-up retry (consumer-side local.yml issue, not a plugin bug).
+
+Four fixes:
+
+**Fix A — `planning-pr-tests` reads repo docs first.** New section at top of the SKILL Procedure: before writing items, scan `README.md`/`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`/`docs/` for project conventions, domain rules, and doc-stated acceptance criteria. Each item's `rationale:` should cite the doc/spec that defines the behavior being verified. The PR body's `pr_context.requirement_hints` continues to be the priority source; this fix adds the SECOND-tier source (repo docs the PR body doesn't quote).
+
+**Fix B — executor must use uid-scoped `take_screenshot`.** `agents/pr-test-executor.md` "Pre-screenshot requirements" rewrites the procedure so element-scoped `take_screenshot(uid=...)` is mandatory for chrome items asserting on specific fields. Page-scoped screenshots are allowed only in three named cases (render-check / save-success toast as second shot / list-page navigation evidence). The agent must also `md5sum` after each screenshot and retake if the new file matches any previous one in the run. The PR-#1126 bug was structurally impossible to commit with the previous "scroll then take_screenshot" prose — viewport-top can collide on every call. uid-bound captures can't.
+
+**Fix C — identical-screenshot lint extends to ALL chrome items, MD5-based.** `validate_screenshots_contract.py` v0.6.8 only checked NEGATIVE items for byte-identical screenshots. v0.7.5 checks every chrome item × every screenshot entry, using MD5 instead of byte size (byte-size collisions across different content are rare but possible). Pinned with `test_ss_check_pinned_pr1126_v074_seven_md5_collisions` — the literal v0.7.4 failure pattern (7 entries clustered on one MD5 across t-005..t-009).
+
+**Fix D — legacy `screenshot_ref` rejected on chrome items.** v0.6.4 introduced the `screenshots: [{path, label, focus}]` array; v0.6.4..v0.7.4 still accepted the singular `screenshot_ref` for backward compat. Real runs (PR-#1126) showed the executor preferring the legacy shape because it's lower-friction — bare path, no label/focus needed. Reviewers couldn't tell what they were looking at. v0.7.5 hard-rejects legacy shape for chrome items: `screenshots` array with non-empty path+label+focus is mandatory.
+
+**Tests 300 → 304** (+4 new + 7 existing rewired to v0.7.5 semantics):
+- Pinned v0.7.4 PR-#1126 pattern (7-share-MD5 cluster across t-005..t-009)
+- Cross-item unique screenshots → 0 violations
+- Render-check with legacy ref → rejected
+- Render-check with new shape, 1 entry → OK
+- Existing v0.6.5/v0.6.8 tests updated for the new lint shape
+
 ## v0.7.4 — 2026-05-15
 
 ### Plugin-shipped Stop hook auto-continues mid-flight pipelines
