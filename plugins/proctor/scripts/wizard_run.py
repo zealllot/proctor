@@ -96,7 +96,21 @@ _STEP_DECIDED = "decided"
 _STEP_NEEDS_LOCAL_REGEN_ASKED = "needs_local_regen_asked"
 _STEP_LEGACY_MIGRATION_ASKED = "legacy_migration_asked"
 _STEP_BUMP_DONE = "bump_done"
+# v0.7.8: amend-daemons mode — multi-step flow that scans
+# cmd/*/main.go via wizard_detect_binaries.py and amends an
+# existing `.proctor/local.yml setup:` with go-run lines for
+# user-selected daemons. See wizard_decide_mode.py rule 7 for the
+# triggering condition.
+_STEP_AMEND_DAEMONS_OFFERED = "amend_daemons_offered"
+_STEP_AMEND_DAEMONS_SCANNED = "amend_daemons_scanned"
+_STEP_AMEND_DAEMONS_PICKED = "amend_daemons_picked"
 _STEP_DONE = "done"
+
+# Path where wizard_run.py asks the AI to dump the binaries JSON
+# between the bash envelope and the next state transition. Kept in
+# /tmp so it doesn't litter the repo, fixed path so re-entry after
+# AI crash can find it without re-scanning.
+_BINARIES_JSON_PATH = "/tmp/proctor-wizard-binaries.json"
 
 
 def _load_state(state_file: Path) -> dict:
@@ -125,13 +139,29 @@ def _emit(envelope: dict) -> None:
     sys.stdout.write("\n")
 
 
-def _ask_user(header: str, question: str, options: list[dict]) -> dict:
-    return {
+def _ask_user(
+    header: str,
+    question: str,
+    options: list[dict],
+    multi_select: bool = False,
+) -> dict:
+    """Build an ``ask_user`` envelope.
+
+    ``multi_select=True`` signals to the AI harness that
+    AskUserQuestion should be called in multi-select mode; the AI
+    must then pass back a comma-separated label list as
+    ``--answer "label1, label2, label3"``. v0.7.8 introduced this
+    flag for the amend-daemons binary-picker step. Single-select
+    callers keep the simpler "exact label" answer contract."""
+    envelope: dict = {
         "type": "ask_user",
         "header": header,
         "question": question,
         "options": options,
     }
+    if multi_select:
+        envelope["multi_select"] = True
+    return envelope
 
 
 def _show(markdown: str) -> dict:
@@ -150,12 +180,121 @@ def _bash(command: str, description: str = "") -> dict:
     return {"type": "bash", "command": command, "description": description}
 
 
+def _amend_local_yml_with_daemons(
+    local_path: Path,
+    chosen: list[dict],
+) -> int:
+    """Insert daemon kill+start lines into ``setup:`` of a local.yml.
+
+    For each candidate in ``chosen``, append two lines to the
+    ``setup:`` list (matching the prose in ``commands/proctor-init.md``
+    Step 7.5):
+
+    .. code-block:: yaml
+
+        - bash -c '[ -f /tmp/proctor-<NAME>.pid ] && kill ...'
+        - bash -c 'set -a; . ./dev_env_local ...; nohup go run ./<PATH> ...'
+
+    Returns the count of candidates actually added (skips those
+    whose path/binary-name already appears anywhere in the setup
+    block — idempotent re-runs don't duplicate). Preserves comments
+    and indentation by working as a string-level edit (no YAML
+    round-trip).
+
+    Insertion point: end of the setup list, BEFORE any non-list
+    sibling line (next top-level key, or EOF). Tolerant of varied
+    indentation: it samples the existing ``- `` items' indentation
+    and matches it for the new lines.
+    """
+    text = local_path.read_text()
+    lines = text.splitlines(keepends=True)
+
+    # Find the `setup:` line.
+    setup_idx = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("setup:") and not line.lstrip().startswith("setup: ["):
+            setup_idx = i
+            break
+    if setup_idx is None:
+        raise ValueError("local.yml has no expanded `setup:` block")
+
+    # Walk forward to find the end of the list. The list ends at
+    # the first line that:
+    # - is not blank/whitespace-only
+    # - is not a comment whose indent matches the items
+    # - and whose indent is <= the `setup:` line's indent
+    setup_indent = len(lines[setup_idx]) - len(lines[setup_idx].lstrip())
+    # Sample item indent — look at first `  - ` after setup_idx.
+    item_indent = setup_indent + 2  # YAML default
+    for j in range(setup_idx + 1, min(setup_idx + 30, len(lines))):
+        stripped = lines[j].lstrip()
+        if stripped.startswith("- "):
+            item_indent = len(lines[j]) - len(stripped)
+            break
+
+    # Insertion point: scan from setup_idx+1 forward to find last
+    # list-item or sibling line.
+    insert_at = len(lines)
+    for j in range(setup_idx + 1, len(lines)):
+        stripped_full = lines[j].rstrip("\n")
+        bare = stripped_full.lstrip()
+        cur_indent = len(stripped_full) - len(bare)
+        if not bare or bare.startswith("#"):
+            continue  # blank or comment — keep going
+        if cur_indent <= setup_indent:
+            insert_at = j
+            break
+
+    # Build new lines + idempotency filter.
+    existing_setup_block = "".join(lines[setup_idx:insert_at])
+    added = 0
+    new_chunk: list[str] = []
+    for c in chosen:
+        name = c["binary_name"]
+        path = c["path"]
+        # Idempotency: skip if name OR path already mentioned in
+        # setup. Re-running amend-daemons after a successful first
+        # pass should be a no-op.
+        if f"proctor-{name}.pid" in existing_setup_block:
+            continue
+        if f"./{path}" in existing_setup_block:
+            continue
+        pad = " " * item_indent
+        kill_line = (
+            f"{pad}- bash -c '[ -f /tmp/proctor-{name}.pid ] && "
+            f"kill \"$(cat /tmp/proctor-{name}.pid)\" 2>/dev/null; "
+            f"true'\n"
+        )
+        start_line = (
+            f"{pad}- bash -c 'set -a; . ./dev_env_local 2>/dev/null "
+            f"|| . ./dev_env 2>/dev/null || true; set +a; "
+            f"nohup go run ./{path} > /tmp/proctor-{name}.log "
+            f"2>&1 & echo $! > /tmp/proctor-{name}.pid'\n"
+        )
+        new_chunk.append(kill_line)
+        new_chunk.append(start_line)
+        added += 1
+
+    if added == 0:
+        return 0
+
+    # If insertion point is mid-file and the line before it is not
+    # already a newline-terminated list item, drop in cleanly.
+    # Atomic write: write to tmp, fsync, rename.
+    new_lines = lines[:insert_at] + new_chunk + lines[insert_at:]
+    new_text = "".join(new_lines)
+    tmp_path = local_path.with_suffix(local_path.suffix + ".wizard-tmp")
+    tmp_path.write_text(new_text)
+    tmp_path.replace(local_path)
+    return added
+
+
 def _detect_and_decide(repo_root: Path, current_tag: str | None) -> dict:
     """Delegate to wizard_decide_mode.py for the actual decision —
     keeps the decision logic in one place across versions."""
     from wizard_decide_mode import detect_state, decide_mode  # local import — avoid cycle when imported as a module
     state = detect_state(repo_root)
-    return {"state": state, **decide_mode(state, current_tag)}
+    return {"state": state, **decide_mode(state, current_tag, repo_root=repo_root)}
 
 
 def _run_step(
@@ -218,6 +357,16 @@ def _run_step(
                 question=decision["ask_user"]["question"],
                 options=decision["ask_user"]["options"],
             ), {**state, "step": _STEP_LEGACY_MIGRATION_ASKED}
+
+        # v0.7.8: `amend-daemons` — local.yml exists, setup is
+        # non-empty, but no `go run ./cmd/` daemon lines. Offer
+        # to scan + add.
+        if mode == "amend-daemons":
+            return _ask_user(
+                header="Daemon scan",
+                question=decision["ask_user"]["question"],
+                options=decision["ask_user"]["options"],
+            ), {**state, "step": _STEP_AMEND_DAEMONS_OFFERED}
 
         # Modes that fall back to legacy SKILL.md prose for now.
         if mode in ("fresh", "migrate", "bump-only-with-seed"):
@@ -337,6 +486,180 @@ def _run_step(
             "compatibility shim in schema.load_config will keep "
             "reading the legacy paths with a deprecation warning "
             "each run."
+        ), state
+
+    # ---------- v0.7.8: amend-daemons flow ----------
+    # Three-state chain: offered → scanned (post-bash) → picked
+    # (post-multi-select). Final write happens in the picked
+    # transition; emits `done`.
+    if step == _STEP_AMEND_DAEMONS_OFFERED:
+        if not answer:
+            return _error(
+                "wizard expected an --answer after the amend-daemons "
+                "offer question."
+            ), state
+        if "Scan for daemon binaries" not in answer:
+            # User picked "Skip — my setup is fine".
+            state["step"] = _STEP_DONE
+            return _done(
+                "Wizard exit. Daemon scan declined. Re-run "
+                "/proctor:proctor-init later to revisit."
+            ), state
+        # User picked "Scan". Emit a bash envelope to run the
+        # detector and dump its JSON to /tmp. We can't read the
+        # bash stdout through the state machine (envelope contract
+        # only returns rc), so the detector writes to a fixed file
+        # and the next state reads it back.
+        detector = plugin_root / "scripts" / "wizard_detect_binaries.py"
+        cmd = (
+            f'python3 "{detector}" --repo-root "{repo_root}" '
+            f'> "{_BINARIES_JSON_PATH}"'
+        )
+        return _bash(
+            cmd,
+            description=(
+                "Scan cmd/*/main.go + root main.go for daemons "
+                "(writes JSON to /tmp/proctor-wizard-binaries.json)."
+            ),
+        ), {**state, "step": _STEP_AMEND_DAEMONS_SCANNED}
+
+    if step == _STEP_AMEND_DAEMONS_SCANNED:
+        if bash_rc is None:
+            return _error(
+                "wizard expected a --bash-rc after the daemon scan "
+                "bash command. The harness should pass --bash-rc with "
+                "the detector's exit code."
+            ), state
+        if bash_rc != 0:
+            state["step"] = _STEP_DONE
+            return _done(
+                f"wizard_detect_binaries.py exited {bash_rc}. The "
+                "scan failed; review the bash output above. Local "
+                ".proctor/local.yml left untouched."
+            ), state
+        try:
+            data = json.loads(Path(_BINARIES_JSON_PATH).read_text())
+            candidates = data.get("candidates", [])
+        except (OSError, json.JSONDecodeError) as e:
+            state["step"] = _STEP_DONE
+            return _done(
+                f"Could not read binary scan output from "
+                f"{_BINARIES_JSON_PATH}: {e}. Re-run the wizard."
+            ), state
+        if not candidates:
+            state["step"] = _STEP_DONE
+            return _done(
+                "Daemon scan found no Go binaries under cmd/ or root "
+                "main.go. Nothing to amend. (This is normal for "
+                "Node / Python / Ruby projects.)"
+            ), state
+
+        # Build multi-select options. http-server / daemon /
+        # one-shot / unknown — all surfaced; descriptions cite the
+        # evidence so user can sanity-check the heuristic. Daemons
+        # are listed first (most likely to want), then unknowns,
+        # then one-shots (least likely).
+        priority = {"daemon": 0, "unknown": 1, "http-server": 2, "one-shot": 3}
+        ordered = sorted(
+            candidates,
+            key=lambda c: (priority.get(c.get("looks_like", "unknown"), 4),
+                           c.get("path", "")),
+        )
+        options = []
+        for c in ordered:
+            label_prefix = {
+                "daemon": "[recommended]",
+                "http-server": "[skip — already covered by Step 7f]",
+                "one-shot": "[skip — run on-demand]",
+                "unknown": "[unsure]",
+            }.get(c["looks_like"], "[?]")
+            ev = ", ".join(c.get("evidence", [])) or "no evidence"
+            options.append({
+                "label": f"{label_prefix} {c['path']}",
+                "description": (
+                    f"binary_name={c['binary_name']} · "
+                    f"looks_like={c['looks_like']} · evidence: {ev}"
+                ),
+            })
+        # Stash the candidates list so the next transition can map
+        # selected labels back to paths/binary-names without
+        # re-reading the JSON.
+        new_state = {
+            **state,
+            "step": _STEP_AMEND_DAEMONS_PICKED,
+            "amend_candidates": ordered,
+        }
+        return _ask_user(
+            header="Daemons to start in setup",
+            question=(
+                "Pick the binaries PRoctor should start during "
+                "setup. Daemons (publish loops / cron / workers) "
+                "are the typical pick. http-server entries are "
+                "already covered by the existing setup wait-loop "
+                "(Step 7f) — only re-add here if you want to start "
+                "an additional server. one-shot / unknown entries "
+                "are off by default; pick only if you know they "
+                "should run on every test."
+            ),
+            options=options,
+            multi_select=True,
+        ), new_state
+
+    if step == _STEP_AMEND_DAEMONS_PICKED:
+        if answer is None:
+            return _error(
+                "wizard expected an --answer after the daemon "
+                "multi-select. Pass the selected labels as a "
+                "comma-separated string (use '' if user picked "
+                "nothing)."
+            ), state
+        candidates = state.get("amend_candidates", [])
+        # Empty string == "user deselected everything" — valid;
+        # treat as a no-op.
+        selected_labels = [s.strip() for s in answer.split(",") if s.strip()]
+        # Map labels back to candidate dicts by suffix match (label
+        # ends with the path field). Tolerant: if a label doesn't
+        # match any candidate, skip it.
+        chosen = []
+        for label in selected_labels:
+            for c in candidates:
+                if c.get("path") and label.endswith(c["path"]):
+                    chosen.append(c)
+                    break
+        if not chosen:
+            state["step"] = _STEP_DONE
+            return _done(
+                "No daemons selected. `.proctor/local.yml` left "
+                "untouched."
+            ), state
+        # Amend local.yml. Path resolution: prefer .proctor/local.yml,
+        # fall back to .pr-test.local.yml (v0.3.x layout).
+        local_path = repo_root / ".proctor" / "local.yml"
+        if not local_path.exists():
+            local_path = repo_root / ".pr-test.local.yml"
+        if not local_path.exists():
+            state["step"] = _STEP_DONE
+            return _done(
+                "Could not find `.proctor/local.yml` (or legacy "
+                "`.pr-test.local.yml`) — nothing to amend. The "
+                "amend-daemons mode shouldn't have fired without "
+                "this file present; this is a wizard bug."
+            ), state
+        try:
+            added = _amend_local_yml_with_daemons(local_path, chosen)
+        except Exception as e:  # noqa: BLE001 — surface any failure
+            state["step"] = _STEP_DONE
+            return _done(
+                f"Failed to amend {local_path}: {e}. The file was "
+                "not modified (write is atomic — original is "
+                "preserved)."
+            ), state
+        state["step"] = _STEP_DONE
+        names = ", ".join(c["binary_name"] for c in chosen)
+        return _done(
+            f"Amended {local_path}: added {added} daemon line "
+            f"group(s) to `setup:` ({names}). Re-run PRoctor and "
+            "the planner will see the daemon(s) running."
         ), state
 
     # ---------- already done — re-invocation should never happen ----------

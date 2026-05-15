@@ -1835,6 +1835,289 @@ def test_wizard_corrupted_state_file_resets_gracefully(tmp_path):
     assert env["type"] in ("show", "ask_user", "done", "bash")
 
 
+# --- v0.7.8: amend-daemons state-machine flow -------------------------------
+
+
+def _make_v04_repo_with_setup_no_daemons(
+    tmp_path, *, pin="v0.7.7",
+):
+    """Variant of _make_v04_repo that DROPS a real `setup:` block in
+    `.proctor/local.yml` — non-empty, but without any `go run ./cmd/`
+    line. This is exactly the v0.7.6-era consumer shape that v0.7.8's
+    amend-daemons rule targets."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin=pin)
+    (tmp_path / ".proctor" / "local.yml").write_text(
+        "base_url: http://localhost:9801\n"
+        "setup:\n"
+        "  - bash -c 'echo starting test server'\n"
+        "  - bash -c 'nohup go run . > /tmp/proctor-app.log 2>&1 & echo $! > /tmp/proctor-app.pid'\n"
+        "  - bash -c 'for i in 1 2 3 4 5; do curl -sf http://localhost:9801/ > /dev/null && break; sleep 1; done'\n"
+        "auth:\n"
+        "  accounts:\n"
+        "    - name: developer\n"
+        "      email: x\n"
+    )
+    return tmp_path
+
+
+def test_wdm_v078_amend_daemons_fires_when_setup_lacks_cmd_daemons(tmp_path):
+    """v0.7.8 amend-daemons rule: consumer is on v0.4+ layout,
+    local.yml exists, setup has content, but NO `go run ./cmd/`
+    line. Wizard should offer to scan + amend."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    state = wdm_state(tmp_path)
+    # Pass current_tag matching the pin so bump-only doesn't preempt.
+    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
+    assert d["mode"] == "amend-daemons", d
+    assert d["ask_user"] is not None
+    assert "Scan for daemon binaries" in d["ask_user"]["options"][0]["label"]
+    assert "Skip" in d["ask_user"]["options"][1]["label"]
+
+
+def test_wdm_v078_amend_daemons_skipped_when_setup_has_cmd_daemon_line(tmp_path):
+    """When setup ALREADY has `go run ./cmd/` (the user already
+    accepted the v0.7.7 fresh-mode prompt, or amended earlier), the
+    rule does NOT fire — fall through to `current`."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.7")
+    (tmp_path / ".proctor" / "local.yml").write_text(
+        "base_url: x\n"
+        "setup:\n"
+        "  - bash -c 'nohup go run ./cmd/mcd-daemon > /tmp/d.log 2>&1 &'\n"
+    )
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
+    assert d["mode"] == "current", d
+
+
+def test_wdm_v078_amend_daemons_skipped_for_empty_setup(tmp_path):
+    """`setup: []` / `setup: ~` shouldn't trigger the offer — likely
+    an existing-env-mode consumer who has no setup deliberately."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.7")
+    (tmp_path / ".proctor" / "local.yml").write_text(
+        "base_url: x\nsetup: []\n"
+    )
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
+    assert d["mode"] == "current", d
+
+
+def test_wdm_v078_bump_only_wins_over_amend_daemons(tmp_path):
+    """When pin is out of date, bump-only fires first (higher
+    priority — action pin is more urgent than a setup
+    augmentation)."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.7.8", repo_root=tmp_path)
+    assert d["mode"] == "bump-only", d
+
+
+def test_wizard_v078_amend_daemons_first_invocation_emits_offer(tmp_path):
+    """v0.7.8 state machine: first call against an amend-daemons-
+    eligible repo emits ask_user with the scan/skip options."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.7.7",
+                      repo_root=tmp_path)
+    assert env["type"] == "ask_user"
+    assert env["header"] == "Daemon scan"
+    labels = [o["label"] for o in env["options"]]
+    assert any("Scan for daemon binaries" in l for l in labels)
+    assert any(l.startswith("Skip") for l in labels)
+
+
+def test_wizard_v078_amend_daemons_skip_path_emits_done(tmp_path):
+    """Two-iteration loop: offer → user picks Skip → done."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
+    env = _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="Skip — my setup is fine",
+    )
+    assert env["type"] == "done"
+    assert "declined" in env["summary"].lower()
+
+
+def test_wizard_v078_amend_daemons_scan_path_emits_bash(tmp_path):
+    """After user picks Scan, wizard emits a bash envelope to run
+    wizard_detect_binaries.py against the consumer repo."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
+    env = _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="Scan for daemon binaries you may want to start in setup",
+    )
+    assert env["type"] == "bash"
+    assert "wizard_detect_binaries.py" in env["command"]
+    assert "proctor-wizard-binaries.json" in env["command"]
+
+
+def test_wizard_v078_amend_daemons_after_scan_emits_multiselect(tmp_path):
+    """After the bash command finishes (rc=0 + JSON written), the
+    next invocation reads the JSON and emits a multi-select
+    ask_user with one option per detected candidate. Sets up
+    fake cmd/*/main.go files so the detector finds something."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    # Add a daemon binary the scanner will detect.
+    cmd_dir = tmp_path / "cmd" / "test-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+    )
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
+    _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="Scan for daemon binaries you may want to start in setup",
+    )
+    # Simulate the AI ran the bash command (manually invoke detector
+    # to populate the JSON file). The bash envelope's exact command
+    # is what the AI would run; we replicate it here.
+    import subprocess as sp
+    detector = (pathlib.Path(__file__).resolve().parent.parent
+                / "plugins" / "proctor" / "scripts"
+                / "wizard_detect_binaries.py")
+    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
+        sp.run(
+            ["python3", str(detector), "--repo-root", str(tmp_path)],
+            stdout=f, check=True,
+        )
+    env = _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        bash_rc=0,
+    )
+    assert env["type"] == "ask_user"
+    assert env.get("multi_select") is True
+    assert env["header"] == "Daemons to start in setup"
+    # The test-daemon candidate should appear in options.
+    labels = " ".join(o["label"] for o in env["options"])
+    assert "cmd/test-daemon/main.go" in labels
+
+
+def test_wizard_v078_amend_daemons_final_pick_amends_local_yml(tmp_path):
+    """Full happy path: user picks a daemon, wizard appends two
+    lines (kill + start) to local.yml's setup: block, emits done.
+    The next planner run will see the daemon's go-run line."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    cmd_dir = tmp_path / "cmd" / "test-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+    )
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
+    _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="Scan for daemon binaries you may want to start in setup",
+    )
+    import subprocess as sp
+    detector = (pathlib.Path(__file__).resolve().parent.parent
+                / "plugins" / "proctor" / "scripts"
+                / "wizard_detect_binaries.py")
+    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
+        sp.run(
+            ["python3", str(detector), "--repo-root", str(tmp_path)],
+            stdout=f, check=True,
+        )
+    _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        bash_rc=0,
+    )
+    # Final pick — the AI passes the selected label.
+    env = _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="[recommended] cmd/test-daemon/main.go",
+    )
+    assert env["type"] == "done"
+    assert "Amended" in env["summary"]
+    # Verify the local.yml was actually amended.
+    local = (tmp_path / ".proctor" / "local.yml").read_text()
+    assert "go run ./cmd/test-daemon/main.go" in local, local
+    assert "/tmp/proctor-test-daemon.pid" in local, local
+
+
+def test_wizard_v078_amend_daemons_empty_selection_is_noop(tmp_path):
+    """If user deselects every candidate, no file is modified and
+    wizard emits done with a no-op summary."""
+    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
+    cmd_dir = tmp_path / "cmd" / "test-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+    )
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
+    _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="Scan for daemon binaries you may want to start in setup",
+    )
+    import subprocess as sp
+    detector = (pathlib.Path(__file__).resolve().parent.parent
+                / "plugins" / "proctor" / "scripts"
+                / "wizard_detect_binaries.py")
+    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
+        sp.run(
+            ["python3", str(detector), "--repo-root", str(tmp_path)],
+            stdout=f, check=True,
+        )
+    _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        bash_rc=0,
+    )
+    # Pass empty selection.
+    original_local = (tmp_path / ".proctor" / "local.yml").read_text()
+    env = _run_wizard(
+        state_file, current_tag="v0.7.7", repo_root=tmp_path,
+        answer="",
+    )
+    assert env["type"] == "done"
+    assert "No daemons selected" in env["summary"]
+    # local.yml unchanged.
+    assert (tmp_path / ".proctor" / "local.yml").read_text() == original_local
+
+
+def test_wizard_v078_amend_daemons_idempotent_rerun(tmp_path):
+    """Running amend-daemons twice with the same selection should
+    not duplicate lines — the helper detects when the binary's
+    pidfile name OR path already appears in setup."""
+    from plugins.proctor.scripts.wizard_run import _amend_local_yml_with_daemons
+    local = tmp_path / "local.yml"
+    local.write_text(
+        "setup:\n"
+        "  - bash -c 'echo a'\n"
+        "  - bash -c 'echo b'\n"
+        "other_key: value\n"
+    )
+    chosen = [{
+        "path": "cmd/foo/main.go",
+        "binary_name": "foo",
+        "looks_like": "daemon",
+        "evidence": ["time.NewTicker"],
+    }]
+    added1 = _amend_local_yml_with_daemons(local, chosen)
+    assert added1 == 1
+    text1 = local.read_text()
+    # Second call: should detect existing lines and add nothing.
+    added2 = _amend_local_yml_with_daemons(local, chosen)
+    assert added2 == 0
+    assert local.read_text() == text1
+    # other_key sibling preserved + below the appended lines.
+    assert "other_key: value" in text1
+    # Verify the kill+start pair was inserted INSIDE the setup
+    # block (before the sibling key).
+    idx_pid = text1.find("/tmp/proctor-foo.pid")
+    idx_other = text1.find("other_key")
+    assert idx_pid >= 0
+    assert idx_pid < idx_other, (
+        "expected daemon lines to be inserted BEFORE the next "
+        "top-level key, not appended at EOF"
+    )
+
+
 # --- v0.4.6: render_item_artifacts (absolute paths + missing-artifact badges) ---
 
 from plugins.proctor.scripts.render_item_artifacts import render as render_artifacts
@@ -5253,6 +5536,117 @@ def test_detect_binaries_skips_non_main_go_files_in_cmd(tmp_path):
     assert out == {"candidates": []}
 
 
+# --- v0.7.8: classifier regressions found in mcd-website e2e ----------------
+
+
+def test_detect_binaries_v078_short_main_with_appkit_server_listen_and_serve(tmp_path):
+    """v0.7.8 regression: mcd-website's root main.go is 29 lines and
+    delegates to ``server.ListenAndServe(config.Config.HTTP, ...)``
+    (theplant's appkit pkg). The v0.7.7 classifier's regex only
+    matched ``http.ListenAndServe`` / ``router.ListenAndServe`` and
+    missed ``<pkg>.ListenAndServe`` — the short file then fell into
+    the ``one-shot`` bucket. v0.7.8 broadens the pattern to any
+    ``<lowercase-pkg>.ListenAndServe[TLS]?`` call so wrappers around
+    appkit (or any other framework's ListenAndServe) classify
+    correctly as ``http-server`` regardless of file size."""
+    (tmp_path / "main.go").write_text(
+        "package main\n"
+        "import (\n"
+        "    \"flag\"\n"
+        "    \"fmt\"\n"
+        "    \"runtime\"\n"
+        "    \"github.com/theplant/appkit/server\"\n"
+        ")\n"
+        "func main() {\n"
+        "    result := boot.InitApp(nil)\n"
+        "    flag.Parse()\n"
+        "    fmt.Printf(\"Go version: %s\\n\", runtime.Version())\n"
+        "    server.ListenAndServe(nil, result.Logger, result.Handler)\n"
+        "}\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    c = out["candidates"][0]
+    assert c["path"] == "main.go", out
+    assert c["looks_like"] == "http-server", c
+    assert "<pkg>.ListenAndServe" in c["evidence"]
+
+
+def test_detect_binaries_v078_listen_and_serve_tls_matches_too(tmp_path):
+    """The broadened pattern accepts both ``ListenAndServe`` and
+    ``ListenAndServeTLS``. Some appkit / proxy code paths only call
+    the TLS variant."""
+    (tmp_path / "cmd" / "tls-front").mkdir(parents=True)
+    (tmp_path / "cmd" / "tls-front" / "main.go").write_text(
+        "package main\n"
+        "func main() { proxy.ListenAndServeTLS(\":443\", \"c\", \"k\", nil) }\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    c = out["candidates"][0]
+    assert c["looks_like"] == "http-server", c
+    assert "<pkg>.ListenAndServe" in c["evidence"]
+
+
+def test_detect_binaries_v078_daemon_trumps_http_server_when_both_present(tmp_path):
+    """v0.7.8 regression: mcd-website's ``cmd/mcd-daemon/main.go``
+    has BOTH ``http.ListenAndServe`` (a tail-end ``/health-check``
+    admin endpoint) AND ``time.Tick(time.Minute)`` +
+    ``utils.RunJob`` (15 publish-on-tick goroutines). v0.7.7's
+    classifier checked http-server FIRST and picked ``http-server``;
+    the file's primary purpose is the daemon work — the HTTP server
+    is auxiliary. v0.7.8 swaps the priority so daemon wins when both
+    patterns are present."""
+    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        "import (\n"
+        "    \"net/http\"\n"
+        "    \"time\"\n"
+        ")\n"
+        "func main() {\n"
+        "    go func() {\n"
+        "        t := time.Tick(time.Minute)\n"
+        "        for range t {\n"
+        "            utils.RunJob(\"PublishAllergens\", time.Minute*5, func() {})\n"
+        "        }\n"
+        "    }()\n"
+        "    mux := http.NewServeMux()\n"
+        "    mux.Handle(\"/health-check\", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n"
+        "        w.WriteHeader(200)\n"
+        "    }))\n"
+        "    http.ListenAndServe(\":8080\", mux)\n"
+        "}\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    c = out["candidates"][0]
+    assert c["binary_name"] == "mcd-daemon"
+    # KEY ASSERTION: daemon, not http-server, even though both
+    # patterns match. Evidence is the daemon hits (ticker + RunJob).
+    assert c["looks_like"] == "daemon", (
+        f"expected daemon precedence over http-server but got {c!r}"
+    )
+    assert "time.Tick" in c["evidence"]
+    assert "RunJob" in c["evidence"]
+
+
+def test_detect_binaries_v078_evidence_dedupe_for_specific_http_label(tmp_path):
+    """When a specific http-server label matched (e.g. ``http.ListenAndServe``)
+    the generic ``<pkg>.ListenAndServe`` label is suppressed — both
+    technically match the source but the evidence list shouldn't carry
+    both for readability of the wizard's question text."""
+    cmd_dir = tmp_path / "cmd" / "plain-http"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        "import \"net/http\"\n"
+        "func main() { http.ListenAndServe(\":8080\", nil) }\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    ev = out["candidates"][0]["evidence"]
+    assert "http.ListenAndServe" in ev
+    assert "<pkg>.ListenAndServe" not in ev, ev
+
+
 # --- v0.7.7: plan_smells daemon-aware missing-runtime-verify check ----------
 
 
@@ -5541,3 +5935,20 @@ def test_proctor_init_md_documents_step_7_5_multi_main_detection_v077():
     assert "MODE=fresh" in text
     # The pidfile pattern (so daemons can be restarted across runs).
     assert "proctor-" in text and ".pid" in text
+
+
+def test_proctor_init_md_documents_amend_daemons_state_machine_v078():
+    """v0.7.8 wires daemon detection into the state machine for
+    existing consumers (MODE=amend-daemons). The /proctor-init prose
+    must document the new mode + multi_select envelope so AIs running
+    the wizard against a v0.7.6-era local.yml know to handle
+    multi-select AskUserQuestion + comma-joined answer."""
+    cmd_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "commands" / "proctor-init.md"
+    )
+    text = cmd_path.read_text()
+    assert "amend-daemons" in text
+    assert "multi_select" in text
+    # The harness must call AskUserQuestion in multi-select mode.
+    assert "multi-select" in text.lower()

@@ -2,6 +2,49 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.8 — 2026-05-15
+
+### Wizard daemon detection wired into state machine + two classifier fixes from mcd-website e2e
+
+v0.7.7 shipped multi-binary detection as **prose** in `commands/proctor-init.md` Step 7.5 plus the standalone `wizard_detect_binaries.py` helper, but did not wire any of it into `wizard_run.py`'s state machine — so an existing v0.7.6-era consumer running `/proctor:proctor-init` against their already-installed `.proctor/local.yml` never got the prompt. Separately, running the v0.7.7 classifier against mcd-website surfaced two real bugs in the heuristic: the root `main.go` (29 lines, appkit-style `server.ListenAndServe`) got classified as `one-shot`, and `cmd/mcd-daemon/main.go` (15 publish-on-tick goroutines + a tail-end `/health-check` `http.ListenAndServe`) got classified as `http-server` instead of `daemon`. Both meant the wizard would miss the actual daemon the user needed to start.
+
+Two fixes:
+
+**Fix 1 — amend-daemons mode wired into the state machine.** `wizard_decide_mode.py` adds a new rule (priority 7, after bump-only): when `.proctor/local.yml` exists, its `setup:` block has content, and NO line contains `go run ./cmd/`, the wizard returns `mode=amend-daemons`. `wizard_run.py` then drives the new mode end-to-end through three new states:
+
+- `_STEP_AMEND_DAEMONS_OFFERED` — emits `ask_user` (Scan / Skip).
+- `_STEP_AMEND_DAEMONS_SCANNED` — after the user picks Scan, emits a `bash` envelope that runs `wizard_detect_binaries.py` and dumps JSON to `/tmp/proctor-wizard-binaries.json`.
+- `_STEP_AMEND_DAEMONS_PICKED` — reads the JSON, emits a NEW multi-select `ask_user` envelope (`multi_select: true`) listing each candidate sorted daemon → unknown → http-server → one-shot. After the user's pick, the wizard amends `.proctor/local.yml setup:` via a new string-level helper `_amend_local_yml_with_daemons` (preserves comments, idempotent across re-runs — skips entries whose pidfile name OR path already appears in `setup:`).
+
+The `ask_user` envelope schema adds an optional `multi_select` boolean. `commands/proctor-init.md`'s harness prose is updated to call AskUserQuestion in multi-select mode and pass back the user's picks as a comma-joined string via `--answer "label1, label2"`. Single-select callers are unchanged.
+
+**Fix 2 — two classifier bugs in `wizard_detect_binaries.py`.**
+
+- **Broadened `<pkg>.ListenAndServe[TLS]?` matching.** Added `\b[a-z][A-Za-z0-9_]*\.ListenAndServe(?:TLS)?\b` to `_HTTP_SERVER_PATTERNS`. mcd-website's root `main.go` is a 29-line wrapper that delegates to `server.ListenAndServe(config.Config.HTTP, ...)` (theplant's appkit pkg). v0.7.7's regex only matched literal `http.ListenAndServe` / `router.ListenAndServe` so the short file fell into `one-shot`. v0.7.8 catches any package-method `ListenAndServe` call. Evidence-list dedupe suppresses the generic label when a more specific http-server label already fired (`http.ListenAndServe` evidence no longer also carries `<pkg>.ListenAndServe`).
+- **Daemon now trumps http-server when both patterns are present.** mcd-website's `cmd/mcd-daemon/main.go` has 15 publish-on-tick goroutines (`time.Tick(time.Minute)` + `utils.RunJob`) AND a tail-end 4-line `/health-check` `http.ListenAndServe`. v0.7.7's classifier checked http-server first and returned `http-server`. v0.7.8 flips the priority — daemon patterns checked first, http-server only when no daemon patterns matched. The long-running side-effect-emitting work is the file's primary purpose; the HTTP listener is auxiliary.
+
+**Verification against mcd-website's eight binaries** (used as motivating evidence):
+
+| binary | v0.7.7 | v0.7.8 |
+|---|---|---|
+| `main.go` (29 lines, appkit `server.ListenAndServe`) | `one-shot` (bug) | `http-server` |
+| `cmd/mcd-daemon/main.go` (15 goroutines + tail `http.ListenAndServe`) | `http-server` (bug) | `daemon` |
+| `cmd/mcd-app-config-worker/main.go` (publish ticker + health endpoint) | `http-server` (bug) | `daemon` |
+| `cmd/mcd-form/main.go` (`router.Run`) | `http-server` | `http-server` |
+| `cmd/mcd-form-fetch-data/main.go` (hourly ticker + health endpoint) | `http-server` (bug) | `daemon` |
+| `cmd/mcd-pages-publisher/main.go` (multiple tickers) | `daemon` | `daemon` |
+| `cmd/mcd-republisher/main.go` (one-shot republish + http.ListenAndServe) | `http-server` | `http-server` |
+| `cmd/mcd-sitemap-generator/main.go` (10-min ticker + health endpoint) | `http-server` (bug) | `daemon` |
+| `cmd/pre-run-test/main.go` (41 lines, no ticker/server) | `one-shot` | `one-shot` |
+
+Four binaries flipped to the correct classification (root main.go, mcd-daemon, mcd-app-config-worker, mcd-form-fetch-data, mcd-sitemap-generator). The 1-minute publish ticker is now consistently classified as `daemon` regardless of whether the binary also exposes a `/health-check` HTTP endpoint.
+
+**Tests 344 → 360.** New coverage:
+- `wizard_detect_binaries.py`: short-file appkit-wrapper case (regression for root `main.go`); `ListenAndServeTLS` variant; daemon-trumps-http-server with both patterns; evidence dedupe.
+- `wizard_decide_mode.py`: amend-daemons mode fires when local.yml's setup lacks `go run ./cmd/`; skipped when cmd-daemon line already present; skipped for empty `setup: []`; bump-only wins over amend-daemons when pin is out of date.
+- `wizard_run.py`: state-machine flow (offer → bash → multi-select → final pick → amend); skip path emits done; empty selection is a no-op; idempotent re-run doesn't duplicate lines.
+- `commands/proctor-init.md`: prose documents `amend-daemons` mode + `multi_select` envelope flag.
+
 ## v0.7.7 — 2026-05-15
 
 ### Multi-main detection + daemon-aware planner — runtime verification when the daemon is in setup
