@@ -411,7 +411,20 @@ def main(argv: list[str] | None = None) -> int:
         current_tag=args.current_tag,
         plugin_root=plugin_root,
     )
-    _save_state(state_file, new_state)
+    # v0.7.3: when the wizard reaches `step=done`, delete the state file
+    # instead of persisting it. The file's only purpose is "resume after
+    # interrupt" — once we've emitted `done` there's nothing to resume,
+    # and leaving the stale file confuses subsequent re-runs (a fresh
+    # wizard invocation should start from scratch, not resume "done").
+    # Also: keeps `.proctor/` clean of bookkeeping artifacts the consumer
+    # doesn't need to see.
+    if envelope.get("type") == "done":
+        try:
+            state_file.unlink()
+        except FileNotFoundError:
+            pass
+    else:
+        _save_state(state_file, new_state)
     _emit(envelope)
     return 0
 
