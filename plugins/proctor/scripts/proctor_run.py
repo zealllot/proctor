@@ -359,19 +359,36 @@ def _run_step(
                     f"test-plan.json could not be parsed for screenshot-"
                     f"contract validation: {e}"
                 ), state
-            if violations:
-                joined = "\n".join(f"  - {v}" for v in violations)
+            # v0.7.6: WARN-prefixed violations are advisory (the
+            # redesigned cross-item MD5 cluster check fires WARN for
+            # clusters ≥ 4 across distinct items; clusters 2-3 don't
+            # fire at all). Hard violations still abort.
+            hard_viols = [v for v in violations if not v.startswith("WARN ")]
+            warn_viols = [v for v in violations if v.startswith("WARN ")]
+            if hard_viols:
+                joined = "\n".join(f"  - {v}" for v in hard_viols)
+                if warn_viols:
+                    warn_joined = "\n".join(f"  - {v}" for v in warn_viols)
+                    joined += "\n\nAdvisory warnings (not blocking):\n" + warn_joined
                 return _error(
                     "test-results.json failed v0.6.5 screenshot-contract "
                     "validation. The executor produced fewer screenshots "
                     "than required for one or more items' item-type "
-                    "bucket:\n" + joined + "\n\n"
+                    "bucket, or screenshots within a single item are "
+                    "byte-identical:\n" + joined + "\n\n"
                     "Re-dispatch the executor for the affected items "
                     "(or hand-add the missing screenshots, then "
                     "re-validate). See "
                     "plugins/proctor/agents/pr-test-executor.md for the "
                     "per-item-type screenshot matrix."
                 ), state
+            if warn_viols:
+                # Advisory only — log + continue.
+                joined = "\n".join(f"  - {v}" for v in warn_viols)
+                sys.stderr.write(
+                    "[proctor] screenshot contract advisory warnings:\n"
+                    + joined + "\n"
+                )
         # Decide if fix is needed.
         fail_count = tr["summary"]["fail"]
         aborted = tr.get("aborted")

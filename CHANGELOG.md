@@ -2,6 +2,39 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.6 — 2026-05-15
+
+### Bundle 5 fixes from user audit against PR-#1126 v0.7.5 e2e (run `pr1126-977d89c-4df3ee71`, 30:31 wall-clock)
+
+The v0.7.5 e2e fixed the bottom-three problems from v0.7.4 (doc-aware plan, uid-scoped screenshots, MD5-based cross-item lint) but the user's review surfaced five new gaps where the pipeline was still leaving signal on the floor or being too noisy:
+
+1. **Planner never reads links the PR cites.** Slack threads / Jira tickets / Google docs hold the "decision (2026-05-11): trim instead of reject" + "actually we also need to enforce server-side" that the PR body doesn't carry. v0.7.5 SKILL prose explicitly forbade fetching them. The planner shipped items based on diff + body alone and missed off-PR requirements.
+2. **PR review comments invisible to the planner.** Same root issue from a different angle — `gh pr view --json comments,reviews` was never called; reviewers' "wait we also need X" remarks landed in GitHub's review thread and PRoctor's plan didn't reflect them.
+3. **MD5 lint over-firing.** v0.7.5's lint flagged ANY cluster of byte-identical screenshots across chrome items as a HARD pipeline-aborting violation. Real runs had 3-share clusters (render-check + after-empty-save + after-reload-empty all legitimately looked like "form with empty inputs") — the pipeline would abort on three valid screenshots. Threshold needed tuning.
+4. **No mechanical check that the plan covers what the PR body says.** Even with `pr_context.requirement_hints` in the ChangeMap, plan_smells didn't verify any item actually addressed each hint. A plan could ship covering 0/4 hints and pass strict mode.
+5. **No mechanical check that new diff symbols get exercised.** A new `func SplitTags(s string) []string` could land in the diff with only a lint-only "grep that SplitTags exists" item, never actually invoking it at runtime. The plan looked complete; the symbol was untested.
+
+Plus a performance observation: chrome-devtools items take ~5-15 sec of AI turn overhead per tool call; the 30:31 wall-clock e2e ran 100+ such calls, dominated by per-turn overhead rather than browser work.
+
+Five fixes:
+
+**Fix A — analyzer fetches external links + PR comments.** `plugins/proctor/skills/analyzing-pr-changes/SKILL.md` adds steps 2a and 2b: always `gh pr view --json comments,reviews` (surfaces into `pr_context.comments[]`), and for each link, try the appropriate Claude.ai MCP connector — Jira / Confluence / Slack / Google Drive / GitHub — surfacing the body into `pr_context.linked_content[].excerpt` (≤ 4KB, capped at 8 entries). Auth-fail / rate-limit / connector-unavailable → record `fetched: false` and continue, don't abort. ToolSearch pre-loads the connector tools at SKILL entry. Schema (`scripts/schema.py`) extends `validate_change_map` to accept the two new optional fields.
+
+**Fix B — planner self-audit worksheet + doc-link traversal.** `plugins/proctor/skills/planning-pr-tests/SKILL.md` adds two sections. Doc-link traversal: after reading top-level repo docs, follow internal markdown links (`[text](path.md)`) one level deep when the filename suggests testing relevance (test / testing / publishing / environments / patterns), capped at 5 follows. Self-audit worksheet: BEFORE returning, build a `planner_coverage_audit` matrix at top of test-plan.json proving each PR-body criterion / linked-content criterion / PR comment / new diff symbol has at least one covering item; `gaps[]` documents inputs the planner consciously couldn't cover. Schema (`scripts/schema.py`) extends `validate_test_plan` to accept the optional `planner_coverage_audit` field.
+
+**Fix C — plan_smells: `pr-body-coverage` + `new-symbol-not-exercised`.** `plugins/proctor/scripts/plan_smells.py` adds two new generic (NOT feature-specific) lint rules: `pr-body-coverage` token-overlaps each PR body / linked-content / comment criterion against every plan item's what/how/rationale; fires when no item has ≥ 50% token overlap or ≥ 3 named tokens. `new-symbol-not-exercised` parses `+func` / `+def` / `+export function` / `+export class` / `+export const` from the diff, fires when only lint-only items mention the symbol. Both checks honor `planner_coverage_audit.gaps[]` excuses so the lint doesn't double-warn. CLI adds `--change-map` and `--diff` flags (backward-compat: absent inputs no-op the new checks); the planning SKILL invokes both. Token-based and symbol-based — no hard-coded feature patterns.
+
+**Fix D — MD5 lint redesign.** `plugins/proctor/scripts/validate_screenshots_contract.py` splits the v0.7.5 single check into two functions. `_check_within_item_identical_md5` is HARD: a single item's `screenshots[]` array with 2+ entries at the same MD5 is the "before/after pair was actually before/before" bug. `_check_cross_item_md5_cluster` is WARN-level (advisory, not pipeline-aborting): ≥ 4 entries across distinct items in one cluster is the v0.7.4 PR-#1126 7-share pattern; clusters of 2-3 cross-item are legitimate same-state sharing and don't fire. `proctor_run.py` distinguishes WARN-prefixed violations from HARD and logs WARN to stderr without aborting.
+
+**Fix E — executor chrome batching.** `plugins/proctor/agents/pr-test-executor.md` adds a "Batch DOM ops in one evaluate_script" section after the pre-screenshot requirements. Multiple DOM operations in the SAME page state (fill A + fill B + scroll + verify) collapse into ONE `evaluate_script` call instead of N separate `fill` / `click` / `evaluate_script` calls. Explicit boundary list (navigate_page / click submit / wait_for / take_screenshot / take_snapshot) marks where batching must NOT cross. Halves chrome-driven items' turn count at no expressivity cost.
+
+**Tests 304 → 327** (+23 new):
+- 4 schema acceptance tests for `pr_context.comments`, `pr_context.linked_content`, `planner_coverage_audit`
+- 8 plan_smells tests for pr-body-coverage / new-symbol-not-exercised (synthetic ChangeMap + diff, lint-only-coverage vs runtime-coverage, excused-by-audit-gaps, CLI integration)
+- 5 screenshot-contract tests for within-item HARD / cross-item 3-cluster pass / cross-item 4-cluster WARN
+- 3 SKILL.md / agent.md prose contract tests pinning the link-fetch table, coverage-audit worksheet, and evaluate_script batching prose
+- 2 existing tests rewired to v0.7.6 semantics: the v0.7.5 2-item cross-item test now passes (below threshold), the v0.7.5 4-entry cluster test now produces 2 HARD + 1 WARN
+
 ## v0.7.5 — 2026-05-15
 
 ### Fix screenshot quality + plan doc-awareness + legacy shape rejection

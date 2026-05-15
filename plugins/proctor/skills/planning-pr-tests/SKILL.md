@@ -89,6 +89,26 @@ Skip when none of these exist — small repos don't carry docs.
 
 **Use what you find in `rationale:` and `how:`.** Each item's `rationale:` field should cite the doc/spec that defines the behavior being verified (e.g. `Per CLAUDE.md "All admin form changes need round-trip", t-006 covers reload after save.`). `how:` can reference doc-stated values directly (e.g. `validator at api.go:88-104 rejects empty Title per <docs/validators.md>`). Reviewers trust the plan more when items trace back to documented intent, not just diff inference.
 
+**Cite linked sources explicitly in `rationale:` when they exist.** When `pr_context.linked_content[]` contains entries with `fetched: true`, the planner has actual content (not just URLs) — quote them where they drove a planning decision. Examples:
+
+- `Per [Slack: ts=p1777...]: "comma-separated tokens agreed"; t-005 verifies a comma in IncludeTags is accepted as the token separator.`
+- `Per [Jira MDX-12659 description]: "trim instead of reject for backward compat"; t-007 covers the trim path.`
+- `Per [GitHub issue #523 comments]: maintainer pushed back on the 422 response and asked for 200+toast; t-003 asserts toast not 422.`
+
+`pr_context.comments[]` entries are also citation-worthy when a maintainer's comment changes scope. Use `Per [PR comment by @alice 2026-05-12]: "..."` so the report makes the comment traceable.
+
+### Doc-link traversal — follow internal markdown links one level deep (v0.7.6+)
+
+After reading the top-level docs (`README.md` / `CLAUDE.md` / `AGENTS.md` / `docs/testing-notes.md` / `docs/patterns.md` / etc.), follow internal markdown links (`[text](path.md)` form) ONE level deep when the linked doc's filename suggests it's testing-related. Specifically follow when the linked filename contains any of: `test`, `testing`, `publishing`, `environments`, `deploy`, `auth`, `validators`, `patterns`, `conventions`, `e2e`, `journeys`, `runbook`. Skip filenames that look like generic indexes (`README.md`, `index.md`) — they'd cascade endlessly.
+
+Constraints to keep this bounded:
+- Cap at 5 followed links per analyze session.
+- Skip when the same doc is already on the read-list (de-dupe by path).
+- Only follow relative paths in the same repo. Skip absolute URLs and links to other repos.
+- If a followed doc is empty / 404 / a binary asset, skip and don't retry.
+
+The followed docs feed the same `rationale:` discipline above — when a planning decision came from a 2nd-level doc, cite it (e.g. `Per docs/testing-notes.md → docs/journeys/save-flow.md: "every save flow must assert toast + reload"`).
+
 **When repo docs conflict with the diff**, plan items for BOTH — same rule as `pr_context.requirement_hints` vs diff. The mismatch is signal.
 
 ## Procedure
@@ -647,14 +667,70 @@ When `how:` suggests specific values for a happy save (a name, an email, a URL),
 
 Why: records created by PRoctor end up in shared dev / staging databases. `Reward "test"` is ambiguous; `Reward "ai-test-image-reward-t007"` is unmistakably from a PRoctor run and safe to GC. The convention also lets the human reviewer grep the DB for `ai-test-` to find every PRoctor-created record from any run.
 
+## Coverage worksheet — write it BEFORE returning (v0.7.6+, mandatory)
+
+Before running the plan_smells lint as the final step, build a coverage matrix that proves each load-bearing input has at least one item exercising it. This is the planner's self-audit — it forces you to look at every input the analyzer surfaced and match it to a plan item, instead of writing the plan from the diff alone and silently dropping requirements from PR comments / linked Jira tickets / new symbols introduced by the diff.
+
+Walk these inputs IN ORDER:
+
+1. **`pr_context.requirement_hints[]`** — each bullet is a documented acceptance criterion. For each entry, identify which item(s) cover it. If none, add an item before returning.
+2. **`pr_context.linked_content[].excerpt`** — when `fetched: true`, scan the excerpt for testable criteria (lines starting with `- [ ]`, `must`, `should`, `verify that`, decision statements like "Decision: ..."). For each, identify which item(s) cover it.
+3. **`pr_context.comments[].body`** — PR-author and reviewer comments often add scope after the PR body was written. For each comment that introduces a NEW criterion (not just "LGTM" / "thanks"), identify which item(s) cover it.
+4. **Each new top-level symbol/function/method in the diff** — scan added lines for `+func <Name>(`, `+def <Name>(`, `+export function <Name>(`, `+export class <Name>(`, `+export const <Name>`. For each, identify which item EXERCISES (not just lints) it. `lint-only` items count as `lint_only`; a `chrome-devtools` / `bash` / `curl` item that actually CALLS the symbol counts as `exercised_by`.
+5. **Each new branch in a validator** — when the diff adds a new `if` / `case` / `switch` branch in a validator file (heuristically files matching `*_validator.*` / `models/<resource>.*` / `*_validation.*`), identify which item triggers it.
+
+Write the worksheet into a `planner_coverage_audit` top-level field of `test-plan.json` (the schema accepts this as an optional field):
+
+```jsonc
+{
+  "planner_coverage_audit": {
+    "by_pr_body": [
+      { "criterion": "display_name capped at 100 chars", "covered_by": ["t-005"] }
+    ],
+    "by_linked_content": [
+      { "source": "Jira PROJ-42",
+        "criterion": "trim instead of reject for backward compat",
+        "covered_by": ["t-006"] }
+    ],
+    "by_comments": [
+      { "source": "PR comment by @alice 2026-05-12",
+        "criterion": "enforce 100-char cap at API-level not just form",
+        "covered_by": ["t-007"] }
+    ],
+    "by_diff_symbols": [
+      { "symbol": "splitTags",
+        "exercised_by": ["t-005", "t-006"],
+        "lint_only": [] },
+      { "symbol": "TrimDisplayName",
+        "exercised_by": ["t-007"],
+        "lint_only": ["t-002"] }
+    ],
+    "gaps": []
+  },
+  "journeys": [...],
+  "items": [...]
+}
+```
+
+**Gaps handling:**
+- If you finish the walk and discover a row has no covering item, ADD AN ITEM before returning. Don't leave the gap in the worksheet and return — the worksheet's job is to force the add.
+- If you genuinely can't add an item (e.g. the new symbol is a private helper with no callable surface; the criterion is "log message wording" that's neither lint-checkable nor runtime-observable), leave the row in `gaps` with a short explanation. Example: `{"input": "private helper foo()", "why_no_item": "Internal helper; tested transitively via t-005"}`. The plan_smells lint downstream (Fix C) reads `gaps` and won't double-report inputs the planner explicitly excused.
+- Empty `gaps: []` means clean — every input is covered.
+
+This worksheet is part of the contract — schema accepts it as optional, but the planner skill SHOULD always emit it. Reviewers reading the plan can scan the worksheet to confirm the planner saw the same inputs they did.
+
 ## Self-audit BEFORE handing the plan back (v0.3.35+)
 
 After writing `test-plan.json` and BEFORE returning to the orchestrator, you MUST run the plan-smells lint as the LAST step of this skill. This is the safety net for everything in this skill — every rule above (one-assertion-per-item, write-needs-roundtrip, coverage balance) is mechanically checked here:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
+    --change-map .proctor/runs/<run-id>/change-map.json \
+    --diff .proctor/runs/<run-id>/diff.patch \
     < .proctor/runs/<run-id>/test-plan.json
 ```
+
+The `--change-map` and `--diff` flags (v0.7.6+) enable the additional `pr-body-coverage` and `new-symbol-not-exercised` checks. When either file is absent (legacy runs), those checks silently no-op and only the v0.7.5 plan-internal lints run.
 
 - **Exit 0** → plan is clean. Print `[proctor:plan] done — N items planned, plan_smells clean` and return.
 - **Exit 1** → READ the warnings on stdout. Each warning tells you exactly what's wrong: items combining happy+negative phrasing, write actions without a `data_from` sibling doing round-trip verification, or 2+ negative items with zero happy-path saves (the "all-negative plan" coverage gap). Regenerate the plan addressing every warning:
