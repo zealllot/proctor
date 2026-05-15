@@ -1,21 +1,14 @@
 """Step-iterator driver for the /proctor:proctor-init wizard.
 
-v0.5.0 introduced a state-machine driver to replace 1300+ lines of
-prose in ``commands/proctor-init.md``. v0.7.8 added an
-``amend-daemons`` mode behind a single-mode dispatcher
-(``wizard_decide_mode.py``). Real runs against mcd-website found
-the single-mode dispatcher couldn't cover the "multiple things
-need doing in one wizard invocation" case — a stale action pin
-AND a missing supplementary binary in setup AND a missing
-local.yml all at once.
-
-v0.7.9 (this file): the wizard becomes a STEP ITERATOR over the
-ordered list returned by ``wizard_decide_steps.decide_steps()``.
-Each step is a self-contained state machine with its own sub-states
-(offered / scanned / picked / written / etc.). When a step
-completes, the iterator pops the next step and starts it. The
-terminal ``done`` envelope only fires when ALL pending steps have
-completed.
+v0.5.0 introduced the state-machine driver. v0.7.9 generalized it
+into a step iterator over an ordered list. v0.7.11 simplifies the
+step set: the v0.7.7–v0.7.10 ``step_supplement_setup`` (detect
+``cmd/*/main.go`` binaries, classify them, write ``setup-block.yml``)
+is REMOVED. PRoctor doesn't try to be smart about project startup
+anymore — the project owns its launch. The new
+``step_dev_launcher`` just asks the user for their launch command
+(``./dev.sh all`` / ``make dev`` / ``pnpm dev`` / etc.) and writes
+it into ``.proctor/config.yml.dev_launcher``.
 
 ## IPC protocol (unchanged from v0.5.0)
 
@@ -68,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -87,11 +81,9 @@ SUB_ASKED = "asked"
 SUB_COMPLETE = "complete"
 
 
-# Path where wizard_run.py asks the AI to dump the binaries JSON
-# between the bash envelope and the next state transition. Kept in
-# /tmp so it doesn't litter the repo, fixed path so re-entry after
-# AI crash can find it without re-scanning.
-_BINARIES_JSON_PATH = "/tmp/proctor-wizard-binaries.json"
+# v0.7.7–v0.7.10 dropped binaries JSON to /tmp/proctor-wizard-binaries.json
+# between the wizard's scan-bash envelope and the multi-select. Gone in
+# v0.7.11 — step_dev_launcher asks the user directly, no scanning.
 
 
 def _load_state(state_file: Path) -> dict:
@@ -173,190 +165,69 @@ def _bash(command: str, description: str = "") -> dict:
     return {"type": "bash", "command": command, "description": description}
 
 
-# --- amend-local-yml helper (used by step_supplement_setup) --------
+# v0.7.11: the v0.7.7–v0.7.10 helpers `_amend_local_yml_with_daemons`
+# (inserted go-run kill+start pairs into local.yml) and
+# `_write_setup_block_yml` (wrote `.proctor/setup-block.yml`) are
+# gone — they belonged to the deleted supplement-setup step. PRoctor
+# doesn't insert project-specific launch lines anymore; the project
+# owns its launch via its own `./dev.sh` / `make dev` / `pnpm dev`
+# script and the wizard's dev_launcher step just records the
+# command.
 
-def _amend_local_yml_with_daemons(
-    local_path: Path,
-    chosen: list[dict],
-) -> int:
-    """Insert kill+start command pairs into ``setup:`` of a local.yml.
 
-    For each candidate in ``chosen``, append two lines to the
-    ``setup:`` list:
+# --- helper: write a YAML block into .proctor/config.yml ------------
 
-    .. code-block:: yaml
+def _append_dev_launcher_to_config(
+    config_path: Path,
+    start: str,
+    stop: str | None,
+    wait_for: str | None,
+    wait_timeout_seconds: int | None,
+) -> None:
+    """Append a ``dev_launcher:`` block to ``config_path``. Idempotent:
+    when the block already exists the file is left untouched.
 
-        - bash -c '[ -f /tmp/proctor-<NAME>.pid ] && kill ...'
-        - bash -c 'set -a; . ./dev_env_local ...; nohup go run ./<PATH> ...'
-
-    Returns the count of candidates actually added (skips those
-    whose path/binary-name already appears anywhere in the setup
-    block — idempotent re-runs don't duplicate). Preserves comments
-    and indentation by working as a string-level edit (no YAML
-    round-trip).
-
-    Insertion point: end of the setup list, BEFORE any non-list
-    sibling line (next top-level key, or EOF).
-
-    Function name preserved from v0.7.8 for backward-compat with
-    tests that import it directly. The lines it writes are
-    intentionally identical to v0.7.8 — only the surrounding wizard
-    UX uses the new ``runs-loop`` / supplementary-binary terminology.
+    Implementation note: string-level edit so existing comments and
+    formatting are preserved. The YAML written matches what
+    ``schema.validate_pr_test_config`` accepts.
     """
-    text = local_path.read_text()
-    lines = text.splitlines(keepends=True)
-
-    setup_idx = None
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("setup:") and not line.lstrip().startswith("setup: ["):
-            setup_idx = i
-            break
-    if setup_idx is None:
-        raise ValueError("local.yml has no expanded `setup:` block")
-
-    setup_indent = len(lines[setup_idx]) - len(lines[setup_idx].lstrip())
-    item_indent = setup_indent + 2
-    for j in range(setup_idx + 1, min(setup_idx + 30, len(lines))):
-        stripped = lines[j].lstrip()
-        if stripped.startswith("- "):
-            item_indent = len(lines[j]) - len(stripped)
-            break
-
-    insert_at = len(lines)
-    for j in range(setup_idx + 1, len(lines)):
-        stripped_full = lines[j].rstrip("\n")
-        bare = stripped_full.lstrip()
-        cur_indent = len(stripped_full) - len(bare)
-        if not bare or bare.startswith("#"):
-            continue
-        if cur_indent <= setup_indent:
-            insert_at = j
-            break
-
-    existing_setup_block = "".join(lines[setup_idx:insert_at])
-    added = 0
-    new_chunk: list[str] = []
-    for c in chosen:
-        name = c["binary_name"]
-        path = c["path"]
-        if f"proctor-{name}.pid" in existing_setup_block:
-            continue
-        if f"./{path}" in existing_setup_block:
-            continue
-        pad = " " * item_indent
-        kill_line = (
-            f"{pad}- bash -c '[ -f /tmp/proctor-{name}.pid ] && "
-            f"kill \"$(cat /tmp/proctor-{name}.pid)\" 2>/dev/null; "
-            f"true'\n"
-        )
-        start_line = (
-            f"{pad}- bash -c 'set -a; . ./dev_env_local 2>/dev/null "
-            f"|| . ./dev_env 2>/dev/null || true; set +a; "
-            f"nohup go run ./{path} > /tmp/proctor-{name}.log "
-            f"2>&1 & echo $! > /tmp/proctor-{name}.pid'\n"
-        )
-        new_chunk.append(kill_line)
-        new_chunk.append(start_line)
-        added += 1
-
-    if added == 0:
-        return 0
-
-    new_lines = lines[:insert_at] + new_chunk + lines[insert_at:]
-    new_text = "".join(new_lines)
-    tmp_path = local_path.with_suffix(local_path.suffix + ".wizard-tmp")
+    text = config_path.read_text() if config_path.exists() else ""
+    if re.search(r"^dev_launcher:", text, re.MULTILINE):
+        return  # already present — caller checked but be defensive
+    lines = ["dev_launcher:", f"  start: {_yaml_quote(start)}"]
+    if stop:
+        lines.append(f"  stop: {_yaml_quote(stop)}")
+    if wait_for:
+        lines.append(f"  wait_for: {_yaml_quote(wait_for)}")
+    if wait_timeout_seconds:
+        lines.append(f"  wait_timeout_seconds: {wait_timeout_seconds}")
+    block = "\n".join(lines) + "\n"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    new_text = text + block
+    tmp_path = config_path.with_suffix(config_path.suffix + ".wizard-tmp")
     tmp_path.write_text(new_text)
-    tmp_path.replace(local_path)
-    return added
+    tmp_path.replace(config_path)
 
 
-def _write_setup_block_yml(
-    setup_block_path: Path,
-    chosen: list[dict],
-) -> int:
-    """Write or amend ``.proctor/setup-block.yml`` with kill+start
-    command pairs for each chosen binary.
-
-    The file is the canonical source for the ``setup:`` block —
-    ``seed-local.sh`` reads from here when regenerating
-    ``.proctor/local.yml`` (v0.7.9+; pre-v0.7.9 seed scripts had the
-    block hard-coded in a heredoc, so wizard amendments were lost on
-    every seed-script re-run). When the file already exists, this
-    function reads it, adds only the new entries (idempotent by
-    pidfile name / path), and rewrites.
-
-    When the file doesn't exist, it's created with a minimal template
-    header + the ``setup:`` array containing one kill+start pair per
-    chosen binary.
-
-    Returns the count of binaries actually added (0 if every chosen
-    one was already in the existing block).
-    """
-    template_header = (
-        "# AUTO-MANAGED by /proctor:proctor-init wizard. Hand edits\n"
-        "# will be honored until the next wizard run that touches\n"
-        "# the supplementary-binaries step.\n"
-        "#\n"
-        "# Re-run `claude /proctor:proctor-init` to update.\n"
-        "# Then re-run `./.proctor/seed-local.sh` so the generated\n"
-        "# `.proctor/local.yml` picks up the new setup block.\n"
+def _yaml_quote(value: str) -> str:
+    """Render ``value`` as a YAML scalar that round-trips through any
+    safe loader. Single-quote-wrap when the string contains characters
+    a bare scalar can't carry; otherwise leave as a plain scalar."""
+    if value == "":
+        return "''"
+    # Strings with these characters or a leading reserved character
+    # MUST be quoted in YAML.
+    needs_quote = (
+        any(c in value for c in ":#&*!|>'\"%@`{}[]\n")
+        or value[0] in "-?,"
+        or value != value.strip()
     )
-    if setup_block_path.exists():
-        try:
-            existing = setup_block_path.read_text(errors="replace")
-        except OSError:
-            existing = ""
-    else:
-        existing = ""
-
-    if "setup:" not in existing:
-        existing = template_header + "setup:\n"
-
-    # Detect existing entries by pidfile name and path (same
-    # idempotency as _amend_local_yml_with_daemons).
-    added = 0
-    new_lines: list[str] = []
-    for c in chosen:
-        name = c["binary_name"]
-        path = c["path"]
-        if f"proctor-{name}.pid" in existing:
-            continue
-        if f"./{path}" in existing:
-            continue
-        new_lines.append(
-            f"  - bash -c '[ -f /tmp/proctor-{name}.pid ] && "
-            f"kill \"$(cat /tmp/proctor-{name}.pid)\" 2>/dev/null; "
-            f"true'\n"
-        )
-        new_lines.append(
-            f"  - bash -c 'set -a; . ./dev_env_local 2>/dev/null "
-            f"|| . ./dev_env 2>/dev/null || true; set +a; "
-            f"nohup go run ./{path} > /tmp/proctor-{name}.log "
-            f"2>&1 & echo $! > /tmp/proctor-{name}.pid'\n"
-        )
-        added += 1
-
-    if added == 0:
-        # Nothing new to add. But still ensure the template exists
-        # — if the file was absent and we just constructed an empty
-        # ``setup:`` block above, write it so the next wizard run
-        # sees the file.
-        if not setup_block_path.exists():
-            setup_block_path.parent.mkdir(parents=True, exist_ok=True)
-            setup_block_path.write_text(existing)
-        return 0
-
-    new_text = existing
-    if not new_text.endswith("\n"):
-        new_text += "\n"
-    new_text += "".join(new_lines)
-    setup_block_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = setup_block_path.with_suffix(
-        setup_block_path.suffix + ".wizard-tmp"
-    )
-    tmp_path.write_text(new_text)
-    tmp_path.replace(setup_block_path)
-    return added
+    if not needs_quote:
+        return value
+    # Single-quote form: escape internal single quotes by doubling them.
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
 
 
 # --- detection + decision (delegates to wizard_decide_steps) -------
@@ -856,24 +727,42 @@ def _migrate_seed_local_sh(
     return f"migrated-{salvage_outcome}"
 
 
-@_register("step_supplement_setup")
-def _handle_supplement(
+@_register("step_dev_launcher")
+def _handle_dev_launcher(
     state, step_data, answer, bash_rc, repo_root, plugin_root,
     current_tag,
 ):
-    """Scan cmd/* binaries and ask which to add to setup-block.yml.
+    """Ask how the project starts its local dev environment and
+    record the answer.
+
+    Three paths the user can pick from the initial ask_user:
+
+    A) "I have a one-click script" — wizard follows up with
+       open-ended prompts for ``start`` / ``stop`` / ``wait_for`` /
+       ``wait_timeout_seconds`` then appends a ``dev_launcher:``
+       block to ``.proctor/config.yml``.
+    B) "Show me a generic template I can adapt" — wizard copies
+       ``plugins/proctor/templates/dev-launcher.sh.template`` to
+       ``.proctor/dev-launcher-template.sh`` (chmod +x). No
+       project-specific code is written; the file has TODO markers
+       the user fills in with another Claude Code session.
+    C) "Skip — keep using the legacy ``setup:`` array" — wizard
+       emits a ``show`` envelope explaining the legacy path remains
+       supported. No file changes.
 
     Sub-states:
-      None → 'offered' (ask scan / skip)
-      'offered' + answer="Scan..." → 'scanning' (emit bash to run
-                                     wizard_detect_binaries)
-      'offered' + answer="Skip..." → SUB_COMPLETE (skipped)
-      'scanning' + bash_rc=0 → 'picked' (emit multi-select ask)
-      'picked' + answer → write setup-block.yml, SUB_COMPLETE.
+      None → 'offered' (initial 3-option ask)
+      'offered' + answer A → 'ask_start'   (open-ended)
+      'ask_start' + answer → 'ask_stop'
+      'ask_stop' + answer → 'ask_wait_for'
+      'ask_wait_for' + answer → 'ask_timeout'
+      'ask_timeout' + answer → write config, SUB_COMPLETE
+      'offered' + answer B → write template, SUB_COMPLETE
+      'offered' + answer C → SUB_COMPLETE (skipped)
     """
     sub = step_data.get("sub")
     if sub is None:
-        info = _step_info("step_supplement_setup")
+        info = _step_info("step_dev_launcher")
         return (
             _ask_user(
                 header=info["ask_user"]["header"],
@@ -887,238 +776,236 @@ def _handle_supplement(
         if not answer:
             return (
                 _error(
-                    "wizard expected an --answer after the supplement-"
-                    "setup offer."
+                    "wizard expected an --answer after the "
+                    "dev-launcher offer."
                 ),
                 step_data,
                 SUB_COMPLETE,
             )
-        if "Scan for supplementary binaries" not in answer:
+        if "one-click script" in answer:
             return (
-                None,
-                {**step_data, "outcome": "skipped"},
-                SUB_COMPLETE,
-            )
-        detector = plugin_root / "scripts" / "wizard_detect_binaries.py"
-        cmd = (
-            f'python3 "{detector}" --repo-root "{repo_root}" '
-            f'> "{_BINARIES_JSON_PATH}"'
-        )
-        return (
-            _bash(
-                cmd,
-                description=(
-                    "Scan cmd/*/main.go + root main.go for "
-                    "supplementary binaries (writes JSON to "
-                    f"{_BINARIES_JSON_PATH})."
-                ),
-            ),
-            {**step_data, "sub": SUB_SCANNED},
-            SUB_SCANNED,
-        )
-    if sub == SUB_SCANNED:
-        if bash_rc is None:
-            return (
-                _error(
-                    "wizard expected --bash-rc after the binary-scan "
-                    "command."
-                ),
-                step_data,
-                SUB_COMPLETE,
-            )
-        if bash_rc != 0:
-            return (
-                _show(
-                    f"## Binary scan failed (exit {bash_rc})\n\n"
-                    "Review the bash output above. `.proctor/setup-"
-                    "block.yml` left untouched."
-                ),
-                {**step_data, "outcome": f"scan-failed-rc-{bash_rc}"},
-                SUB_COMPLETE,
-            )
-        try:
-            data = json.loads(Path(_BINARIES_JSON_PATH).read_text())
-            candidates = data.get("candidates", [])
-        except (OSError, json.JSONDecodeError) as e:
-            return (
-                _show(
-                    f"## Could not read binary scan output\n\n"
-                    f"Error reading {_BINARIES_JSON_PATH}: {e}. Re-"
-                    "run the wizard."
-                ),
-                {**step_data, "outcome": "scan-output-unreadable"},
-                SUB_COMPLETE,
-            )
-        if not candidates:
-            return (
-                _show(
-                    "## No Go binaries detected\n\n"
-                    "Nothing to add to `.proctor/setup-block.yml`. "
-                    "(This is normal for Node / Python / Ruby "
-                    "projects.)"
-                ),
-                {**step_data, "outcome": "no-candidates"},
-                SUB_COMPLETE,
-            )
-
-        # Build multi-select options. Prioritize runs-loop > unknown
-        # > serves-http > runs-once (matches v0.7.8 ordering with
-        # neutral terminology). Accept legacy v0.7.8 labels too for
-        # backward-compat with cached wizard JSON.
-        priority = {
-            "runs-loop": 0, "daemon": 0,
-            "unknown": 1,
-            "serves-http": 2, "http-server": 2,
-            "runs-once": 3, "one-shot": 3,
-        }
-        ordered = sorted(
-            candidates,
-            key=lambda c: (
-                priority.get(c.get("looks_like", "unknown"), 4),
-                c.get("path", ""),
-            ),
-        )
-        prefix_for = {
-            "runs-loop": "[recommended]",
-            "daemon": "[recommended]",
-            "serves-http": "[skip — main server already in setup]",
-            "http-server": "[skip — main server already in setup]",
-            "runs-once": "[skip — run on-demand]",
-            "one-shot": "[skip — run on-demand]",
-            "unknown": "[unsure]",
-        }
-        options = []
-        for c in ordered:
-            label_prefix = prefix_for.get(c["looks_like"], "[?]")
-            ev = "; ".join(c.get("evidence", [])) or "no evidence"
-            options.append({
-                "label": f"{label_prefix} {c['path']}",
-                "description": (
-                    f"binary_name={c['binary_name']} · "
-                    f"looks_like={c['looks_like']} · evidence: {ev}"
-                ),
-            })
-        return (
-            _ask_user(
-                header="Supplementary binaries to start in setup",
-                question=(
-                    "Select which binaries PRoctor should start "
-                    "alongside your main server during setup. "
-                    "The classification is heuristic — read each "
-                    "binary's evidence and decide based on YOUR "
-                    "project's intent.\n\n"
-                    "Suggestion: 'runs-loop' binaries are typical "
-                    "candidates (they run continuously and emit "
-                    "side effects PRoctor may need to observe). "
-                    "'runs-once' binaries are typically NOT for "
-                    "setup. Your project's intent is authoritative."
-                ),
-                options=options,
-                multi_select=True,
-            ),
-            {**step_data, "sub": SUB_PICKED, "candidates": ordered},
-            SUB_PICKED,
-        )
-    if sub == SUB_PICKED:
-        if answer is None:
-            return (
-                _error(
-                    "wizard expected --answer after the binary "
-                    "multi-select."
-                ),
-                step_data,
-                SUB_COMPLETE,
-            )
-        candidates = step_data.get("candidates", [])
-        selected_labels = [
-            s.strip() for s in answer.split(",") if s.strip()
-        ]
-        chosen = []
-        for label in selected_labels:
-            for c in candidates:
-                if c.get("path") and label.endswith(c["path"]):
-                    chosen.append(c)
-                    break
-        if not chosen:
-            return (
-                _show(
-                    "## No binaries selected\n\n"
-                    "`.proctor/setup-block.yml` left untouched."
-                ),
-                {**step_data, "outcome": "no-selection"},
-                SUB_COMPLETE,
-            )
-
-        # v0.7.9: write to .proctor/setup-block.yml (the canonical
-        # source) AND, when an expanded local.yml exists, amend it
-        # too so the current run picks up the change without
-        # requiring a seed-script re-run.
-        setup_block_path = repo_root / ".proctor" / "setup-block.yml"
-        local_path = repo_root / ".proctor" / "local.yml"
-        if not local_path.exists():
-            local_path = repo_root / ".pr-test.local.yml"
-
-        try:
-            block_added = _write_setup_block_yml(setup_block_path, chosen)
-        except Exception as e:  # noqa: BLE001
-            return (
-                _show(
-                    f"## Failed to write setup-block.yml: {e}\n\n"
-                    f"`.proctor/setup-block.yml` left in last known "
-                    "good state."
-                ),
-                {**step_data, "outcome": "write-failed"},
-                SUB_COMPLETE,
-            )
-
-        local_added = 0
-        if local_path.exists():
-            try:
-                local_added = _amend_local_yml_with_daemons(
-                    local_path, chosen,
-                )
-            except Exception as e:  # noqa: BLE001
-                # Setup-block.yml is the source of truth — the
-                # local.yml amendment is a convenience. Surface but
-                # don't fail the step.
-                return (
-                    _show(
-                        f"## Wrote setup-block.yml; local.yml amend "
-                        f"failed: {e}\n\n"
-                        f"Run `./.proctor/seed-local.sh` to "
-                        "regenerate local.yml from the new setup-"
-                        "block."
+                _ask_user(
+                    header="Dev launcher — start command",
+                    question=(
+                        "What's the bash command to bring up your "
+                        "full local dev environment? Examples: "
+                        "`./dev.sh all`, `make dev`, `pnpm dev`, "
+                        "`docker-compose up -d`. PRoctor will run "
+                        "this once at the start of each test run."
                     ),
-                    {**step_data, "outcome": "wrote-block-not-local"},
-                    SUB_COMPLETE,
-                )
-
-        names = ", ".join(c["binary_name"] for c in chosen)
+                    options=[],
+                ),
+                {**step_data, "sub": "ask_start"},
+                "ask_start",
+            )
+        if "generic template" in answer:
+            return _emit_template_path(
+                repo_root, plugin_root, step_data,
+            )
+        # Default = skip / "keep using the legacy" branch.
         return (
             _show(
-                f"## Wrote `.proctor/setup-block.yml` "
-                f"({block_added} added, {len(chosen)} requested)\n\n"
-                f"Selected supplementary binaries: {names}.\n"
-                + (
-                    f"Also amended `.proctor/local.yml` "
-                    f"({local_added} kill+start pair(s) added).\n"
-                    if local_added > 0 else ""
-                )
-                + "\nRun `./.proctor/seed-local.sh` to regenerate "
-                "`.proctor/local.yml` and pick up the new setup."
+                "## Skipped dev_launcher\n\n"
+                "PRoctor will keep reading the legacy `setup:` "
+                "array from `.proctor/local.yml` (or "
+                "`.proctor/config.yml`) on each test run. This is "
+                "fine for projects with simple needs. When your "
+                "setup grows, re-run `/proctor:proctor-init` and "
+                "pick a one-click script — the dev_launcher block "
+                "supersedes `setup:` cleanly without breaking the "
+                "legacy path for older consumers."
+            ),
+            {**step_data, "outcome": "skipped"},
+            SUB_COMPLETE,
+        )
+    if sub == "ask_start":
+        start_cmd = (answer or "").strip()
+        if not start_cmd:
+            return (
+                _error(
+                    "wizard expected a non-empty start command. "
+                    "Re-run the wizard and provide one (e.g. "
+                    "`./dev.sh all` / `make dev`)."
+                ),
+                step_data,
+                SUB_COMPLETE,
+            )
+        return (
+            _ask_user(
+                header="Dev launcher — stop command (optional)",
+                question=(
+                    "Bash command to tear down the environment "
+                    "after tests. Leave blank for no teardown. "
+                    "Examples: `./dev.sh stop`, `make stop`, "
+                    "`docker-compose down`, "
+                    "`pkill -f 'pnpm dev'`."
+                ),
+                options=[],
+            ),
+            {**step_data, "sub": "ask_stop", "start": start_cmd},
+            "ask_stop",
+        )
+    if sub == "ask_stop":
+        stop_cmd = (answer or "").strip() or None
+        return (
+            _ask_user(
+                header="Dev launcher — readiness check (optional)",
+                question=(
+                    "Bash command that exits 0 when the dev env "
+                    "is ready (PRoctor polls this until success). "
+                    "Leave blank to skip polling (PRoctor just "
+                    "sleeps 2 seconds after `start`). Example: "
+                    "`curl -fsS http://localhost:8080/healthz "
+                    ">/dev/null 2>&1`."
+                ),
+                options=[],
+            ),
+            {**step_data, "sub": "ask_wait_for", "stop": stop_cmd},
+            "ask_wait_for",
+        )
+    if sub == "ask_wait_for":
+        wait_for_cmd = (answer or "").strip() or None
+        return (
+            _ask_user(
+                header="Dev launcher — readiness timeout",
+                question=(
+                    "How long to poll `wait_for` before giving up "
+                    "(seconds). Leave blank for default 60. Type "
+                    "an integer (e.g. 90)."
+                ),
+                options=[],
             ),
             {
                 **step_data,
-                "outcome": (
-                    f"wrote-block-added-{block_added}-"
-                    f"local-added-{local_added}"
+                "sub": "ask_timeout",
+                "wait_for": wait_for_cmd,
+            },
+            "ask_timeout",
+        )
+    if sub == "ask_timeout":
+        raw = (answer or "").strip()
+        wait_timeout = None
+        if raw:
+            try:
+                wait_timeout = int(raw)
+                if wait_timeout <= 0:
+                    raise ValueError
+            except ValueError:
+                return (
+                    _error(
+                        f"wait_timeout_seconds must be a positive "
+                        f"integer (got {raw!r}). Re-run the wizard "
+                        f"and try again."
+                    ),
+                    step_data,
+                    SUB_COMPLETE,
+                )
+        config_path = repo_root / ".proctor" / "config.yml"
+        try:
+            _append_dev_launcher_to_config(
+                config_path,
+                start=step_data["start"],
+                stop=step_data.get("stop"),
+                wait_for=step_data.get("wait_for"),
+                wait_timeout_seconds=wait_timeout,
+            )
+        except Exception as e:  # noqa: BLE001
+            return (
+                _show(
+                    f"## Failed to write dev_launcher block: {e}\n\n"
+                    f"`.proctor/config.yml` left in its prior "
+                    f"state."
                 ),
+                {**step_data, "outcome": f"write-failed: {e}"},
+                SUB_COMPLETE,
+            )
+        stop_text = step_data.get("stop") or "(no-op)"
+        wait_for_text = (
+            step_data.get("wait_for")
+            or "(none; PRoctor will sleep 2 s after start)"
+        )
+        timeout_text = (
+            f"{wait_timeout}" if wait_timeout else "60 (default)"
+        )
+        return (
+            _show(
+                "## Wrote `dev_launcher` block to "
+                "`.proctor/config.yml`\n\n"
+                f"- start: `{step_data['start']}`\n"
+                f"- stop: `{stop_text}`\n"
+                f"- wait_for: `{wait_for_text}`\n"
+                f"- wait_timeout_seconds: {timeout_text}\n\n"
+                "PRoctor's executor will run `start` at the "
+                "beginning of each test run, optionally poll "
+                "`wait_for`, then execute the plan; `stop` (when "
+                "set) runs after all items complete regardless of "
+                "pass/fail."
+            ),
+            {
+                **step_data,
+                "outcome": "wrote-dev-launcher",
             },
             SUB_COMPLETE,
         )
     return _error(
-        f"unknown supplement-setup sub-state {sub!r}"
+        f"unknown dev-launcher sub-state {sub!r}"
     ), step_data, SUB_COMPLETE
+
+
+def _emit_template_path(repo_root, plugin_root, step_data):
+    """Copy the generic dev-launcher template into the consumer
+    repo's ``.proctor/`` dir. Inert shell skeleton with TODO
+    markers — the wizard explicitly does NOT auto-generate
+    project-specific bash logic."""
+    src = plugin_root / "templates" / "dev-launcher.sh.template"
+    dst = repo_root / ".proctor" / "dev-launcher-template.sh"
+    if not src.is_file():
+        return (
+            _show(
+                f"## Template not found\n\n"
+                f"Expected `{src}` (shipped with the plugin); the "
+                f"file is missing. Open an issue at "
+                f"https://github.com/zealllot/proctor with the "
+                f"PRoctor version you have installed."
+            ),
+            {**step_data, "outcome": "template-missing"},
+            SUB_COMPLETE,
+        )
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text())
+        import os as _os
+        _os.chmod(dst, 0o755)
+    except OSError as e:
+        return (
+            _show(
+                f"## Failed to write template: {e}\n\n"
+                f"PRoctor left `.proctor/` untouched."
+            ),
+            {**step_data, "outcome": f"template-write-failed: {e}"},
+            SUB_COMPLETE,
+        )
+    return (
+        _show(
+            "## Wrote `.proctor/dev-launcher-template.sh`\n\n"
+            "A generic skeleton with TODO markers for the "
+            "project-specific parts (DB up, main server start, "
+            "workers, env file handling). The wizard intentionally "
+            "did NOT generate any project-specific bash logic.\n\n"
+            "**Next:** open a NEW Claude Code session in this "
+            "repo and ask:\n\n"
+            "> help me fill in `.proctor/dev-launcher-template.sh` "
+            "based on this project's structure\n\n"
+            "Claude will detect your binaries / Makefile / "
+            "package.json / docker-compose.yml and complete the "
+            "TODOs. When done, rename to `./dev.sh` (or whatever "
+            "fits your team's convention), then re-run "
+            "`/proctor:proctor-init` to record the launch "
+            "command."
+        ),
+        {**step_data, "outcome": "wrote-template"},
+        SUB_COMPLETE,
+    )
 
 
 @_register("step_fresh_install")
@@ -1262,18 +1149,18 @@ def _build_done_summary(state: dict) -> str:
     for c in completed:
         outcome = c.get("outcome") or "done"
         lines.append(f"  - {c['step']} → {outcome}")
-    # Add a hint when the supplement-setup step ran with a non-skip
-    # outcome — the user needs to run seed-local.sh to pick up the
-    # changes.
+    # Hint the user when dev_launcher was just written so they
+    # know what comes next.
     if any(
-        c["step"] == "step_supplement_setup"
-        and c.get("outcome", "").startswith("wrote-block-added-")
+        c["step"] == "step_dev_launcher"
+        and c.get("outcome") == "wrote-dev-launcher"
         for c in completed
     ):
         lines.append("")
         lines.append(
-            "Next: run `./.proctor/seed-local.sh` to regenerate "
-            "`.proctor/local.yml` from the updated setup-block."
+            "Next: PRoctor will use the new dev_launcher block on "
+            "its next test run. Verify with `claude /proctor:proctor "
+            "<PR#>` or a dry run of the start command."
         )
     return "\n".join(lines)
 

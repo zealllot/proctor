@@ -517,6 +517,41 @@ def validate_pr_test_config(cfg: dict) -> None:
             _require(isinstance(d, str) and d.strip(),
                      f".proctor/config.yml.worktree_symlink_dirs[{i}] must be a non-empty string")
 
+    # dev_launcher (v0.7.11+) — optional block telling PRoctor how to
+    # bring up the project's full local dev environment for test runs.
+    # Recommended path: the project ships a one-click launcher script
+    # (e.g. `./dev.sh all` / `make dev` / `pnpm dev`) and PRoctor is a
+    # client of it. Legacy path (`setup:` array in local.yml) is still
+    # supported when this block is absent — see the executing-pr-tests
+    # SKILL for the precedence rules.
+    if "dev_launcher" in cfg and cfg["dev_launcher"] is not None:
+        dl = cfg["dev_launcher"]
+        _require(isinstance(dl, dict),
+                 ".proctor/config.yml.dev_launcher: must be a mapping when set")
+        _require_keys(dl, {"start"}, ".proctor/config.yml.dev_launcher")
+        _require(isinstance(dl["start"], str) and dl["start"].strip(),
+                 ".proctor/config.yml.dev_launcher.start: must be a non-empty string")
+        for opt_str in ("stop", "status", "wait_for"):
+            if opt_str in dl and dl[opt_str] is not None:
+                _require(isinstance(dl[opt_str], str) and dl[opt_str].strip(),
+                         f".proctor/config.yml.dev_launcher.{opt_str}: "
+                         f"must be a non-empty string if set")
+        if "wait_timeout_seconds" in dl and dl["wait_timeout_seconds"] is not None:
+            _require(
+                isinstance(dl["wait_timeout_seconds"], int)
+                and dl["wait_timeout_seconds"] > 0,
+                ".proctor/config.yml.dev_launcher.wait_timeout_seconds: "
+                "must be a positive int if set",
+            )
+        # Reject unknown keys so typos surface early.
+        extra = set(dl.keys()) - {
+            "start", "stop", "status", "wait_for", "wait_timeout_seconds",
+        }
+        _require(not extra,
+                 f".proctor/config.yml.dev_launcher: unexpected keys "
+                 f"{sorted(extra)}; allowed: start, stop, status, "
+                 f"wait_for, wait_timeout_seconds")
+
     auth = cfg.get("auth")
     if auth is None:
         return  # legacy mode, nothing more to check at config level
@@ -658,58 +693,13 @@ def load_config(repo_root: str | os.PathLike[str] = ".") -> dict:
     return base
 
 
-# ---------------------------------------------------------------------------
-# .proctor/setup-block.yml validation (v0.7.9+) — canonical setup commands
-# the wizard writes and seed-local.sh reads when regenerating local.yml.
-# ---------------------------------------------------------------------------
-
-def validate_setup_block(content) -> None:
-    """Validate the shape of ``.proctor/setup-block.yml``.
-
-    Accepted shape:
-
-    .. code-block:: yaml
-
-        setup:
-          - <string command>
-          - <string command>
-
-    Required: top-level mapping with EXACTLY one key, ``setup:``.
-    The value must be a list (possibly empty); every list entry must
-    be a non-empty string.
-
-    ``content`` is the parsed YAML (a dict) — the caller is responsible
-    for the file read + YAML parse. Raises :class:`SchemaError` on any
-    deviation.
-
-    The file is intentionally minimal: it's a single block the wizard
-    owns, embedded into ``.proctor/local.yml`` by ``seed-local.sh``.
-    Pre-v0.7.9 the block lived hard-coded inside the seed script's
-    SETUP_BLOCK heredoc, which meant wizard edits to ``setup:`` were
-    silently overwritten on the next seed-script re-run. v0.7.9
-    extracts the block into this file so the wizard owns it
-    durably."""
-    _require(
-        isinstance(content, dict),
-        ".proctor/setup-block.yml: must be a YAML mapping",
-    )
-    extra_keys = set(content.keys()) - {"setup"}
-    _require(
-        not extra_keys,
-        f".proctor/setup-block.yml: unexpected top-level key(s) "
-        f"{sorted(extra_keys)}; only `setup:` is allowed",
-    )
-    _require(
-        "setup" in content,
-        ".proctor/setup-block.yml: must have a top-level `setup:` key",
-    )
-    setup = content["setup"]
-    _require(
-        isinstance(setup, list),
-        ".proctor/setup-block.yml.setup: must be a list of command strings",
-    )
-    for i, cmd in enumerate(setup):
-        _require(
-            isinstance(cmd, str) and cmd.strip(),
-            f".proctor/setup-block.yml.setup[{i}]: must be a non-empty string",
-        )
+# NOTE (v0.7.11): the ``validate_setup_block`` helper that lived here
+# in v0.7.9–v0.7.10 was deleted along with the wizard's ``setup-block.yml``
+# experiment. The "wizard writes setup commands into a per-project YAML
+# file" idea leaked project-launch responsibility onto PRoctor's side.
+# v0.7.11 inverts the relationship: the project owns its launch (a
+# `./dev.sh` / `make dev` / `pnpm dev` script the project's team
+# maintains), and PRoctor just calls it via the ``dev_launcher`` block
+# above. Old consumers with `.proctor/setup-block.yml` on disk are
+# unaffected — PRoctor's runtime ignores the file; the wizard never
+# rewrites it.

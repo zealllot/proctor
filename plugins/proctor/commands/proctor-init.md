@@ -54,7 +54,7 @@ The script emits one JSON envelope to stdout. Parse the `type` field.
 
 **1b. Branch on `type`** — exactly one action per iteration:
 
-- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. If the envelope has `"multi_select": true` (v0.7.8+, used by the supplementary-binaries picker step), call AskUserQuestion in multi-select mode and join the selected labels with `", "` before passing back as `--answer`. After the user answers, save `PREV_ANSWER=<selected-label(s)>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
+- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. If the envelope has `"multi_select": true` (v0.7.8+, retained for any prose still using it), call AskUserQuestion in multi-select mode and join the selected labels with `", "` before passing back as `--answer`. After the user answers, save `PREV_ANSWER=<selected-label(s)>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`. v0.7.11's `step_dev_launcher` uses a single-select offer then a sequence of open-ended prompts (each AskUserQuestion with an empty options list = free-text input).
 
 - **`type=show`**: emit the `markdown` field verbatim to chat. Save `PREV_ANSWER=` (clear) and `PREV_BASH_RC=`. **Continue to next iteration (1a)** in the same response — don't end the turn.
 
@@ -236,10 +236,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_decide_steps.py \
 Output is JSON with shape `{state, steps, current_tag, mode, next_action, ask_user}`:
 - `steps` is a list of step ids the wizard will run in order. Possible step ids (canonical execution order):
   - `step_legacy_layout_migrate` — pre-v0.4 `.pr-test.yml` files present.
+  - `step_dev_launcher` — `.proctor/config.yml` exists but lacks a `dev_launcher:` block (v0.7.11+).
   - `step_regenerate_local_yml` — seed-local.sh present but `.proctor/local.yml` missing.
   - `step_bump_action_pin` — workflow pin is older than `--current-tag`.
-  - `step_supplement_setup` — `cmd/*/main.go` binaries not yet in setup-block.
   - `step_fresh_install` — none of the above and no `.proctor/` directory.
+
+  (v0.7.7–v0.7.10's `step_supplement_setup` was renamed to `step_dev_launcher` in v0.7.11 and rebuilt — see the v0.7.11 prose below. The old step's `cmd/*/main.go` scanner is gone; the project owns its launch via `dev_launcher.start`.)
 - `mode` is the backward-compat alias for the FIRST step in `steps` (or `"current"` when `steps` is empty). Older prose that branches on `mode` keeps working at the single-mode level. New prose should branch on `steps`.
 - `ask_user` is either `null` (no user input needed) or the first step's user-facing question.
 
@@ -886,81 +888,42 @@ Free-text input. Pre-fill example shape: `https://<service>.<env>.<your-org-dev-
 
 Save as `BASE_URL`.
 
-### Step 7.5 — Multi-binary detection (v0.7.7+, supplementary binaries)
+### Step 7.5 — Dev launcher (v0.7.11+)
 
-**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap. The project ships multiple `cmd/*/main.go` binaries — the HTTP server (root `main.go`) AND `cmd/mcd-daemon/main.go` (a 1-minute ticker that republishes banners/categories to S3) AND short single-pass CLI tools (`cmd/mcd-publisher`, `cmd/mcd-sitemap`). Pre-v0.7.7 `.proctor/local.yml setup:` ran `go run .` which started the HTTP server but NOT the supplementary long-running binary. PRs that claimed "Published JSON include_tags/exclude_tags are arrays of trimmed tokens" couldn't be verified at runtime because the binary that DOES the publishing wasn't running.
+**Why this step exists.** v0.7.7–v0.7.10 had the wizard scan `cmd/*/main.go` files, classify them as `serves-http` / `runs-loop` / `runs-once` / `unknown`, and write the chosen ones into a `.proctor/setup-block.yml` file PRoctor's seed script consumed. The user audit on mcd-website made the right model clear: **the project owns its launch.** Hand-written `./dev.sh` scripts already exist in real projects (200-line bash with proper subcommands, env-file handling, PID tracking, recursive child kill) and PRoctor doesn't need to duplicate or second-guess any of that. v0.7.11 inverts the relationship: the wizard asks for the project's launch command and records it in `.proctor/config.yml.dev_launcher`. PRoctor's executor is a client of whatever script the project ships.
 
-The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, classify each as `serves-http` / `runs-loop` / `runs-once` / `unknown`, and ask the user which ones PRoctor should start during setup. Supplementary binaries selected here get appended to the `setup:` block, so they run during PRoctor invocations and produce output the planner can runtime-verify with a plain `curl`.
+**Fires when** `.proctor/config.yml` exists but doesn't yet have a `dev_launcher:` top-level block. Idempotent: once the block is in config.yml, the step skips forever (re-running the wizard doesn't re-ask).
 
-**Runs in `step_fresh_install` AND `step_supplement_setup`** (the v0.7.9 step-iterator equivalents of the v0.7.8 `fresh` and `amend-daemons` modes). Skipped when no `cmd/*/main.go` binary exists OR when every detected binary is already referenced in the current setup-block.
+**Three paths the wizard offers** (single AskUserQuestion):
 
-**Vocabulary note (v0.7.9).** Classification labels and step names are intentionally neutral — they describe what the binary STRUCTURALLY does, not what a particular consumer happens to call it. The consumer-side filenames (`cmd/mcd-daemon`, `cmd/<X>-worker`, `cmd/<X>-publisher`) are kept as-is in evidence and citations because they're the project's actual files. The category labels are the ones the wizard substitutes into prompts.
+| Option | What happens |
+|---|---|
+| **I have a one-click script (Recommended)** | Wizard follows up with open-ended prompts for `start`, `stop` (optional), `wait_for` (optional), `wait_timeout_seconds` (optional, default 60), then appends a `dev_launcher:` block to `.proctor/config.yml`. |
+| **Show me a generic template I can adapt** | Wizard copies `plugins/proctor/templates/dev-launcher.sh.template` to `.proctor/dev-launcher-template.sh` (chmod +x). No project-specific code is generated; the file has TODO markers the user fills in via a fresh Claude Code session. |
+| **Skip — keep using the legacy `setup:` array** | No file changes. PRoctor's executor still reads the legacy `setup:` array from `.proctor/local.yml` (or `.proctor/config.yml`) at runtime — backward compat preserved for v0.7.10-and-earlier consumers. |
 
-**Procedure:**
+**Example `dev_launcher` block:**
 
-1. Detect candidates:
+```yaml
+# .proctor/config.yml
+dev_launcher:
+  start: ./dev.sh all                       # required
+  stop: ./dev.sh stop                       # optional
+  status: ./dev.sh status                   # optional (skip-start when env up)
+  wait_for: curl -fsS http://localhost:9801/auth/login >/dev/null 2>&1   # optional
+  wait_timeout_seconds: 90                  # optional, default 60
+```
 
-   ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_detect_binaries.py \
-       --repo-root .
-   ```
+Schema validation lives in `scripts/schema.py::validate_pr_test_config`; only `start` is required when the block is present.
 
-   Output: `{"candidates": [{"path", "binary_name", "looks_like", "evidence"}, ...]}`. `looks_like` is one of `serves-http` / `runs-loop` / `runs-once` / `unknown`. Empty `candidates` → skip the whole step (no Go binaries; this is a Node/Python/etc. repo).
+**Wiring note for the step iterator (v0.7.11).** The wizard's step iterator (`scripts/wizard_run.py`) drives `step_dev_launcher` end-to-end:
 
-2. Surface as AskUserQuestion (multi-select). Defaults:
-   - All `serves-http` entries are typically already covered by the existing Step 7f wait-loop (the project's primary server). Default OFF (don't add a second listener) unless the user explicitly wants two HTTP servers running.
-   - All `runs-loop` entries are PRESELECTED (typical candidates: they run continuously and emit side effects PRoctor may need to observe).
-   - `runs-once` entries are NOT preselected (short single-pass CLI utilities; user runs on-demand).
-   - `unknown` entries are NOT preselected (let the user decide).
+1. Iterator pops `step_dev_launcher` → wizard emits `ask_user` (header=`Dev launcher`) offering the three options.
+2. If user picks **one-click script** → wizard walks the open-ended prompts (start → stop → wait_for → wait_timeout_seconds), each via AskUserQuestion with an empty options list (free-text input). After the timeout answer, the wizard writes the `dev_launcher:` block to `.proctor/config.yml` and emits a `show` envelope summarizing what was written.
+3. If user picks **template** → wizard copies `dev-launcher.sh.template` → `.proctor/dev-launcher-template.sh` and emits a `show` envelope: "Open a NEW Claude Code session and ask 'help me fill in `.proctor/dev-launcher-template.sh` based on this project's structure' — Claude will detect your binaries / Makefile / package.json and complete the TODOs."
+4. If user picks **skip** → wizard emits a `show` envelope explaining the legacy `setup:` path remains in effect, and the step completes with outcome `skipped`.
 
-   Question text:
-
-   > "PRoctor detected these additional binaries under cmd/ that aren't currently started in your local setup. Select which should run alongside your main server during PRoctor runs. The classification is heuristic — read each binary's evidence and decide based on YOUR project's intent.
-   >
-   >   [ ] mcd-daemon (runs-loop)
-   >       Evidence: matches 'time.Tick(time.Minute)' + 'utils.RunJob' (×15); also matches 'http.ListenAndServe' — runs-loop precedence applied. Path: cmd/mcd-daemon/main.go
-   >
-   >   [ ] mcd-form (serves-http)
-   >       Evidence: matches 'router.Run'. Path: cmd/mcd-form/main.go
-   >
-   >   [ ] mcd-app-config-worker (runs-loop)
-   >       Evidence: matches 'time.NewTicker' + 'http.ListenAndServe'. Path: cmd/mcd-app-config-worker/main.go
-   >
-   >   [ ] mcd-sitemap-generator (runs-once)
-   >       Evidence: short (94 lines), no runs-loop pattern. Path: cmd/mcd-sitemap-generator/main.go
-   >
-   >   [ ] mcd-republisher (runs-once)
-   >       Evidence: short (118 lines), no runs-loop pattern. Path: cmd/mcd-republisher/main.go
-   >
-   > Suggestion: 'runs-loop' binaries are typical candidates for inclusion (they run continuously and emit side effects PRoctor may need to observe). 'runs-once' binaries are typically NOT for setup. But your project's intent is authoritative."
-
-   Substitute the actual candidate paths, binary names, and evidence from the detect output. NO mention of "daemon" / "worker" / "publish" / "cron" anywhere in the user-facing prompt — those are project-specific nouns, not the wizard's category labels. The user-facing CATEGORY is always one of `serves-http` / `runs-loop` / `runs-once` / `unknown`; filenames in evidence stay as the project actually names them.
-
-3. For each selected binary (not the root `serves-http` — that's covered by the existing Step 7f wait-loop), generate two lines for `.proctor/setup-block.yml setup:`:
-
-   ```yaml
-   - bash -c '[ -f /tmp/proctor-<NAME>.pid ] && kill "$(cat /tmp/proctor-<NAME>.pid)" 2>/dev/null; true'
-   - bash -c 'set -a; . ./dev_env_local 2>/dev/null || . ./dev_env 2>/dev/null || true; set +a; nohup go run ./<PATH> > /tmp/proctor-<NAME>.log 2>&1 & echo $! > /tmp/proctor-<NAME>.pid'
-   ```
-
-   Where `<NAME>` is the binary's directory name (e.g. `mcd-daemon` from `cmd/mcd-daemon/main.go` → `proctor-mcd-daemon.pid`) and `<PATH>` is the candidate's `path` field. The pidfile names are scoped per-binary so multiple supplementary processes don't collide.
-
-4. After the supplementary `go run` lines, add a final `sleep 3` line if it isn't already in the setup-block. Long-running supplementary binaries typically don't expose an HTTP wait endpoint, so the wait-for-port pattern doesn't work — give them 3 seconds to get past their init (DB connection, config load, first loop iteration) before tests start.
-
-5. The existing wait-for-port loop for the `serves-http` main server (Step 7f) stays unchanged in `.proctor/setup-block.yml`. The supplementary lines slot in AFTER the http wait-loop and BEFORE the test execution begins.
-
-6. v0.7.9: the wizard writes to `.proctor/setup-block.yml` (the canonical source) rather than directly editing `.proctor/local.yml`. `seed-local.sh` reads from `.proctor/setup-block.yml` when regenerating `.proctor/local.yml`, so the wizard's amendments survive seed-script re-runs. (Pre-v0.7.9, the seed script had the setup block hard-coded in a heredoc — wizard edits to `local.yml` were silently overwritten on next seed re-run.) After writing, the wizard emits a `show` envelope: "Wrote `.proctor/setup-block.yml` with N supplementary binaries. Run `./.proctor/seed-local.sh` to regenerate `.proctor/local.yml` and pick up the new setup."
-
-**Wiring note for the step iterator (v0.7.9).** The wizard's step iterator (`scripts/wizard_run.py`) drives `step_supplement_setup` end-to-end for existing consumers whose setup-block lacks one or more `cmd/*/main.go` references:
-
-1. Iterator pops `step_supplement_setup` from pending_steps → wizard emits `ask_user` (`header=Supplementary binaries`) offering Scan / Skip.
-2. If user picks "Skip" → step completes with outcome `skipped`. Iterator moves on; if no more steps are pending, the terminal `done` fires.
-3. If user picks "Scan" → wizard emits a `bash` envelope running `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_detect_binaries.py --repo-root . > /tmp/proctor-wizard-binaries.json` and the AI runs it.
-4. After `--bash-rc 0` → wizard reads the JSON, sorts candidates (`runs-loop` → `unknown` → `serves-http` → `runs-once`), emits `ask_user` (`header=Supplementary binaries to start in setup`, `multi_select=true`).
-5. AI calls `AskUserQuestion` in multi-select mode. AI passes the user's picks back as `--answer "label1, label2"` (comma-separated). Wizard writes `.proctor/setup-block.yml` with one kill+start pair per pick (idempotent — re-running skips entries already in the block) AND amends `.proctor/local.yml setup:` for the current run.
-6. Step completes with outcome `wrote-block-added-<N>-local-added-<M>`. Iterator moves on; the final `done` envelope summarises all completed steps.
-
-For the `step_fresh_install` path, the legacy prose in this file (Sections 1–8) still applies. Step iterator integration for fresh-mode is deferred.
+**What the wizard does NOT do.** Pre-v0.7.11 the wizard scanned `cmd/*/main.go` files, ran a heuristic classifier, and wrote project-specific bash lines (`nohup go run ./cmd/<NAME>/main.go > /tmp/proctor-<NAME>.log 2>&1 ...`) into `setup-block.yml`. All of that is gone. v0.7.11 explicitly does not auto-generate project-specific launch logic; even the template (path B) contains only TODO stubs. The reasoning: the right person to write that bash is the project owner (or a fresh Claude Code session looking at the actual repo), not PRoctor's wizard hardcoding patterns.
 
 ### Step 7f — Confirm setup commands + env source (v0.3.41+)
 
@@ -1494,7 +1457,9 @@ Substitute the wizard's discovered values for `<ACCOUNTS[i].name>`, `<APP_PORT>`
 
 Make the script executable: `chmod +x <path-to-script>`.
 
-#### `STACK_AWARE_SETUP_COMMANDS` and `.proctor/setup-block.yml` (v0.7.9+)
+#### `STACK_AWARE_SETUP_COMMANDS` and `.proctor/setup-block.yml` (LEGACY — v0.7.9 / v0.7.10 only)
+
+> **v0.7.11 note.** New installs should configure `dev_launcher` (see Step 7.5) instead of relying on this seed-script-managed setup block. The prose below is preserved for two reasons: (1) existing v0.7.10-and-earlier consumers have seed-local.sh scripts on disk that still read `setup-block.yml`, and PRoctor's runtime still consumes the legacy `setup:` array when `dev_launcher` is absent; (2) the legacy `step_regenerate_local_yml` flow continues to auto-migrate the pre-v0.7.9 hardcoded heredoc when it finds one. **Don't generate new `setup-block.yml` files in a v0.7.11+ fresh install — use `dev_launcher`.**
 
 v0.7.9 split the setup-commands ownership: `.proctor/setup-block.yml` is the canonical source the wizard writes, and `seed-local.sh` READS that file when regenerating `.proctor/local.yml`. Before v0.7.9 the seed script had the setup block hard-coded inside its `SETUP_BLOCK` heredoc — so when the wizard amended `.proctor/local.yml` (e.g. to add a supplementary `runs-loop` binary), the next `./.proctor/seed-local.sh` run silently overwrote the amendment with the heredoc default.
 

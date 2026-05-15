@@ -2,87 +2,55 @@
 
 v0.7.8 had ``wizard_decide_mode.py`` return a single ``mode`` string
 (``bump-only`` / ``needs-local-regen`` / ``amend-daemons`` / etc.).
-Real runs against mcd-website hit a structural ceiling: modes are
-mutually exclusive, but real upgrade scenarios are not. Two
-back-to-back ``/proctor:proctor-init`` runs:
+Real upgrade scenarios are not mutually exclusive — a stale pin AND
+a missing local.yml can both apply at once. v0.7.9 turned the
+decision into an ORDERED LIST of applicable steps; the wizard's
+state machine walks them in turn.
 
-- Run 1: action pin out of date → ``bump-only`` won (first-match) →
-  wizard exited. The ``amend-daemons`` mode (v0.7.8's new
-  supplementary-binaries flow) never fired because ``bump-only``
-  matched first.
-- Run 2: pin now current, but ``.proctor/local.yml`` was missing →
-  ``needs-local-regen`` won → wizard exited. Still didn't fire
-  ``amend-daemons``.
-
-The fix (v0.7.9): instead of "pick one mode and exit", return an
-ordered LIST of steps that all apply to the consumer's current state.
-The wizard runs each step in turn, advancing through one big state
-machine that may emit ``ask_user`` / ``bash`` / ``show`` envelopes
-across many invocations before reaching ``done``.
+v0.7.11 simplification: dropped ``step_supplement_setup`` (the
+"detect cmd/*/main.go binaries and write setup-block.yml" experiment
+from v0.7.7–v0.7.10). Auditing the v0.7.10 result on mcd-website
+made the right model clear — **the project owns its launch**. The
+user demonstrated by hand-writing a 200-line ``./dev.sh`` with proper
+subcommands (setup/db/main/cmd/all/stop/status/logs), env-file
+handling, PID tracking, recursive child kill. PRoctor doesn't need
+to duplicate any of that; it just needs the project's launch command
++ a readiness check, captured in the new ``dev_launcher:`` block in
+``.proctor/config.yml``. ``step_dev_launcher`` writes that block.
 
 ## Step inventory + applies-conditions
 
-Each step is independent and may or may not apply to the consumer's
-current state. The ``decide_steps()`` walker returns every step
-whose applies-condition is True, in the canonical execution order:
-
 | Step id                       | Applies when                                                                                  |
 |-------------------------------|-----------------------------------------------------------------------------------------------|
-| ``step_legacy_layout_migrate``| ``.pr-test.yml`` exists (pre-v0.4 layout) and ``.proctor/config.yml`` does NOT exist            |
-| ``step_regenerate_local_yml`` | ``.proctor/seed-local.sh`` exists AND ``.proctor/local.yml`` is missing                       |
+| ``step_legacy_layout_migrate``| ``.pr-test.yml`` exists (pre-v0.4 layout) and ``.proctor/config.yml`` does NOT exist           |
+| ``step_dev_launcher``         | ``.proctor/config.yml`` lacks a ``dev_launcher:`` block AND consumer is on the new layout     |
+| ``step_regenerate_local_yml`` | ``.proctor/seed-local.sh`` exists AND (``.proctor/local.yml`` missing OR seed has legacy heredoc) |
 | ``step_bump_action_pin``      | ``.github/workflows/proctor.yml`` action pin is older than ``--current-tag``                  |
-| ``step_supplement_setup``     | Consumer has ``cmd/*/main.go`` binaries NOT referenced in the current setup-block             |
 | ``step_fresh_install``        | None of the above and no ``.proctor/`` directory exists at all                                |
 
-Execution order is fixed (the table order above) because step
-prerequisites flow downward: layout migration must run before pin
-bump (the pin lives in a workflow that might not exist yet);
-local.yml regeneration must run before supplement-setup (the latter
-writes a setup-block that the seed script consumes); pin bump
-slots between regen and supplement because it's a self-contained
-file edit that doesn't depend on either neighbour.
-
-The order also preserves v0.7.8 mode-priority semantics for the
-backward-compat single-``mode`` field: ``needs-local-regen`` won
-over ``bump-only`` in v0.7.8's dispatcher, so we keep
-``step_regenerate_local_yml`` ahead of ``step_bump_action_pin``
-here. Tests that pin the v0.7.8 priority order continue to pass.
+Execution order is fixed (see ``STEP_ORDER`` below). Each step's
+applies-condition is independent — no hidden cross-step coupling.
 
 ## Output shape
 
 ```jsonc
 {
-  "state": { /* same flat dict as wizard_decide_mode v0.7.8 */ },
-  "steps": ["step_bump_action_pin", "step_supplement_setup"],
-  "current_tag": "v0.7.8",
+  "state": { /* same flat dict as v0.7.8/v0.7.9 */ },
+  "steps": ["step_bump_action_pin", "step_dev_launcher"],
+  "current_tag": "v0.7.11",
 
-  // Backward-compat fields (v0.7.9 deprecated, kept for any prose
-  // that still expects a single-mode answer):
+  // Backward-compat single-mode fields:
   "mode": "step_bump_action_pin",  // first step in `steps`, or "current" if empty
-  "next_action": "...",            // human-readable description
-  "ask_user": { ... } | null       // pulled from first step's first-question
+  "next_action": "...",
+  "ask_user": { ... } | null
 }
 ```
-
-When no step applies (``steps: []``), the wizard is fully
-configured. ``mode`` is then ``"current"`` and the wizard exits
-immediately.
 
 ## CLI
 
 ```
-python3 wizard_decide_steps.py --current-tag v0.7.9 --repo-root .
+python3 wizard_decide_steps.py --current-tag v0.7.11 --repo-root .
 ```
-
-Stdout: one JSON object as above. Exit code is always 0; no-step is
-a valid decision.
-
-## Backward compat
-
-``wizard_decide_mode.py`` (the v0.7.8 entry point) still exists as a
-thin shim that re-exports ``detect_state`` and ``decide_mode``
-(returns just the first step + the legacy fields). Tests and any
-prose that calls the older script keep working without edits.
 """
 
 from __future__ import annotations
@@ -99,6 +67,10 @@ from pathlib import Path
 _NEW_CONFIG = Path(".proctor") / "config.yml"
 _NEW_LOCAL = Path(".proctor") / "local.yml"
 _NEW_SEED = Path(".proctor") / "seed-local.sh"
+# v0.7.9–v0.7.10 wrote a `.proctor/setup-block.yml`. v0.7.11 dropped
+# that whole idea (the project owns its launch). We still read the
+# path so detect_state can report its presence for any prose / test
+# that still references the field, but no step writes to it.
 _NEW_SETUP_BLOCK = Path(".proctor") / "setup-block.yml"
 _NEW_LOCAL_EXAMPLE = Path(".proctor") / "local.yml.example"
 
@@ -121,36 +93,21 @@ _PIN_RE = re.compile(
 STEP_LEGACY_LAYOUT_MIGRATE = "step_legacy_layout_migrate"
 STEP_BUMP_ACTION_PIN = "step_bump_action_pin"
 STEP_REGENERATE_LOCAL_YML = "step_regenerate_local_yml"
-STEP_SUPPLEMENT_SETUP = "step_supplement_setup"
+STEP_DEV_LAUNCHER = "step_dev_launcher"
 STEP_FRESH_INSTALL = "step_fresh_install"
 
-# Execution order. The list serves as both the iteration order and
-# the canonical list of legal step ids.
-#
-# v0.7.10 reorder: ``step_supplement_setup`` now precedes
-# ``step_regenerate_local_yml``. The data flow is supplement (writes
-# ``.proctor/setup-block.yml``) → regenerate (rewrites seed-local.sh
-# to read setup-block.yml, then re-runs it to produce local.yml). If
-# regenerate ran first, the supplement step would later write into
-# setup-block.yml but the local.yml the user just regenerated would
-# already be stale (no supplementary binaries in its setup block).
-#
-# ``step_bump_action_pin`` is independent — it's a self-contained edit
-# of the workflow file. We slot it AFTER the two setup-mutation steps
-# so the wizard's first user-visible action is the substantive setup
-# work rather than a one-line pin bump.
-#
-# v0.7.9 ordering was: legacy → regenerate → bump → supplement → fresh.
-# The new order fixes Bug A from the v0.7.9 audit: supplement was
-# dropped when local.yml was missing (the v0.7.9 ``decide_steps`` gated
-# supplement on ``has_local_yml``), but the only true precondition is
-# "there's a cmd/* binary not yet covered by setup-block.yml". Bug C
-# (seed-local.sh ships with a hardcoded SETUP_BLOCK heredoc) is also
-# folded into ``step_regenerate_local_yml`` via the broader "needs
-# rewrite" check (see ``_seed_needs_rewrite``).
+# v0.7.11 back-compat: STEP_SUPPLEMENT_SETUP is preserved as an
+# ALIAS for STEP_DEV_LAUNCHER. The wizard's old "scan cmd/*/main.go"
+# step is gone, but any external prose / test that imports the name
+# still resolves to a real step id (now the dev-launcher question).
+STEP_SUPPLEMENT_SETUP = STEP_DEV_LAUNCHER
+
+# Execution order. dev_launcher runs early so the rest of the wizard
+# can record the project's launch contract before touching seed
+# scripts or pin bumps.
 STEP_ORDER = [
     STEP_LEGACY_LAYOUT_MIGRATE,
-    STEP_SUPPLEMENT_SETUP,
+    STEP_DEV_LAUNCHER,
     STEP_REGENERATE_LOCAL_YML,
     STEP_BUMP_ACTION_PIN,
     STEP_FRESH_INSTALL,
@@ -161,8 +118,9 @@ def detect_state(repo_root: Path) -> dict:
     """Read the consumer repo's actual file state. Returns a flat
     dict of booleans + the workflow pin string (or None).
 
-    Same shape as v0.7.8's ``wizard_decide_mode.detect_state`` so any
-    test/caller that imports it keeps working."""
+    Same shape as v0.7.8–v0.7.10's ``detect_state`` (plus the
+    ``has_dev_launcher`` key new in v0.7.11) so existing callers
+    keep working."""
     has_new_config = (repo_root / _NEW_CONFIG).exists()
     has_old_config = (repo_root / _OLD_CONFIG).exists()
     has_workflow = (repo_root / _WORKFLOW).exists()
@@ -193,14 +151,15 @@ def detect_state(repo_root: Path) -> dict:
         "has_local_yml": (repo_root / _NEW_LOCAL).exists()
             or (repo_root / _OLD_LOCAL).exists(),
         "has_setup_block_yml": (repo_root / _NEW_SETUP_BLOCK).exists(),
-        # v0.7.10: when seed-local.sh exists and still ships with the
-        # pre-v0.7.9 hardcoded SETUP_BLOCK heredoc, the wizard must
-        # rewrite it to read setup-block.yml — otherwise wizard
-        # amendments to setup-block.yml are silently ignored on every
-        # seed-script re-run. ``seed_has_legacy_heredoc`` is True when
-        # the heredoc pattern is present AND the awk reader pattern is
-        # absent. Other shapes (already migrated, or no seed script
-        # at all) leave it False.
+        # v0.7.11: True when .proctor/config.yml already contains a
+        # `dev_launcher:` top-level key. step_dev_launcher skips when
+        # this is True (idempotent re-runs don't re-ask).
+        "has_dev_launcher": _grep_qE(
+            r"^dev_launcher:", repo_root / _NEW_CONFIG,
+        ),
+        # v0.7.10 — seed-local.sh legacy-heredoc detection. Kept so
+        # step_regenerate_local_yml can still auto-migrate existing
+        # consumers' seed scripts.
         "seed_has_legacy_heredoc": _seed_has_legacy_heredoc(
             repo_root / _NEW_SEED,
         ),
@@ -232,21 +191,9 @@ def _extract_pin(workflow_path: Path) -> str | None:
 
 
 # v0.7.10 — detect the legacy hardcoded SETUP_BLOCK heredoc pattern
-# inside an existing seed-local.sh. Pre-v0.7.9 seed scripts shipped with:
-#
-#     SETUP_BLOCK=$(cat <<'YAML'
-#       - <hardcoded command 1>
-#       - <hardcoded command 2>
-#       ...
-#     YAML
-#     )
-#
-# v0.7.9+ replaced this with an awk reader that pulls the block from
-# ``.proctor/setup-block.yml`` (falling back to a generic heredoc when
-# the file is missing). Existing consumers' seed scripts weren't
-# auto-migrated in v0.7.9, so wizard amendments to setup-block.yml
-# were ignored. v0.7.10's ``step_regenerate_local_yml`` does the
-# in-place rewrite.
+# inside an existing seed-local.sh. Kept in v0.7.11 because the
+# regenerate step still uses it to auto-migrate older consumer seed
+# scripts (no schema change there).
 _LEGACY_HEREDOC_RE = re.compile(
     r"SETUP_BLOCK=\$\(cat\s+<<\s*'YAML'\s*$", re.MULTILINE,
 )
@@ -257,14 +204,8 @@ _AWK_READER_RE = re.compile(
 
 def _seed_has_legacy_heredoc(seed_path: Path) -> bool:
     """True when ``seed_path`` is a file that contains the pre-v0.7.9
-    hardcoded SETUP_BLOCK heredoc AND does NOT contain the v0.7.9 awk
-    reader pattern. Either of:
-
-    - The seed script doesn't exist → False (no migration needed).
-    - The script already has the awk reader → False (already
-      migrated).
-    - The script has only the heredoc → True (needs rewrite).
-    """
+    hardcoded SETUP_BLOCK heredoc AND does NOT contain the v0.7.9
+    awk reader pattern."""
     if not seed_path.is_file():
         return False
     try:
@@ -274,119 +215,6 @@ def _seed_has_legacy_heredoc(seed_path: Path) -> bool:
     if _AWK_READER_RE.search(text):
         return False
     return bool(_LEGACY_HEREDOC_RE.search(text))
-
-
-# --- applies-condition helpers --------------------------------------
-
-def _setup_lacks_cmd_binary_lines(local_yml_path: Path) -> bool:
-    """Read ``.proctor/local.yml`` and return True when its
-    ``setup:`` has content (a real setup, not an empty stub) but NO
-    line mentions ``go run ./cmd/`` — the marker line that v0.7.7+
-    multi-binary detection emits per selected supplementary binary.
-
-    Intentionally a substring check, not a full YAML parse. The
-    setup array's lines are quoted strings; ``go run ./cmd/`` (with
-    the trailing slash) is distinctive enough that no other Go
-    invocation collides with it."""
-    try:
-        text = local_yml_path.read_text(errors="replace")
-    except OSError:
-        return False
-    if "setup:" not in text:
-        return False
-    if "go run ./cmd/" in text:
-        return False
-    return _has_setup_content(text)
-
-
-def _has_setup_content(local_yml_text: str) -> bool:
-    """True when `setup:` appears to have at least one non-empty
-    list item. Heuristic: look for ``setup:\\n`` followed (within
-    ~50 lines) by a ``  - `` list-item marker."""
-    idx = local_yml_text.find("setup:")
-    if idx < 0:
-        return False
-    tail = local_yml_text[idx:]
-    first_line_end = tail.find("\n")
-    first_line = tail[:first_line_end] if first_line_end >= 0 else tail
-    if first_line.strip() in ("setup: []", "setup: ~", "setup: null"):
-        return False
-    lines = tail.split("\n")[1:50]
-    return any(line.lstrip().startswith("- ") for line in lines)
-
-
-def _setup_block_lists_all_cmd_binaries(
-    repo_root: Path,
-) -> bool:
-    """Return True when every ``cmd/*/main.go`` the consumer ships
-    is already referenced in either ``.proctor/setup-block.yml`` or
-    ``.proctor/local.yml setup:``. When False, ``step_supplement_setup``
-    fires.
-
-    Uses ``wizard_detect_binaries`` as the source of truth for "what
-    binaries exist". Matches by binary_name (``proctor-<name>.pid``)
-    OR path (``./cmd/<name>/main.go``) so the wizard's amend output
-    from v0.7.8 (which writes both) is recognized as covering the
-    binary."""
-    # Lazy import to avoid cycle when this module is imported by
-    # wizard_decide_mode (the shim).
-    try:
-        from wizard_detect_binaries import detect_binaries
-    except ImportError:
-        # Sibling import path setup — same as wizard_run.py.
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from wizard_detect_binaries import detect_binaries  # type: ignore
-
-    # Only count binaries that are RUNS-LOOP or UNKNOWN — those are
-    # the ones the wizard cares about adding to setup. ``serves-http``
-    # is the project's main server (covered by the existing wait-loop
-    # pattern); ``runs-once`` is a CLI tool the user runs by hand.
-    candidates = [
-        c for c in detect_binaries(repo_root)
-        if c.get("looks_like") in ("runs-loop", "unknown", "daemon")
-        # legacy v0.7.8 label
-    ]
-    if not candidates:
-        return True  # nothing to supplement; step doesn't apply
-
-    # Combined setup source text: setup-block.yml plus local.yml's
-    # setup: block (best-effort substring scan).
-    sources_text = ""
-    sb = repo_root / _NEW_SETUP_BLOCK
-    if sb.exists():
-        try:
-            sources_text += sb.read_text(errors="replace")
-        except OSError:
-            pass
-    for candidate_local in (
-        repo_root / _NEW_LOCAL,
-        repo_root / _OLD_LOCAL,
-    ):
-        if candidate_local.exists():
-            try:
-                sources_text += "\n" + candidate_local.read_text(errors="replace")
-            except OSError:
-                pass
-
-    if not sources_text:
-        # No setup source exists at all — step_supplement_setup should
-        # bootstrap setup-block.yml from scratch with the detected
-        # binaries. v0.7.10: previously this returned True (skipped
-        # the step), deferring to regenerate / fresh; but Bug A's fix
-        # decouples these — supplement writes setup-block.yml
-        # regardless, then regenerate / fresh produce local.yml from
-        # it.
-        return False
-
-    for c in candidates:
-        path = c.get("path", "")
-        name = c.get("binary_name", "")
-        if path and f"./{path}" in sources_text:
-            continue
-        if name and f"proctor-{name}.pid" in sources_text:
-            continue
-        return False  # at least one candidate is not yet covered
-    return True
 
 
 # --- step decision walker -------------------------------------------
@@ -401,12 +229,12 @@ def decide_steps(
 
     Notes:
     - ``step_fresh_install`` is mutually exclusive with everything
-      else (it fires only when there's no ``.proctor/`` directory
-      at all). When it fires, the list is just ``[step_fresh_install]``.
-    - ``step_supplement_setup`` requires reading the repo's
-      ``cmd/*/main.go`` files (delegated to wizard_detect_binaries),
-      so it needs ``repo_root``. When ``repo_root`` is None the step
-      is conservatively skipped.
+      else (it fires only when there's no ``.proctor/`` directory).
+    - ``step_dev_launcher`` fires whenever ``.proctor/config.yml``
+      exists but lacks the ``dev_launcher:`` block. This means
+      EXISTING consumers will see the question on their next wizard
+      run after upgrading to v0.7.11 — exactly the intent (give the
+      user a chance to register their launch command).
     """
     s = state
     if repo_root is None:
@@ -422,38 +250,22 @@ def decide_steps(
 
     steps: list[str] = []
 
-    # Walk each applies-condition independently. Each step's check
-    # depends ONLY on that step's own precondition — no hidden coupling
-    # between checks. Bug A from the v0.7.9 audit was caused by
-    # gating supplement on ``has_local_yml``; v0.7.10 removes that
-    # cross-dependency. The final ``steps`` list is sorted per
-    # ``STEP_ORDER`` before return, so check order here doesn't affect
-    # execution order.
-
-    # Legacy layout — pre-v0.4 .pr-test.yml present and no new config
-    # yet. Must run before everything else so subsequent steps see
-    # the canonical .proctor/ paths.
+    # Legacy layout — pre-v0.4 .pr-test.yml present and no new
+    # config yet. Must run before everything else so subsequent
+    # steps see the canonical .proctor/ paths.
     if s["legacy_layout"] and not s["has_new_config"]:
         steps.append(STEP_LEGACY_LAYOUT_MIGRATE)
 
-    # Supplement setup — fires whenever the repo has at least one
-    # cmd/*/main.go binary that isn't yet referenced in
-    # .proctor/setup-block.yml or .proctor/local.yml's setup block.
-    # v0.7.10: NO LONGER gated on has_local_yml. The supplement step
-    # writes to setup-block.yml regardless; the subsequent
-    # step_regenerate_local_yml reads that file when producing the
-    # new local.yml. This is Bug A's fix.
-    if (
-        s["has_new_config"]
-        and not _setup_block_lists_all_cmd_binaries(repo_root)
-    ):
-        steps.append(STEP_SUPPLEMENT_SETUP)
+    # Dev-launcher — fires when the consumer is on the new layout
+    # AND hasn't yet declared a dev_launcher block. Idempotent: once
+    # the block is in config.yml, the step skips forever (unless
+    # the user manually deletes it to re-trigger).
+    if s["has_new_config"] and not s.get("has_dev_launcher"):
+        steps.append(STEP_DEV_LAUNCHER)
 
-    # Regenerate .proctor/local.yml — seed script present AND EITHER
-    # local.yml is missing OR seed-local.sh still has the pre-v0.7.9
-    # hardcoded SETUP_BLOCK heredoc (needs in-place rewrite so wizard
-    # amendments to setup-block.yml are honored). Bug C's fix folds
-    # the seed-script-migration trigger into this step.
+    # Regenerate .proctor/local.yml — seed script present AND
+    # EITHER local.yml is missing OR seed-local.sh has the
+    # pre-v0.7.9 hardcoded SETUP_BLOCK heredoc.
     if s["has_seed_script"] and (
         not s["has_local_yml"] or s.get("seed_has_legacy_heredoc")
     ):
@@ -516,72 +328,56 @@ _STEP_INFO: dict[str, dict] = {
     },
     STEP_REGENERATE_LOCAL_YML: {
         "next_action": (
-            "Ask the user how to regenerate .proctor/local.yml. "
-            "After their answer the wizard runs the chosen action."
+            "Run .proctor/seed-local.sh to regenerate "
+            ".proctor/local.yml (auto-migrating any pre-v0.7.9 "
+            "hardcoded SETUP_BLOCK heredoc inside the seed script)."
         ),
-        "ask_user": {
-            "header": "Local config",
-            "question": (
-                "Detected `.proctor/seed-local.sh` exists but "
-                "`.proctor/local.yml` is missing. The local "
-                "config is what PRoctor reads at runtime "
-                "(setup commands + credentials). How would "
-                "you like to proceed?"
-            ),
-            "options": [
-                {
-                    "label": "Regenerate seed-local.sh AND re-run it (Recommended)",
-                    "description": (
-                        "Walks Step 7f to confirm env-source + "
-                        "setup commands, regenerates the seed "
-                        "script, then prompts you to run it."
-                    ),
-                },
-                {
-                    "label": "Just run the existing seed-local.sh",
-                    "description": (
-                        "Faster. Uses whatever setup commands "
-                        "are baked into the seed script."
-                    ),
-                },
-                {
-                    "label": "Skip — I'll handle .proctor/local.yml myself",
-                    "description": (
-                        "Wizard does nothing extra; continues "
-                        "to the next step."
-                    ),
-                },
-            ],
-        },
+        "ask_user": None,
     },
-    STEP_SUPPLEMENT_SETUP: {
+    STEP_DEV_LAUNCHER: {
         "next_action": (
-            "Scan cmd/*/main.go binaries and offer to add the "
-            "long-running ones to .proctor/setup-block.yml."
+            "Ask the user how their project starts its full local "
+            "dev env for PRoctor's test runs (one-click script / "
+            "template / skip)."
         ),
         "ask_user": {
-            "header": "Supplementary binaries",
+            "header": "Dev launcher",
             "question": (
-                "Detected `cmd/*/main.go` binaries in this repo "
-                "that aren't currently started in your local "
-                "setup. PRoctor can start them alongside your "
-                "main server during test runs so the planner can "
-                "verify their output at runtime. Scan now?"
+                "How does this project start its full local dev "
+                "environment for PRoctor's test runs?\n\n"
+                "PRoctor needs to bring up your DB, main server, "
+                "and any supplementary processes (workers, queues, "
+                "schedulers, etc.) before running tests. There are "
+                "three paths."
             ),
             "options": [
                 {
-                    "label": "Scan for supplementary binaries you may want to start in setup",
+                    "label": "I have a one-click script (Recommended)",
                     "description": (
-                        "Runs the multi-main classifier against "
-                        "cmd/*/main.go + root main.go, then asks "
-                        "which ones to add to setup-block.yml."
+                        "Provide start + stop commands. Examples: "
+                        "`./dev.sh all` / `./dev.sh stop`, "
+                        "`make dev` / `make stop`, "
+                        "`pnpm dev` / `pkill -f 'pnpm dev'`, "
+                        "`docker-compose up -d` / `docker-compose down`."
                     ),
                 },
                 {
-                    "label": "Skip — my setup is fine",
+                    "label": "Show me a generic template I can adapt",
                     "description": (
-                        "Wizard moves on to the next step (or "
-                        "exits if nothing else is pending)."
+                        "PRoctor writes `dev-launcher.sh.template` "
+                        "to `.proctor/dev-launcher-template.sh` "
+                        "with TODO markers; another Claude Code "
+                        "session can fill in the project-specific "
+                        "bits."
+                    ),
+                },
+                {
+                    "label": "Skip — keep using the legacy `setup:` array",
+                    "description": (
+                        "Fine for projects with simple needs "
+                        "(`docker-compose up` + `go run .`). "
+                        "dev_launcher is the recommended path for "
+                        "anything more complex."
                     ),
                 },
             ],
@@ -603,10 +399,6 @@ def _build_envelope(
     """Build the JSON envelope ``decide_steps`` emits — includes both
     the v0.7.9 step list and the v0.7.8 backward-compat single-mode
     fields for any caller that hasn't migrated yet.
-
-    ``mode`` is set to the FIRST step in ``steps`` (deprecated alias);
-    if the list is empty, ``mode`` is ``"current"`` (mirroring v0.7.8's
-    "fully configured, no action" decision).
     """
     if not steps:
         return {
@@ -627,23 +419,20 @@ def _build_envelope(
         "state": state,
         "steps": steps,
         "current_tag": current_tag,
-        # Deprecated v0.7.8-compat fields. Older prose / tests that
-        # read `mode` see the first step name; for steps that map
-        # cleanly to v0.7.8 modes the names are aliased below.
         "mode": _mode_alias(first),
         "next_action": info.get("next_action", ""),
         "ask_user": info.get("ask_user"),
     }
 
 
-# v0.7.8 → v0.7.9 mode-name aliases for backward compat. Older prose
-# and tests that look for `mode == "amend-daemons"` keep working when
-# the equivalent step fires.
+# v0.7.8 → v0.7.9 mode-name aliases for backward compat. v0.7.11
+# preserves the ``amend-daemons`` alias on the new dev_launcher
+# step so old prose/tests still see a recognizable name.
 _MODE_ALIASES = {
     STEP_LEGACY_LAYOUT_MIGRATE: "legacy-migration",
     STEP_BUMP_ACTION_PIN: "bump-only",
     STEP_REGENERATE_LOCAL_YML: "needs-local-regen",
-    STEP_SUPPLEMENT_SETUP: "amend-daemons",
+    STEP_DEV_LAUNCHER: "amend-daemons",
     STEP_FRESH_INSTALL: "fresh",
 }
 
@@ -657,7 +446,7 @@ def main() -> int:
     p.add_argument(
         "--current-tag",
         default=None,
-        help="The latest PRoctor release tag (e.g. v0.7.9).",
+        help="The latest PRoctor release tag (e.g. v0.7.11).",
     )
     p.add_argument(
         "--repo-root",
@@ -674,12 +463,6 @@ def main() -> int:
     sys.stdout.write(json.dumps(envelope, indent=2))
     sys.stdout.write("\n")
     return 0
-
-
-# Allow `from wizard_detect_binaries import ...` at the local-import
-# inside `_setup_block_lists_all_cmd_binaries` to resolve to the
-# sibling script.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 if __name__ == "__main__":

@@ -1840,25 +1840,40 @@ def test_wizard_corrupted_state_file_resets_gracefully(tmp_path):
     assert env["type"] in ("show", "ask_user", "done", "bash")
 
 
-# --- v0.7.8: amend-daemons state-machine flow -------------------------------
+# --- v0.7.11: amend-daemons state-machine flow REMOVED ---------------------
+#
+# v0.7.7–v0.7.10's "scan cmd/*/main.go binaries and write them into
+# setup-block.yml" pipeline was deleted in v0.7.11 along with
+# wizard_detect_binaries.py. The fixture below (_make_v04_repo_with_
+# setup_no_daemons) is kept because some v0.7.10 bug-A/B/C regression
+# tests reuse it — but the tests that drove the supplement flow are
+# gone.
 
 
 def _make_v04_repo_with_setup_no_daemons(
     tmp_path, *, pin="v0.7.7", with_cmd_binary=True,
 ):
     """Variant of _make_v04_repo that DROPS a real `setup:` block in
-    `.proctor/local.yml` — non-empty, but without any `go run ./cmd/`
-    line. This is exactly the v0.7.6-era consumer shape that v0.7.8's
-    amend-daemons rule (renamed `step_supplement_setup` in v0.7.9)
-    targets.
+    `.proctor/local.yml` (non-empty, no `go run ./cmd/` line) AND
+    omits the `dev_launcher:` block in `.proctor/config.yml`.
 
-    v0.7.9 made the trigger smarter: the step only fires when there
-    are actual binaries to add. ``with_cmd_binary=True`` (default)
-    drops a synthetic ``cmd/example-loop/main.go`` with a ticker
-    pattern so the v0.7.9 trigger fires. Tests that want to assert
-    "no step fires when there are no binaries" pass
-    ``with_cmd_binary=False``."""
-    _make_v04_repo(tmp_path, has_local_yml=False, pin=pin)
+    v0.7.7–v0.7.10: this shape was exactly the v0.7.6-era consumer
+    that the (now-removed) amend-daemons / supplement-setup rule
+    targeted. The `cmd/example-loop/main.go` binary was used to
+    drive the wizard's `cmd/*/main.go` scanner.
+
+    v0.7.11: the scanner is gone; this helper now drives the
+    `step_dev_launcher` flow instead. ``with_cmd_binary`` is kept
+    (defaults to True) so older v0.7.10 regression tests that
+    reference the binary fixture keep working. The absence of a
+    `dev_launcher:` block in config.yml is what triggers the new
+    step."""
+    _make_v04_repo(
+        tmp_path,
+        has_local_yml=False,
+        pin=pin,
+        has_dev_launcher=False,  # v0.7.11: drive step_dev_launcher
+    )
     (tmp_path / ".proctor" / "local.yml").write_text(
         "base_url: http://localhost:9801\n"
         "setup:\n"
@@ -1880,321 +1895,24 @@ def _make_v04_repo_with_setup_no_daemons(
     return tmp_path
 
 
-def test_wdm_v078_amend_daemons_fires_when_setup_lacks_cmd_daemons(tmp_path):
-    """v0.7.8 amend-daemons rule (renamed ``step_supplement_setup``
-    in v0.7.9): consumer is on v0.4+ layout, local.yml exists, setup
-    has content, NO ``go run ./cmd/`` line, AND there's at least one
-    ``cmd/*/main.go`` binary not yet in setup. Wizard should offer
-    to scan + amend.
+def test_wdm_v078_amend_daemons_block_removed_in_v0711():
+    """Placeholder for the historical v0.7.8 amend-daemons block.
 
-    v0.7.9 also tightened the trigger: it only fires when there are
-    actual candidate binaries (the helper adds an
-    ``cmd/example-loop/main.go`` to the fixture so the trigger is
-    real). The legacy v0.7.8 trigger fired purely on the absence of
-    ``go run ./cmd/`` lines and would offer to scan even on repos
-    with no Go binaries at all."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    state = wdm_state(tmp_path)
-    # Pass current_tag matching the pin so bump-only doesn't preempt.
-    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
-    # The shim aliases STEP_SUPPLEMENT_SETUP → ``amend-daemons``
-    # for backward-compat with v0.7.8 tests / prose.
-    assert d["mode"] == "amend-daemons", d
-    assert d["ask_user"] is not None
-    # v0.7.9 neutral terminology: ``supplementary binaries`` instead
-    # of ``daemon binaries`` in user-facing text.
-    assert "supplementary binaries" in d["ask_user"]["options"][0]["label"]
-    assert "Skip" in d["ask_user"]["options"][1]["label"]
+    The whole pipeline (wizard scans cmd/*/main.go, classifies them,
+    writes setup-block.yml) was deleted in v0.7.11. The v0.7.8-era
+    `amend-daemons` mode name is preserved as a backward-compat alias
+    in `_MODE_ALIASES`, but it now points at `step_dev_launcher` —
+    see `test_v0711_decide_mode_shim_aliases_dev_launcher`."""
+    # No-op test. Kept so the section header isn't an isolated
+    # comment with nothing under it.
+    assert True
 
 
-def test_wdm_v078_amend_daemons_skipped_when_setup_has_cmd_daemon_line(tmp_path):
-    """When setup ALREADY has `go run ./cmd/` (the user already
-    accepted the v0.7.7 fresh-mode prompt, or amended earlier), the
-    rule does NOT fire — fall through to `current`."""
-    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.7")
-    (tmp_path / ".proctor" / "local.yml").write_text(
-        "base_url: x\n"
-        "setup:\n"
-        "  - bash -c 'nohup go run ./cmd/mcd-daemon > /tmp/d.log 2>&1 &'\n"
-    )
-    state = wdm_state(tmp_path)
-    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
-    assert d["mode"] == "current", d
-
-
-def test_wdm_v078_amend_daemons_skipped_for_empty_setup(tmp_path):
-    """`setup: []` / `setup: ~` shouldn't trigger the offer — likely
-    an existing-env-mode consumer who has no setup deliberately."""
-    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.7")
-    (tmp_path / ".proctor" / "local.yml").write_text(
-        "base_url: x\nsetup: []\n"
-    )
-    state = wdm_state(tmp_path)
-    d = wdm_decide(state, current_tag="v0.7.7", repo_root=tmp_path)
-    assert d["mode"] == "current", d
-
-
-def test_wdm_v078_bump_only_wins_over_amend_daemons(tmp_path):
-    """v0.7.10: ordering inverted — supplement_setup is now the first
-    step (writes ``setup-block.yml`` before regenerate/bump downstream
-    consume it). The shim's single-mode alias for this scenario is
-    therefore ``amend-daemons`` (the v0.7.8 alias for
-    step_supplement_setup), not ``bump-only``.
-
-    Pre-v0.7.10: bump-only ran first because the v0.7.8 priority kept
-    pin-bump above amend-daemons. v0.7.10 audit found that ordering
-    dropped the supplement step entirely when local.yml was missing
-    (Bug A) and produced a stale local.yml when regenerate ran before
-    supplement could write the new setup-block (Bug C). Reordering
-    supplement to the head of the list fixes both."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
-    state = wdm_state(tmp_path)
-    d = wdm_decide(state, current_tag="v0.7.8", repo_root=tmp_path)
-    assert d["mode"] == "amend-daemons", d
-
-
-def test_wizard_v078_amend_daemons_first_invocation_emits_offer(tmp_path):
-    """v0.7.9 step iterator: first call against a supplement-setup-
-    eligible repo emits ask_user with the scan/skip options.
-
-    v0.7.9 header is ``Supplementary binaries`` (v0.7.8 was ``Daemon
-    scan``); test updated."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    state_file = tmp_path / "wizard-state.json"
-    env = _run_wizard(state_file, current_tag="v0.7.7",
-                      repo_root=tmp_path)
-    assert env["type"] == "ask_user"
-    assert env["header"] == "Supplementary binaries"
-    labels = [o["label"] for o in env["options"]]
-    assert any("supplementary binaries" in l for l in labels)
-    assert any(l.startswith("Skip") for l in labels)
-
-
-def test_wizard_v078_amend_daemons_skip_path_emits_done(tmp_path):
-    """v0.7.9: offer → user picks Skip → step completes silently →
-    iterator pops no more steps → terminal done. The terminal done
-    summary names the completed step (``step_supplement_setup``
-    with outcome ``skipped``)."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
-    env = _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="Skip — my setup is fine",
-    )
-    assert env["type"] == "done"
-    # v0.7.9 done summary names the completed steps and outcomes.
-    assert "step_supplement_setup" in env["summary"]
-    assert "skipped" in env["summary"]
-
-
-def test_wizard_v078_amend_daemons_scan_path_emits_bash(tmp_path):
-    """After user picks Scan, wizard emits a bash envelope to run
-    wizard_detect_binaries.py against the consumer repo."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
-    env = _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="Scan for supplementary binaries you may want to start in setup",
-    )
-    assert env["type"] == "bash"
-    assert "wizard_detect_binaries.py" in env["command"]
-    assert "proctor-wizard-binaries.json" in env["command"]
-
-
-def test_wizard_v078_amend_daemons_after_scan_emits_multiselect(tmp_path):
-    """After the bash command finishes (rc=0 + JSON written), the
-    next invocation reads the JSON and emits a multi-select
-    ask_user with one option per detected candidate. The fixture's
-    ``_make_v04_repo_with_setup_no_daemons`` already drops a
-    ``cmd/example-loop/main.go``; v0.7.9 also adds a
-    ``cmd/test-daemon/main.go`` to verify the multiselect lists
-    BOTH binaries."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    cmd_dir = tmp_path / "cmd" / "test-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\nimport \"time\"\n"
-        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
-    )
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
-    _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="Scan for supplementary binaries you may want to start in setup",
-    )
-    # Simulate the AI ran the bash command (manually invoke detector
-    # to populate the JSON file).
-    import subprocess as sp
-    detector = (pathlib.Path(__file__).resolve().parent.parent
-                / "plugins" / "proctor" / "scripts"
-                / "wizard_detect_binaries.py")
-    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
-        sp.run(
-            ["python3", str(detector), "--repo-root", str(tmp_path)],
-            stdout=f, check=True,
-        )
-    env = _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        bash_rc=0,
-    )
-    assert env["type"] == "ask_user"
-    assert env.get("multi_select") is True
-    # v0.7.9 neutral header.
-    assert env["header"] == "Supplementary binaries to start in setup"
-    # The test-daemon candidate should appear in options.
-    labels = " ".join(o["label"] for o in env["options"])
-    assert "cmd/test-daemon/main.go" in labels
-
-
-def test_wizard_v078_amend_daemons_final_pick_amends_local_yml(tmp_path):
-    """Full happy path: user picks a binary, wizard writes
-    ``.proctor/setup-block.yml`` AND amends ``.proctor/local.yml``'s
-    ``setup:`` block with the kill+start pair. v0.7.9 made
-    setup-block.yml the canonical source — but during this run the
-    wizard also writes to local.yml so the planner picks up the
-    change without needing a seed-script re-run."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    cmd_dir = tmp_path / "cmd" / "test-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\nimport \"time\"\n"
-        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
-    )
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
-    _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="Scan for supplementary binaries you may want to start in setup",
-    )
-    import subprocess as sp
-    detector = (pathlib.Path(__file__).resolve().parent.parent
-                / "plugins" / "proctor" / "scripts"
-                / "wizard_detect_binaries.py")
-    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
-        sp.run(
-            ["python3", str(detector), "--repo-root", str(tmp_path)],
-            stdout=f, check=True,
-        )
-    _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        bash_rc=0,
-    )
-    # Final pick — the AI passes the selected label.
-    # v0.7.9: the step emits a 'show' envelope summarizing what was
-    # written; the iterator then re-runs (no pending steps) and
-    # emits the terminal 'done'. Run twice to reach the terminal.
-    env = _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="[recommended] cmd/test-daemon/main.go",
-    )
-    # First emission may be 'show' (per-step summary) or 'done'
-    # (if iterator advances past the no-more-steps check in the
-    # same invocation, the recursion would return done — but the
-    # supplement-setup step returns a 'show' envelope explicitly,
-    # so first is show).
-    if env["type"] == "show":
-        assert "setup-block.yml" in env["markdown"]
-        env = _run_wizard(state_file, current_tag="v0.7.7",
-                          repo_root=tmp_path)
-    assert env["type"] == "done"
-    # The setup-block.yml is the canonical source — verify it was
-    # written.
-    sb = (tmp_path / ".proctor" / "setup-block.yml").read_text()
-    assert "go run ./cmd/test-daemon/main.go" in sb, sb
-    assert "/tmp/proctor-test-daemon.pid" in sb, sb
-    # local.yml is also amended (convenience: avoids a seed-script
-    # re-run inside the same wizard invocation).
-    local = (tmp_path / ".proctor" / "local.yml").read_text()
-    assert "go run ./cmd/test-daemon/main.go" in local, local
-    assert "/tmp/proctor-test-daemon.pid" in local, local
-
-
-def test_wizard_v078_amend_daemons_empty_selection_is_noop(tmp_path):
-    """If user deselects every candidate, no file is modified and
-    wizard emits done with a no-op summary."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.7")
-    cmd_dir = tmp_path / "cmd" / "test-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\nimport \"time\"\n"
-        "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
-    )
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.7", repo_root=tmp_path)
-    _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="Scan for supplementary binaries you may want to start in setup",
-    )
-    import subprocess as sp
-    detector = (pathlib.Path(__file__).resolve().parent.parent
-                / "plugins" / "proctor" / "scripts"
-                / "wizard_detect_binaries.py")
-    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
-        sp.run(
-            ["python3", str(detector), "--repo-root", str(tmp_path)],
-            stdout=f, check=True,
-        )
-    _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        bash_rc=0,
-    )
-    # Pass empty selection.
-    original_local = (tmp_path / ".proctor" / "local.yml").read_text()
-    env = _run_wizard(
-        state_file, current_tag="v0.7.7", repo_root=tmp_path,
-        answer="",
-    )
-    # v0.7.9 emits a 'show' envelope first (per-step summary), then
-    # iterator emits terminal 'done' on the next invocation.
-    if env["type"] == "show":
-        assert "No binaries selected" in env["markdown"]
-        env = _run_wizard(state_file, current_tag="v0.7.7",
-                          repo_root=tmp_path)
-    assert env["type"] == "done"
-    # local.yml unchanged.
-    assert (tmp_path / ".proctor" / "local.yml").read_text() == original_local
-    # setup-block.yml NOT created — empty selection writes nothing.
-    assert not (tmp_path / ".proctor" / "setup-block.yml").exists()
-
-
-def test_wizard_v078_amend_daemons_idempotent_rerun(tmp_path):
-    """Running amend-daemons twice with the same selection should
-    not duplicate lines — the helper detects when the binary's
-    pidfile name OR path already appears in setup."""
-    from plugins.proctor.scripts.wizard_run import _amend_local_yml_with_daemons
-    local = tmp_path / "local.yml"
-    local.write_text(
-        "setup:\n"
-        "  - bash -c 'echo a'\n"
-        "  - bash -c 'echo b'\n"
-        "other_key: value\n"
-    )
-    chosen = [{
-        "path": "cmd/foo/main.go",
-        "binary_name": "foo",
-        "looks_like": "daemon",
-        "evidence": ["time.NewTicker"],
-    }]
-    added1 = _amend_local_yml_with_daemons(local, chosen)
-    assert added1 == 1
-    text1 = local.read_text()
-    # Second call: should detect existing lines and add nothing.
-    added2 = _amend_local_yml_with_daemons(local, chosen)
-    assert added2 == 0
-    assert local.read_text() == text1
-    # other_key sibling preserved + below the appended lines.
-    assert "other_key: value" in text1
-    # Verify the kill+start pair was inserted INSIDE the setup
-    # block (before the sibling key).
-    idx_pid = text1.find("/tmp/proctor-foo.pid")
-    idx_other = text1.find("other_key")
-    assert idx_pid >= 0
-    assert idx_pid < idx_other, (
-        "expected daemon lines to be inserted BEFORE the next "
-        "top-level key, not appended at EOF"
-    )
+# v0.7.11: all v0.7.8 amend-daemons-flow tests deleted — the
+# pipeline they exercised (wizard scans cmd/*/main.go, classifies
+# each as serves-http / runs-loop / runs-once, writes kill+start
+# pairs into setup-block.yml + local.yml) is gone. The replacement
+# is `step_dev_launcher`, tested below in the v0.7.11 section.
 
 
 # --- v0.4.6: render_item_artifacts (absolute paths + missing-artifact badges) ---
@@ -2337,20 +2055,35 @@ from plugins.proctor.scripts.wizard_decide_mode import (
 
 
 def _make_v04_repo(tmp_path, *, has_local_yml=False, pin="v0.4.3",
-                   has_seed_script=True):
-    """Build a v0.4.0-layout consumer repo fixture under tmp_path."""
+                   has_seed_script=True, has_dev_launcher=True):
+    """Build a v0.4.0-layout consumer repo fixture under tmp_path.
+
+    v0.7.11 added the ``has_dev_launcher`` parameter — when True
+    (default) the synthetic config.yml carries a `dev_launcher:`
+    block so `step_dev_launcher` doesn't fire and the rest of the
+    decision logic is exercised in isolation. Tests that want to
+    drive the dev-launcher flow pass ``has_dev_launcher=False``.
+    """
     (tmp_path / ".proctor").mkdir()
+    cfg_lines = [
+        "base_url: http://localhost:9801",
+        "auth:",
+        "  type: form_with_totp",
+        "  login_url: /auth/login",
+        "  selectors: {email: i, password: i, totp: i, submit: b}",
+        "  accounts:",
+        "    - name: developer",
+        "      email: x",
+        "      password: y",
+        "      totp_seed: JBSWY3DPEHPK3PXP",
+    ]
+    if has_dev_launcher:
+        cfg_lines += [
+            "dev_launcher:",
+            "  start: ./dev.sh all",
+        ]
     (tmp_path / ".proctor" / "config.yml").write_text(
-        "base_url: http://localhost:9801\n"
-        "auth:\n"
-        "  type: form_with_totp\n"
-        "  login_url: /auth/login\n"
-        "  selectors: {email: i, password: i, totp: i, submit: b}\n"
-        "  accounts:\n"
-        "    - name: developer\n"
-        "      email: x\n"
-        "      password: y\n"
-        "      totp_seed: JBSWY3DPEHPK3PXP\n"
+        "\n".join(cfg_lines) + "\n"
     )
     if has_seed_script:
         seed = tmp_path / ".proctor" / "seed-local.sh"
@@ -2385,13 +2118,20 @@ def test_wdm_legacy_layout_detected(tmp_path):
 def test_wdm_needs_local_regen_fires_on_user_scenario(tmp_path):
     """The EXACT scenario the user hit: v0.4.0 layout, seed script
     present, local.yml MISSING, pin out of date. Must pick
-    needs-local-regen (NOT bump-only)."""
+    needs-local-regen (NOT bump-only).
+
+    v0.7.10+ collapsed the pre-existing 3-option ask_user (two of
+    them were no-ops) — the regenerate step now goes straight to a
+    bash envelope. The mode alias `needs-local-regen` is preserved
+    for backward-compat."""
     _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.3")
     state = wdm_state(tmp_path)
     d = wdm_decide(state, current_tag="v0.4.4")
     assert d["mode"] == "needs-local-regen"
-    assert d["ask_user"] is not None
-    assert "Regenerate seed-local.sh AND re-run it" in d["ask_user"]["options"][0]["label"]
+    # ask_user is None now — the regenerate step's handler emits a
+    # bash envelope directly. Preserved for back-compat callers that
+    # expect ``None`` to mean "no user input needed, run next_action".
+    assert d["ask_user"] is None
 
 
 def test_wdm_bump_only_when_local_yml_present_and_pin_old(tmp_path):
@@ -2438,8 +2178,11 @@ def test_wdm_migrate_when_no_auth_block(tmp_path):
     layer this test now asserts the pin-bump step fires — the v0.2
     auth-block-add-flow is followed by the user after the pin bump."""
     (tmp_path / ".proctor").mkdir()
+    # v0.7.11: include a dev_launcher block so step_dev_launcher
+    # doesn't preempt the bump-only assertion this test is pinning.
     (tmp_path / ".proctor" / "config.yml").write_text(
         "base_url: x\nsetup: [echo hi]\n"
+        "dev_launcher:\n  start: ./dev.sh all\n"
     )
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "workflows").mkdir()
@@ -2488,7 +2231,10 @@ def test_wdm_cli_outputs_valid_json(tmp_path):
     data = json.loads(result.stdout)
     assert data["mode"] == "needs-local-regen"
     assert data["state"]["has_local_yml"] is False
-    assert data["ask_user"] is not None
+    # v0.7.10+: regenerate step has no ask_user (it goes straight
+    # to a bash envelope), so the CLI envelope's `ask_user` field
+    # is null when this is the first applicable step.
+    assert data["ask_user"] is None
 
 
 # --- v0.4.3: render_plan_table for the approval-gate ---------------------
@@ -5473,604 +5219,7 @@ def test_executor_md_documents_evaluate_script_batching_v076():
     assert "take_snapshot" in text
 
 
-# --- v0.7.7: wizard_detect_binaries.py — multi-main classifier --------------
-
-
-def _run_detect_binaries(repo_root):
-    """Helper: invoke wizard_detect_binaries.py and return parsed JSON."""
-    script = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "scripts" / "wizard_detect_binaries.py"
-    )
-    result = subprocess.run(
-        ["python3", str(script), "--repo-root", str(repo_root)],
-        capture_output=True, text=True, check=True,
-    )
-    return json.loads(result.stdout)
-
-
-def test_detect_binaries_classifies_serves_http(tmp_path):
-    """A cmd/<X>/main.go whose source contains http.ListenAndServe
-    classifies as serves-http. This is the standard Go web-app
-    entry-point shape. v0.7.9 renamed the label from `http-server`
-    to the neutral `serves-http` (no project-specific noun); the
-    classifier logic is unchanged."""
-    cmd_dir = tmp_path / "cmd" / "mcd-website"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import \"net/http\"\n"
-        "func main() {\n"
-        "    http.ListenAndServe(\":8080\", nil)\n"
-        "}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    candidates = out["candidates"]
-    assert len(candidates) == 1
-    c = candidates[0]
-    assert c["path"] == "cmd/mcd-website/main.go"
-    assert c["binary_name"] == "mcd-website"
-    assert c["looks_like"] == "serves-http"
-    # v0.7.9: evidence entries are prefixed with `matches '...'` so
-    # they read naturally in the wizard's AskUser prompt.
-    assert any("http.ListenAndServe" in e for e in c["evidence"])
-
-
-def test_detect_binaries_classifies_runs_loop(tmp_path):
-    """A cmd/<X>/main.go whose source contains time.NewTicker or
-    similar ticker/cron pattern classifies as runs-loop. Mimics
-    mcd-website's cmd/mcd-daemon — the 1-minute publish-to-S3 loop
-    the v0.7.6 audit found PRoctor wasn't starting. v0.7.9 renamed
-    `daemon` → `runs-loop` so the category description is neutral
-    (mcd-website's binary is literally called `mcd-daemon` and the
-    old label aliased confusingly with the binary name)."""
-    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import (\"time\")\n"
-        "func main() {\n"
-        "    ticker := time.NewTicker(time.Minute)\n"
-        "    for range ticker.C {\n"
-        "        publishAll()\n"
-        "    }\n"
-        "}\n"
-        "func publishAll() {}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    candidates = out["candidates"]
-    assert len(candidates) == 1
-    c = candidates[0]
-    assert c["binary_name"] == "mcd-daemon"
-    assert c["looks_like"] == "runs-loop"
-    assert any("time.NewTicker" in e for e in c["evidence"])
-
-
-def test_detect_binaries_classifies_runs_once(tmp_path):
-    """A short cmd/<X>/main.go with neither HTTP-server nor
-    runs-loop patterns classifies as runs-once — sitemap generators,
-    republishers, migration tools. The wizard should NOT preselect
-    these for setup (they're run on-demand). v0.7.9 renamed
-    `one-shot` → `runs-once` for neutral terminology."""
-    cmd_dir = tmp_path / "cmd" / "mcd-sitemap"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import \"fmt\"\n"
-        "func main() {\n"
-        "    fmt.Println(\"generating sitemap\")\n"
-        "}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["binary_name"] == "mcd-sitemap"
-    assert c["looks_like"] == "runs-once"
-
-
-def test_detect_binaries_unknown_for_long_unrecognized(tmp_path):
-    """A LONG (>200 lines) main.go with no HTTP and no ticker
-    patterns classifies as unknown — better to ask the user than
-    silently lump it with one-shot CLIs. Real-world examples might
-    include batch-job orchestrators or interactive REPLs we don't
-    have heuristics for."""
-    cmd_dir = tmp_path / "cmd" / "weird-binary"
-    cmd_dir.mkdir(parents=True)
-    # 300 lines, none matching either pattern set.
-    body = "\n".join([f"// filler line {i}" for i in range(300)])
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        + body + "\n"
-        + "func main() { println(\"hi\") }\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["looks_like"] == "unknown"
-
-
-def test_detect_binaries_walks_root_main_go_and_cmd(tmp_path):
-    """Root main.go is emitted FIRST, then cmd/* entries
-    alphabetically. The binary_name for root main.go uses the
-    repo-root basename so the wizard can reference it
-    consistently across runs."""
-    # Root main.go — http-server style.
-    (tmp_path / "main.go").write_text(
-        "package main\n"
-        "import \"net/http\"\n"
-        "func main() { http.ListenAndServe(\":8080\", nil) }\n"
-    )
-    # cmd/zee — daemon
-    (tmp_path / "cmd" / "zee").mkdir(parents=True)
-    (tmp_path / "cmd" / "zee" / "main.go").write_text(
-        "package main\nimport \"time\"\n"
-        "func main() { t := time.NewTicker(time.Second); _ = t }\n"
-    )
-    # cmd/aaa — http-server (so the sort isn't trivially by classification)
-    (tmp_path / "cmd" / "aaa").mkdir(parents=True)
-    (tmp_path / "cmd" / "aaa" / "main.go").write_text(
-        "package main\nimport \"net/http\"\n"
-        "func main() { http.ListenAndServe(\":9090\", nil) }\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    paths = [c["path"] for c in out["candidates"]]
-    # Root first, then cmd/* alphabetically.
-    assert paths[0] == "main.go"
-    assert paths[1] == "cmd/aaa/main.go"
-    assert paths[2] == "cmd/zee/main.go"
-    # Root main.go's binary_name is the repo basename.
-    assert out["candidates"][0]["binary_name"] == tmp_path.name
-
-
-def test_detect_binaries_empty_when_no_main_go(tmp_path):
-    """Repo with no main.go (Node / Python / Ruby project) returns
-    empty candidates. The wizard's Step 7.5 then skips the
-    daemon-selection question entirely."""
-    out = _run_detect_binaries(tmp_path)
-    assert out == {"candidates": []}
-
-
-def test_detect_binaries_skips_non_main_go_files_in_cmd(tmp_path):
-    """cmd/<X>/helpers.go etc. don't trigger a candidate — only
-    cmd/<X>/main.go counts. Some projects keep per-binary helper
-    files alongside main.go; those aren't entry points."""
-    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "helpers.go").write_text("package main\nfunc helper() {}\n")
-    # No main.go — should produce no candidate.
-    out = _run_detect_binaries(tmp_path)
-    assert out == {"candidates": []}
-
-
-# --- v0.7.8: classifier regressions found in mcd-website e2e ----------------
-
-
-def test_detect_binaries_v078_short_main_with_appkit_server_listen_and_serve(tmp_path):
-    """v0.7.8 regression: mcd-website's root main.go is 29 lines and
-    delegates to ``server.ListenAndServe(config.Config.HTTP, ...)``
-    (theplant's appkit pkg). The v0.7.7 classifier's regex only
-    matched ``http.ListenAndServe`` / ``router.ListenAndServe`` and
-    missed ``<pkg>.ListenAndServe`` — the short file then fell into
-    the ``runs-once`` bucket. v0.7.8 broadens the pattern to any
-    ``<lowercase-pkg>.ListenAndServe[TLS]?`` call so wrappers around
-    appkit (or any other framework's ListenAndServe) classify
-    correctly as ``serves-http`` regardless of file size."""
-    (tmp_path / "main.go").write_text(
-        "package main\n"
-        "import (\n"
-        "    \"flag\"\n"
-        "    \"fmt\"\n"
-        "    \"runtime\"\n"
-        "    \"github.com/theplant/appkit/server\"\n"
-        ")\n"
-        "func main() {\n"
-        "    result := boot.InitApp(nil)\n"
-        "    flag.Parse()\n"
-        "    fmt.Printf(\"Go version: %s\\n\", runtime.Version())\n"
-        "    server.ListenAndServe(nil, result.Logger, result.Handler)\n"
-        "}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["path"] == "main.go", out
-    assert c["looks_like"] == "serves-http", c
-    assert any("<pkg>.ListenAndServe" in e for e in c["evidence"])
-
-
-def test_detect_binaries_v078_listen_and_serve_tls_matches_too(tmp_path):
-    """The broadened pattern accepts both ``ListenAndServe`` and
-    ``ListenAndServeTLS``. Some appkit / proxy code paths only call
-    the TLS variant."""
-    (tmp_path / "cmd" / "tls-front").mkdir(parents=True)
-    (tmp_path / "cmd" / "tls-front" / "main.go").write_text(
-        "package main\n"
-        "func main() { proxy.ListenAndServeTLS(\":443\", \"c\", \"k\", nil) }\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["looks_like"] == "serves-http", c
-    assert any("<pkg>.ListenAndServe" in e for e in c["evidence"])
-
-
-def test_detect_binaries_v078_runs_loop_trumps_serves_http_when_both_present(tmp_path):
-    """v0.7.8 regression (renamed in v0.7.9): mcd-website's
-    ``cmd/mcd-daemon/main.go`` has BOTH ``http.ListenAndServe`` (a
-    tail-end ``/health-check`` admin endpoint) AND
-    ``time.Tick(time.Minute)`` + ``utils.RunJob`` (15 publish-on-tick
-    goroutines). v0.7.7's classifier checked http-server FIRST and
-    picked the wrong label; the file's primary purpose is the
-    long-running loop. v0.7.8 swapped the priority; v0.7.9 keeps the
-    behavior but renames the winning label from ``daemon`` →
-    ``runs-loop`` and surfaces the auxiliary HTTP listener as an
-    explicit 'ALSO matches...' evidence note so the user sees the
-    heuristic at work."""
-    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import (\n"
-        "    \"net/http\"\n"
-        "    \"time\"\n"
-        ")\n"
-        "func main() {\n"
-        "    go func() {\n"
-        "        t := time.Tick(time.Minute)\n"
-        "        for range t {\n"
-        "            utils.RunJob(\"PublishAllergens\", time.Minute*5, func() {})\n"
-        "        }\n"
-        "    }()\n"
-        "    mux := http.NewServeMux()\n"
-        "    mux.Handle(\"/health-check\", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n"
-        "        w.WriteHeader(200)\n"
-        "    }))\n"
-        "    http.ListenAndServe(\":8080\", mux)\n"
-        "}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["binary_name"] == "mcd-daemon"
-    assert c["looks_like"] == "runs-loop", (
-        f"expected runs-loop precedence over serves-http but got {c!r}"
-    )
-    ev_joined = " ; ".join(c["evidence"])
-    assert "time.Tick" in ev_joined
-    assert "RunJob" in ev_joined
-    # v0.7.9: the auxiliary serves-http match should be surfaced as
-    # an 'ALSO matches...' precedence note so the user sees the
-    # heuristic.
-    assert any("ALSO matches" in e for e in c["evidence"]), c["evidence"]
-
-
-def test_detect_binaries_v078_evidence_dedupe_for_specific_http_label(tmp_path):
-    """When a specific http-server label matched (e.g. ``http.ListenAndServe``)
-    the generic ``<pkg>.ListenAndServe`` label is suppressed — both
-    technically match the source but the evidence list shouldn't carry
-    both for readability of the wizard's question text."""
-    cmd_dir = tmp_path / "cmd" / "plain-http"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import \"net/http\"\n"
-        "func main() { http.ListenAndServe(\":8080\", nil) }\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    ev = out["candidates"][0]["evidence"]
-    assert any("http.ListenAndServe" in e for e in ev)
-    assert not any("<pkg>.ListenAndServe" in e for e in ev), ev
-
-
-# --- v0.7.7: plan_smells daemon-aware missing-runtime-verify check ----------
-
-
-def test_plan_smells_daemon_present_diff_touches_pr_mentions_output_no_verify_fires():
-    """The full positive case: daemon in setup, diff touches daemon
-    code, PR body mentions publish/JSON, plan has only lint-only
-    items. The v0.7.7 rule fires."""
-    change_map = {
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as a "
-                    "trimmed array. The daemon picks up new banner "
-                    "fields and republishes them on the next tick.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "Source-level: SplitTags is called from "
-                     "publishAll", "how": "grep ...",
-             "risk": "medium", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": ["mcd-daemon"],
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert len(daemon) == 1
-    assert "mcd-daemon" in daemon[0]
-
-
-def test_plan_smells_daemon_present_bash_curl_item_satisfies():
-    """When the plan DOES include a bash item with curl-against-URL,
-    the rule is satisfied — no warning. This is the success-path
-    the planner is supposed to reach."""
-    change_map = {
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as a "
-                    "trimmed array.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "Source-level wire-up", "how": "grep ...",
-             "risk": "medium", "depends_on": []},
-            {"id": "t-2", "category": "api", "tool": "bash",
-             "what": "HAPPY: published JSON include_tags is a trimmed "
-                     "array after daemon ticker fires",
-             "how": "for i in $(seq 1 120); do RESP=$(curl -sf "
-                    "\"https://example.test/banners.json\"); "
-                    "echo \"$RESP\" | jq -e '.include_tags | "
-                    "type == \"array\"' && break; sleep 1; done",
-             "risk": "high", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": ["mcd-daemon"],
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert daemon == []
-
-
-def test_plan_smells_daemon_not_running_no_warning():
-    """When the daemon ISN'T in local setup, the planner is excused
-    — the runtime verify is genuinely impossible. The rule only
-    fires when the daemon IS running but the planner failed to use
-    that capability."""
-    change_map = {
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as a "
-                    "trimmed array.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "grep wiring", "how": "grep",
-             "risk": "low", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "daemons_running": [],  # nothing in setup
-        "daemon_touched": ["mcd-daemon"],
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert daemon == []
-
-
-def test_plan_smells_daemon_not_touched_no_warning():
-    """When the diff DOESN'T touch any daemon-reachable code, no
-    runtime verify is required — the daemon is irrelevant to this
-    PR. Rule shouldn't fire."""
-    change_map = {
-        "pr_context": {
-            "body": "Cosmetic CSS change — published JSON unchanged.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "frontend", "tool": "lint-only",
-             "what": "CSS file syntax valid",
-             "how": "stylelint", "risk": "low", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": [],  # diff doesn't reach any daemon
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert daemon == []
-
-
-def test_plan_smells_daemon_pr_body_no_output_keywords_no_warning():
-    """When the PR body doesn't mention publish/JSON/output/etc.
-    keywords, the planner had no signal to plan a runtime verify
-    in the first place. Rule shouldn't fire — false-positive
-    avoidance."""
-    change_map = {
-        "pr_context": {
-            "body": "Refactor: rename internal helper for clarity. "
-                    "No behavior change.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "renamed identifier compiles",
-             "how": "go build", "risk": "low", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": ["mcd-daemon"],
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert daemon == []
-
-
-def test_plan_smells_daemon_no_setup_context_no_op_backward_compat():
-    """Backward compat: calling plan_check WITHOUT setup_context
-    preserves the v0.7.6 behavior — the v0.7.7 daemon check no-ops
-    silently."""
-    change_map = {
-        "pr_context": {"body": "Published JSON has trimmed tokens."},
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
-             "what": "HAPPY: save record", "how": "fill+save",
-             "risk": "high", "depends_on": [], "produces": ["created_id"]},
-            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
-             "what": "Re-open saved record, fields round-trip",
-             "how": "navigate+reload", "risk": "high",
-             "depends_on": ["t-1"], "data_from": ["t-1"]},
-        ],
-    }
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    warnings = plan_check(plan, change_map=change_map)
-    # No setup_context → daemon check inert; only the v0.7.6 checks
-    # might fire. Specifically the daemon-named warning must NOT.
-    daemon = [w for w in warnings
-              if "missing-runtime-verify-when-supplementary-binary-present" in w]
-    assert daemon == []
-
-
-def test_plan_smells_cli_strict_accepts_setup_context_flag(tmp_path):
-    """CLI integration: --setup-context flag routes through to the
-    new check. Synthetic plan + change-map + setup-context where
-    all three conditions are met → strict mode exits 1."""
-    plan_path = tmp_path / "plan.json"
-    plan_path.write_text(json.dumps({
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "grep wiring", "how": "grep",
-             "risk": "low", "depends_on": []},
-        ],
-    }))
-    cm_path = tmp_path / "change-map.json"
-    cm_path.write_text(json.dumps({
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as "
-                    "trimmed tokens.",
-        },
-    }))
-    sc_path = tmp_path / "setup-context.json"
-    sc_path.write_text(json.dumps({
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": ["mcd-daemon"],
-    }))
-    script = str(
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "scripts" / "plan_smells.py"
-    )
-    result = subprocess.run(
-        ["python3", script, "--strict",
-         "--change-map", str(cm_path),
-         "--setup-context", str(sc_path)],
-        stdin=open(plan_path), capture_output=True, text=True,
-    )
-    assert result.returncode == 1
-    assert "missing-runtime-verify-when-supplementary-binary-present" in result.stdout
-
-
-# --- v0.7.7: planner + reporter SKILL.md prose contracts ------------------
-
-
-def test_planner_skill_md_documents_supplementary_binary_awareness_v079():
-    """The planning-pr-tests SKILL.md must document the v0.7.7+
-    supplementary-binary awareness section. v0.7.9 renamed the
-    section + key names for neutral terminology: ``daemons_running``
-    → ``supplementary_binaries_running``, ``daemon_touched`` →
-    ``supplementary_binary_touched``, ``no-daemon-in-setup`` →
-    ``no-supplementary-binary-in-setup``. Without this prose the AI
-    driving the planner won't know to parse `setup:` or build
-    setup_context."""
-    skill_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
-        / "SKILL.md"
-    )
-    text = skill_path.read_text()
-    # Section header / key vocabulary (v0.7.9 neutral terms).
-    assert (
-        "Detect which supplementary binaries run in local setup"
-        in text
-    )
-    assert "setup_context.supplementary_binaries_running" in text
-    assert "setup_context.supplementary_binary_touched" in text
-    # The two-path discipline: runtime item when binary present,
-    # explicit skip item when binary absent.
-    assert "no-supplementary-binary-in-setup" in text
-    # Lint integration — --setup-context flag mentioned.
-    assert "--setup-context" in text
-
-
-def test_reporter_skill_md_documents_runtime_verification_gaps_v079():
-    """The reporting-pr-test-results SKILL.md must document the
-    v0.7.7+ "Runtime verification gaps" section template so the
-    reporter renders missing-binary gaps in a dedicated section
-    instead of scattering them as ordinary skips. v0.7.9 renamed
-    the skip reason to the neutral ``no-supplementary-binary-in-
-    setup`` (with the v0.7.7/v0.7.8 alias still accepted)."""
-    skill_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "skills"
-        / "reporting-pr-test-results" / "SKILL.md"
-    )
-    text = skill_path.read_text()
-    assert "Runtime verification gaps" in text
-    assert "no-supplementary-binary-in-setup" in text
-    # The actionable closing prose — tells the reviewer how to fix.
-    assert "/proctor:proctor-init" in text
-
-
-def test_proctor_init_md_documents_step_7_5_multi_main_detection_v077():
-    """The /proctor-init command prose must describe the v0.7.7+
-    Step 7.5 multi-binary detection step so the fresh-mode AI runs
-    the new helper script and emits the daemon-multi-select."""
-    cmd_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "commands" / "proctor-init.md"
-    )
-    text = cmd_path.read_text()
-    # Step header + helper script name.
-    assert "Step 7.5" in text
-    assert "wizard_detect_binaries.py" in text
-    # The fresh-mode gating note.
-    assert "MODE=fresh" in text
-    # The pidfile pattern (so daemons can be restarted across runs).
-    assert "proctor-" in text and ".pid" in text
-
-
-def test_proctor_init_md_documents_amend_daemons_state_machine_v078():
-    """v0.7.8 wires daemon detection into the state machine for
-    existing consumers (MODE=amend-daemons). The /proctor-init prose
-    must document the new mode + multi_select envelope so AIs running
-    the wizard against a v0.7.6-era local.yml know to handle
-    multi-select AskUserQuestion + comma-joined answer."""
-    cmd_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "commands" / "proctor-init.md"
-    )
-    text = cmd_path.read_text()
-    assert "amend-daemons" in text
-    assert "multi_select" in text
-    # The harness must call AskUserQuestion in multi-select mode.
-    assert "multi-select" in text.lower()
+# v0.7.11: deleted lines 5186–5783 (v0.7.7-v0.7.8 detect_binaries+plan_smells+SKILL tests).
 
 
 # --- v0.7.9: step iterator + neutral terminology + setup-block.yml -----------
@@ -6079,10 +5228,11 @@ from plugins.proctor.scripts.wizard_decide_steps import (
     decide_steps as wds_decide_steps,
     detect_state as wds_detect_state,
     STEP_BUMP_ACTION_PIN,
+    STEP_DEV_LAUNCHER,
     STEP_FRESH_INSTALL,
     STEP_LEGACY_LAYOUT_MIGRATE,
     STEP_REGENERATE_LOCAL_YML,
-    STEP_SUPPLEMENT_SETUP,
+    STEP_SUPPLEMENT_SETUP,  # v0.7.11 alias for STEP_DEV_LAUNCHER
     STEP_ORDER,
 )
 
@@ -6271,20 +5421,19 @@ def test_v079_decide_steps_cli_outputs_steps_list(tmp_path):
 
 
 def test_v079_wizard_iterator_multi_step_supplement_then_bump(tmp_path):
-    """The headline v0.7.9 behavior (renamed in v0.7.10 reorder): a
-    repo with BOTH a stale pin AND a missing supplementary binary
-    triggers BOTH steps in one wizard invocation. v0.7.8 would have
-    picked one and silently dropped the other. v0.7.9 walked them in
-    order; v0.7.10 reordered so supplement leads (writes
-    setup-block.yml that downstream regenerate / bump can consume)."""
+    """v0.7.11 update: a repo with BOTH a stale pin AND a missing
+    dev_launcher block triggers BOTH steps in one wizard
+    invocation. dev_launcher is first in STEP_ORDER (preserving
+    v0.7.10's "non-pin steps lead" structure)."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state_file = tmp_path / "wizard-state.json"
 
     # First invocation: detection populates pending_steps, then the
-    # first step (supplement_setup) emits its scan/skip ask_user.
+    # first step (dev_launcher, aliased from supplement_setup) emits
+    # its 3-option ask_user.
     env1 = _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
     assert env1["type"] == "ask_user", env1
-    assert env1["header"] == "Supplementary binaries"
+    assert env1["header"] == "Dev launcher"
 
     # State file should record bump still pending (or completed).
     state = json.loads(state_file.read_text())
@@ -6297,43 +5446,46 @@ def test_v079_wizard_iterator_multi_step_supplement_then_bump(tmp_path):
 
 
 def test_v079_wizard_iterator_advances_to_bump_after_supplement_done(tmp_path):
-    """After the supplement step completes (user picks Skip), the
-    iterator pops the next pending step. With v0.7.10 ordering
-    (supplement → regenerate → bump) on a fixture that has local.yml
-    present + a stale pin, only supplement and bump apply (regenerate
-    doesn't fire because local.yml is present + seed-local.sh has no
-    legacy heredoc). After supplement skip, the iterator recurses
-    into bump which emits its bash. The point of the iterator is
-    that the wizard doesn't exit after the first step."""
+    """v0.7.11 update: after the dev_launcher step skip-completes,
+    the iterator pops the next pending step. With v0.7.11 ordering
+    (dev_launcher → regenerate → bump) on a fixture that has
+    local.yml present + a stale pin, only dev_launcher and bump
+    apply (regenerate doesn't fire because local.yml is present +
+    seed-local.sh has no legacy heredoc). After dev_launcher skip,
+    the iterator recurses into bump which emits its bash."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state_file = tmp_path / "wizard-state.json"
-    # Step 1: supplement asks scan/skip.
     _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
-    # Step 2: user picks Skip → supplement completes silently →
-    # iterator recurses into bump which emits its bash.
     env2 = _run_wizard(
         state_file, current_tag="v0.7.9", repo_root=tmp_path,
-        answer="Skip — my setup is fine",
+        answer="Skip — keep using the legacy `setup:` array",
     )
+    # Skip path emits a `show` envelope; the next invocation runs
+    # bump's bash. The iterator may also recurse silently if the
+    # show is a no-op envelope. Accept either.
+    if env2["type"] == "show":
+        env2 = _run_wizard(state_file, current_tag="v0.7.9",
+                           repo_root=tmp_path)
     assert env2["type"] == "bash", env2
     assert "wizard_bump_action.sh" in env2["command"]
 
 
 def test_v079_wizard_iterator_terminal_done_only_after_all_steps(tmp_path):
-    """The terminal done fires ONLY when pending_steps is empty AND
-    current_step is None. Per-step show envelopes are NOT terminal."""
+    """v0.7.11 update: the terminal done fires ONLY when pending_steps
+    is empty AND current_step is None. Per-step show envelopes are
+    NOT terminal."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.9")
     state_file = tmp_path / "wizard-state.json"
-    # First call: supplement offer.
     _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
-    # User picks Skip. supplement completes with outcome=skipped,
-    # which carries no envelope; iterator advances and emits the
-    # terminal done in the SAME invocation.
     env = _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path,
-                      answer="Skip — my setup is fine")
+                      answer="Skip — keep using the legacy `setup:` array")
+    # Skip path always emits a `show` envelope first (per-step
+    # summary) — drive once more to reach the terminal done.
+    if env["type"] == "show":
+        env = _run_wizard(state_file, current_tag="v0.7.9",
+                          repo_root=tmp_path)
     assert env["type"] == "done"
-    # Done summary names the completed step explicitly.
-    assert "step_supplement_setup" in env["summary"]
+    assert "step_dev_launcher" in env["summary"]
 
 
 def test_v079_wizard_state_schema_uses_v079_keys(tmp_path):
@@ -6389,334 +5541,7 @@ def test_v079_wizard_legacy_state_file_schema_resets_to_fresh(tmp_path):
     assert env.get("type") != "error", env
 
 
-# --- v0.7.9: schema.validate_setup_block ------------------------------------
-
-from plugins.proctor.scripts.schema import validate_setup_block
-
-
-def test_v079_validate_setup_block_minimum_valid():
-    """A mapping with just `setup: [string, ...]` is the minimal
-    valid shape."""
-    validate_setup_block({"setup": ["docker compose up", "go run ."]})
-    validate_setup_block({"setup": []})  # empty is fine — wizard
-                                          # writes empty stubs
-
-
-def test_v079_validate_setup_block_rejects_non_dict():
-    with pytest.raises(SchemaError):
-        validate_setup_block("setup: [ a ]")
-    with pytest.raises(SchemaError):
-        validate_setup_block(["setup", "items"])
-
-
-def test_v079_validate_setup_block_rejects_extra_keys():
-    """The file is intentionally minimal — `setup:` is the only
-    allowed top-level key. Anything else means someone tried to
-    embed local.yml content here (wrong file)."""
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": [], "base_url": "x"})
-
-
-def test_v079_validate_setup_block_rejects_missing_setup_key():
-    with pytest.raises(SchemaError):
-        validate_setup_block({})
-    with pytest.raises(SchemaError):
-        validate_setup_block({"not_setup": []})
-
-
-def test_v079_validate_setup_block_rejects_non_list_setup():
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": "docker compose up"})
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": {"cmd1": "a"}})
-
-
-def test_v079_validate_setup_block_rejects_non_string_items():
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": [123]})
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": ["ok", None]})
-    with pytest.raises(SchemaError):
-        validate_setup_block({"setup": ["", "ok"]})
-
-
-# --- v0.7.9: setup-block.yml as canonical source ----------------------------
-
-
-def test_v079_wizard_writes_setup_block_yml_on_supplement_picked(tmp_path):
-    """The end-to-end happy path: scan → pick → wizard writes
-    `.proctor/setup-block.yml` (the canonical source) AND amends
-    `.proctor/local.yml setup:` (the current-run convenience). The
-    setup-block content is the source of truth seed-local.sh will
-    read on next regenerate."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.9")
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
-    _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path,
-                answer="Scan for supplementary binaries you may want to start in setup")
-    # Simulate bash success + populate binaries JSON.
-    detector = (pathlib.Path(__file__).resolve().parent.parent
-                / "plugins" / "proctor" / "scripts"
-                / "wizard_detect_binaries.py")
-    import subprocess as sp
-    with open("/tmp/proctor-wizard-binaries.json", "w") as f:
-        sp.run(
-            ["python3", str(detector), "--repo-root", str(tmp_path)],
-            stdout=f, check=True,
-        )
-    _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path,
-                bash_rc=0)
-    # Final pick.
-    _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path,
-                answer="[recommended] cmd/example-loop/main.go")
-
-    # The setup-block.yml should now exist + be schema-valid.
-    sb_path = tmp_path / ".proctor" / "setup-block.yml"
-    assert sb_path.exists()
-    import yaml as _yaml
-    content = _yaml.safe_load(sb_path.read_text())
-    validate_setup_block(content)
-    # Expected content: a kill+start pair for example-loop.
-    assert "go run ./cmd/example-loop/main.go" in sb_path.read_text()
-    assert "/tmp/proctor-example-loop.pid" in sb_path.read_text()
-
-
-def test_v079_wizard_setup_block_yml_is_idempotent_on_rerun(tmp_path):
-    """Running the supplement step twice with the same binary
-    selection does NOT duplicate lines in setup-block.yml — the
-    helper detects the binary's pidfile name AND path."""
-    from plugins.proctor.scripts.wizard_run import _write_setup_block_yml
-    sb_path = tmp_path / ".proctor" / "setup-block.yml"
-    chosen = [{
-        "path": "cmd/foo-loop/main.go",
-        "binary_name": "foo-loop",
-        "looks_like": "runs-loop",
-        "evidence": ["matches 'time.NewTicker'"],
-    }]
-    added1 = _write_setup_block_yml(sb_path, chosen)
-    assert added1 == 1
-    text1 = sb_path.read_text()
-    # Second call: no-op.
-    added2 = _write_setup_block_yml(sb_path, chosen)
-    assert added2 == 0
-    assert sb_path.read_text() == text1
-
-
-# --- v0.7.9: detect_binaries new labels + evidence ---------------------------
-
-
-def test_v079_detect_binaries_evidence_includes_match_count_for_repeated_patterns(tmp_path):
-    """When a pattern matches multiple times (e.g. RunJob ×15), the
-    evidence string should call out the count so the user-facing
-    AskUser prompt can quote it. This is what v0.7.9's evidence
-    field looks like in practice for the mcd-daemon case."""
-    cmd_dir = tmp_path / "cmd" / "ticker"
-    cmd_dir.mkdir(parents=True)
-    body = "\n".join([
-        f'    utils.RunJob("Job{i}", time.Second, func() {{}})'
-        for i in range(5)
-    ])
-    (cmd_dir / "main.go").write_text(
-        "package main\n"
-        "import \"time\"\n"
-        "func main() {\n"
-        "    t := time.NewTicker(time.Minute)\n"
-        f"{body}\n"
-        "    _ = t\n"
-        "}\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["looks_like"] == "runs-loop"
-    ev_joined = " ; ".join(c["evidence"])
-    assert "RunJob" in ev_joined
-    # The count annotation (×N) should appear when N > 1.
-    assert "×5" in ev_joined, ev_joined
-
-
-def test_v079_detect_binaries_unknown_unchanged_v079(tmp_path):
-    """The ``unknown`` label is preserved as-is in v0.7.9 (neutral
-    already). Long non-trivial files with no matching patterns stay
-    in this bucket."""
-    cmd_dir = tmp_path / "cmd" / "puzzle"
-    cmd_dir.mkdir(parents=True)
-    body = "\n".join([f"// filler line {i}" for i in range(250)])
-    (cmd_dir / "main.go").write_text(
-        "package main\n" + body + "\nfunc main() { println(\"hi\") }\n"
-    )
-    out = _run_detect_binaries(tmp_path)
-    c = out["candidates"][0]
-    assert c["looks_like"] == "unknown"
-
-
-# --- v0.7.9: terminology audit (strict — no project-specific category labels) -
-
-
-def test_v079_proctor_init_md_no_daemon_category_labels_in_user_prose():
-    """STRICT: the proctor-init.md user-facing prompt prose (the
-    AskUserQuestion question text in Step 7.5) must NOT contain
-    ``daemon`` / ``worker`` / ``publish ticker`` / ``cron`` as
-    CATEGORY labels. Filenames like ``cmd/mcd-daemon`` are allowed
-    (they're example files); the category descriptions must use
-    neutral terms (``serves-http`` / ``runs-loop`` / ``runs-once``)."""
-    cmd_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "commands" / "proctor-init.md"
-    )
-    text = cmd_path.read_text()
-    # The AskUserQuestion prompt block (Step 7.5).
-    start = text.find('"PRoctor detected these additional binaries')
-    assert start >= 0, "Step 7.5 AskUserQuestion prompt missing"
-    end = text.find('"', start + 100)
-    prompt = text[start:end] if end > 0 else text[start:start + 2000]
-    # Category-label-as-noun checks:
-    # The prompt mentions specific binary names like `mcd-daemon`
-    # (allowed — filenames) but NOT as standalone category labels.
-    # The neutral labels MUST appear.
-    assert "runs-loop" in prompt
-    assert "runs-once" in prompt
-    # `serves-http` shows up earlier in the surrounding prose (since
-    # the prompt itself uses category in parens after binary names);
-    # check in the wider Step 7.5 section.
-    step_75_start = text.find("Step 7.5")
-    step_75_end = text.find("### Step 7f")
-    section = text[step_75_start:step_75_end]
-    assert "serves-http" in section
-    assert "runs-loop" in section
-    assert "runs-once" in section
-
-
-def test_v079_planning_skill_md_no_daemon_skip_reason_in_visible_prose():
-    """The planning skill MUST emit ``no-supplementary-binary-in-
-    setup`` as the canonical skip reason. The v0.7.7/v0.7.8
-    alias ``no-daemon-in-setup`` may appear in backward-compat
-    notes but must NOT be the primary citation."""
-    skill_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
-        / "SKILL.md"
-    )
-    text = skill_path.read_text()
-    # The primary skip-reason string the planner writes into plans:
-    assert '"no-supplementary-binary-in-setup"' in text
-
-
-def test_v079_planning_skill_md_neutral_setup_context_keys():
-    """The planning skill's setup_context vocabulary uses the
-    v0.7.9 neutral keys."""
-    skill_path = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
-        / "SKILL.md"
-    )
-    text = skill_path.read_text()
-    assert "supplementary_binaries_running" in text
-    assert "supplementary_binary_touched" in text
-
-
-def test_v079_plan_smells_rule_renamed_in_module_docstring():
-    """The plan_smells.py module-level docstring should reference
-    the v0.7.9 renamed rule name."""
-    from plugins.proctor.scripts import plan_smells
-    doc = plan_smells.__doc__ or ""
-    assert "missing-runtime-verify-when-supplementary-binary-present" in doc
-
-
-def test_v079_plan_smells_accepts_legacy_setup_context_keys_backward_compat():
-    """Backward-compat: plans + setup_contexts written under v0.7.7/
-    v0.7.8 with the legacy `daemons_running` / `daemon_touched` keys
-    keep producing the same lint behavior. The rule name in the
-    output is the NEW name (the only user-visible change)."""
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    change_map = {
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as a "
-                    "trimmed array.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "Source-level wire-up", "how": "grep ...",
-             "risk": "medium", "depends_on": []},
-        ],
-    }
-    setup_context_legacy = {
-        "daemons_running": ["mcd-daemon"],
-        "daemon_touched": ["mcd-daemon"],
-    }
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context_legacy,
-    )
-    matched = [
-        w for w in warnings
-        if "missing-runtime-verify-when-supplementary-binary-present" in w
-    ]
-    assert len(matched) == 1
-
-
-def test_v079_plan_smells_neutral_setup_context_keys_work():
-    """The v0.7.9 keys produce the same warning."""
-    from plugins.proctor.scripts.plan_smells import check as plan_check
-    change_map = {
-        "pr_context": {
-            "body": "Published JSON include_tags now serializes as a "
-                    "trimmed array.",
-        },
-    }
-    plan = {
-        "items": [
-            {"id": "t-1", "category": "api", "tool": "lint-only",
-             "what": "Source-level wire-up", "how": "grep ...",
-             "risk": "medium", "depends_on": []},
-        ],
-    }
-    setup_context = {
-        "supplementary_binaries_running": ["mcd-daemon"],
-        "supplementary_binary_touched": ["mcd-daemon"],
-    }
-    warnings = plan_check(
-        plan, change_map=change_map, setup_context=setup_context,
-    )
-    matched = [
-        w for w in warnings
-        if "missing-runtime-verify-when-supplementary-binary-present" in w
-    ]
-    assert len(matched) == 1
-
-
-def test_v079_decide_mode_shim_returns_alias_for_supplement_setup(tmp_path):
-    """The backward-compat shim ``wizard_decide_mode.decide_mode``
-    should map the new STEP_SUPPLEMENT_SETUP step to the v0.7.8
-    mode name ``amend-daemons`` so older prose / tests keep
-    working."""
-    _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.9")
-    state = wdm_state(tmp_path)
-    d = wdm_decide(state, current_tag="v0.7.9", repo_root=tmp_path)
-    # The first applying step is STEP_SUPPLEMENT_SETUP, aliased to
-    # the v0.7.8 mode ``amend-daemons``.
-    assert d["mode"] == "amend-daemons", d
-
-
-def test_v079_decide_steps_module_exports_step_constants():
-    """All step ids are exported as constants so callers can refer
-    to them without typing the strings literally."""
-    from plugins.proctor.scripts import wizard_decide_steps as mod
-    assert mod.STEP_FRESH_INSTALL == "step_fresh_install"
-    assert mod.STEP_LEGACY_LAYOUT_MIGRATE == "step_legacy_layout_migrate"
-    assert mod.STEP_REGENERATE_LOCAL_YML == "step_regenerate_local_yml"
-    assert mod.STEP_BUMP_ACTION_PIN == "step_bump_action_pin"
-    assert mod.STEP_SUPPLEMENT_SETUP == "step_supplement_setup"
-    # v0.7.10 canonical execution order: supplement before regenerate
-    # (supplement writes setup-block.yml that regenerate consumes);
-    # bump independent of both, slots after.
-    assert mod.STEP_ORDER == [
-        mod.STEP_LEGACY_LAYOUT_MIGRATE,
-        mod.STEP_SUPPLEMENT_SETUP,
-        mod.STEP_REGENERATE_LOCAL_YML,
-        mod.STEP_BUMP_ACTION_PIN,
-        mod.STEP_FRESH_INSTALL,
-    ]
+# v0.7.11: deleted lines 5505–5832 (v0.7.9 validate_setup_block + setup-block.yml + detect_binaries new labels + terminology audit; all obsolete with the v0.7.11 simplification).
 
 
 # --- v0.7.10 — bug-A / bug-B / bug-C regression coverage --------------------
@@ -6790,14 +5615,20 @@ EOF
 
 def _make_v0710_repo_with_legacy_seed(
     tmp_path, *, pin="v0.7.10", with_cmd_binary=True,
-    has_local_yml=False,
+    has_local_yml=False, has_dev_launcher=False,
 ):
     """Build a v0.4-layout consumer repo whose ``.proctor/seed-local.sh``
     still ships with the pre-v0.7.9 hardcoded SETUP_BLOCK heredoc.
     This is the exact shape mcd-website was in when v0.7.9's audit
-    found Bug C."""
+    found Bug C.
+
+    v0.7.11: ``has_dev_launcher`` defaults False so the new
+    dev_launcher step fires alongside legacy-heredoc regen (mirroring
+    the pre-v0.7.11 supplement+regenerate ordering pinned by the
+    Bug C tests below)."""
     _make_v04_repo(
         tmp_path, has_local_yml=has_local_yml, pin=pin,
+        has_dev_launcher=has_dev_launcher,
     )
     seed = tmp_path / ".proctor" / "seed-local.sh"
     seed.write_text(_V0710_SEED_SH_LEGACY)
@@ -6836,10 +5667,16 @@ def test_v0710_bug_a_supplement_fires_with_no_local_yml(tmp_path):
 
 
 def test_v0710_bug_a_supplement_fires_with_only_binaries(tmp_path):
-    """Pure-bug-A reproduction: fresh-ish repo with cmd/*/main.go +
-    .proctor/config.yml + outdated action pin + NO local.yml + NO
-    setup-block.yml. v0.7.9 dropped supplement; v0.7.10 includes it."""
-    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.5")
+    """v0.7.11 update: STEP_SUPPLEMENT_SETUP is now the dev_launcher
+    step. It fires when config.yml lacks a `dev_launcher:` block.
+    Pre-v0.7.11 the trigger was "cmd/*/main.go binary not in
+    setup-block.yml"; v0.7.11 dropped that entire scanner — the
+    project owns its launch instead. The cmd binary still exists in
+    the fixture (irrelevant under v0.7.11)."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=False, pin="v0.7.5",
+        has_dev_launcher=False,  # trigger step_dev_launcher
+    )
     cmd_dir = tmp_path / "cmd" / "ticker-loop"
     cmd_dir.mkdir(parents=True)
     (cmd_dir / "main.go").write_text(
@@ -6852,19 +5689,21 @@ def test_v0710_bug_a_supplement_fires_with_only_binaries(tmp_path):
     )
     state = wds_detect_state(tmp_path)
     steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
-    assert STEP_SUPPLEMENT_SETUP in steps
+    assert STEP_DEV_LAUNCHER in steps
     assert STEP_REGENERATE_LOCAL_YML in steps  # local.yml missing
     assert STEP_BUMP_ACTION_PIN in steps        # pin stale
-    # Canonical order: supplement → regenerate → bump.
-    assert steps.index(STEP_SUPPLEMENT_SETUP) < steps.index(STEP_REGENERATE_LOCAL_YML)
+    # Canonical order: dev_launcher → regenerate → bump.
+    assert steps.index(STEP_DEV_LAUNCHER) < steps.index(STEP_REGENERATE_LOCAL_YML)
     assert steps.index(STEP_REGENERATE_LOCAL_YML) < steps.index(STEP_BUMP_ACTION_PIN)
 
 
 def test_v0710_supplement_independent_of_regenerate(tmp_path):
-    """Even when regenerate doesn't fire (local.yml present, no
-    legacy heredoc), supplement still fires when binaries are
-    uncovered. The two steps are independent."""
-    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.7.10")
+    """v0.7.11 update: dev_launcher step fires whenever config.yml
+    lacks the block — independent of regenerate's preconditions."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.10",
+        has_dev_launcher=False,
+    )
     # Wipe seed script to also prove regenerate doesn't fire from
     # legacy-heredoc.
     seed = tmp_path / ".proctor" / "seed-local.sh"
@@ -6875,39 +5714,30 @@ def test_v0710_supplement_independent_of_regenerate(tmp_path):
             "tail -n +2)\nfi\necho ok\n"
         )
         seed.chmod(0o755)
-    cmd_dir = tmp_path / "cmd" / "ticker-loop"
-    cmd_dir.mkdir(parents=True)
-    (cmd_dir / "main.go").write_text(
-        "package main\nimport \"time\"\n"
-        "func main() { t := time.NewTicker(time.Second); _ = t }\n"
-    )
     state = wds_detect_state(tmp_path)
     steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
-    assert STEP_SUPPLEMENT_SETUP in steps
+    assert STEP_DEV_LAUNCHER in steps
     assert STEP_REGENERATE_LOCAL_YML not in steps
 
 
 def test_v0710_decide_steps_all_combinations_supplement_present(tmp_path):
-    """Combination matrix: every state combination where
-    supplement-setup should fire results in it being present in the
-    steps list. The applies-condition is local.yml-independent."""
+    """v0.7.11 update: dev_launcher fires whenever config.yml lacks
+    the block, regardless of local.yml state. The applies-condition
+    is local.yml-independent (same invariant the v0.7.10 Bug A fix
+    was pinning, just relocated from "binary scanner" to
+    "dev_launcher missing")."""
     for has_local in (True, False):
-        # Fresh fixture per iteration so state from a previous run
-        # doesn't leak.
         sub = tmp_path / f"local={has_local}"
         sub.mkdir()
-        _make_v04_repo(sub, has_local_yml=has_local, pin="v0.7.10")
-        cmd_dir = sub / "cmd" / "loop"
-        cmd_dir.mkdir(parents=True)
-        (cmd_dir / "main.go").write_text(
-            "package main\nimport \"time\"\n"
-            "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+        _make_v04_repo(
+            sub, has_local_yml=has_local, pin="v0.7.10",
+            has_dev_launcher=False,
         )
         state = wds_detect_state(sub)
         steps = wds_decide_steps(
             state, current_tag="v0.7.10", repo_root=sub,
         )
-        assert STEP_SUPPLEMENT_SETUP in steps, (has_local, steps)
+        assert STEP_DEV_LAUNCHER in steps, (has_local, steps)
 
 
 # --- Bug C regression — seed-local.sh legacy-heredoc detection --------------
@@ -7032,10 +5862,14 @@ def test_v0710_regenerate_handler_migrates_legacy_seed_in_place(tmp_path):
     place during the regenerate step. After the migration phase
     (which runs BEFORE the bash envelope), the seed script reads
     setup-block.yml via the awk reader and the legacy heredoc is
-    gone."""
+    gone.
+
+    v0.7.11 update: set ``has_dev_launcher=True`` so dev_launcher
+    (which now leads STEP_ORDER) doesn't preempt regenerate. The
+    test is pinning regenerate's behavior in isolation."""
     _make_v0710_repo_with_legacy_seed(
         tmp_path, pin="v0.7.10", with_cmd_binary=False,
-        has_local_yml=True,
+        has_local_yml=True, has_dev_launcher=True,
     )
     seed_path = tmp_path / ".proctor" / "seed-local.sh"
     # Sanity: legacy pattern present before the wizard runs.
@@ -7063,10 +5897,12 @@ def test_v0710_regenerate_handler_salvages_heredoc_into_setup_block(tmp_path):
     """Migration phase salvages the legacy heredoc's content into
     .proctor/setup-block.yml when that file doesn't yet exist. The
     user's tailored setup commands are preserved as the canonical
-    baseline."""
+    baseline.
+
+    v0.7.11: has_dev_launcher=True so dev_launcher doesn't preempt."""
     _make_v0710_repo_with_legacy_seed(
         tmp_path, pin="v0.7.10", with_cmd_binary=False,
-        has_local_yml=True,
+        has_local_yml=True, has_dev_launcher=True,
     )
     setup_block_path = tmp_path / ".proctor" / "setup-block.yml"
     assert not setup_block_path.exists()
@@ -7236,17 +6072,23 @@ def test_v0710_iterator_walks_supplement_then_regenerate_then_bump(tmp_path):
     seed.chmod(0o755)
     state_file = tmp_path / "wizard-state.json"
 
-    # 1. Supplement: scan/skip ask_user.
+    # 1. Dev launcher (was: supplement) — 3-option ask_user.
     env1 = _run_wizard(state_file, current_tag="v0.7.10",
                        repo_root=tmp_path)
     assert env1["type"] == "ask_user", env1
-    assert env1["header"] == "Supplementary binaries"
+    assert env1["header"] == "Dev launcher"
 
-    # 2. Skip → recurses to regenerate which emits bash.
+    # 2. Skip → wizard emits a `show` envelope, then iterator
+    # recurses to regenerate which emits the bash. The wizard's
+    # state machine writes the `show` first; the AI calls again to
+    # advance.
     env2 = _run_wizard(
         state_file, current_tag="v0.7.10", repo_root=tmp_path,
-        answer="Skip — my setup is fine",
+        answer="Skip — keep using the legacy `setup:` array",
     )
+    if env2["type"] == "show":
+        env2 = _run_wizard(state_file, current_tag="v0.7.10",
+                           repo_root=tmp_path)
     assert env2["type"] == "bash", env2
     assert ".proctor/seed-local.sh" in env2["command"]
 
@@ -7301,28 +6143,23 @@ def test_v0710_iterator_retries_regenerate_after_failure(tmp_path):
 
 
 def test_v0710_applies_conditions_no_local_yml_dependency_on_supplement(tmp_path):
-    """Each step's applies-condition checks ONLY that step's own
-    precondition. Specifically: supplement-setup must NOT depend on
-    local.yml's state. This pins Bug A's root cause down to a single
-    assertion."""
-    # Two repos differing ONLY in local.yml presence. Same binaries,
-    # same config, same pin. supplement should fire in both.
+    """v0.7.11 update: dev_launcher (the step that supplement_setup
+    aliases to) fires whenever config.yml lacks the block —
+    independent of local.yml's state. Same invariant the v0.7.10
+    Bug A fix pinned, just relocated."""
     for has_local in (True, False):
         sub = tmp_path / f"variant-local-{has_local}"
         sub.mkdir()
-        _make_v04_repo(sub, has_local_yml=has_local, pin="v0.7.10")
-        cmd_dir = sub / "cmd" / "ticker"
-        cmd_dir.mkdir(parents=True)
-        (cmd_dir / "main.go").write_text(
-            "package main\nimport \"time\"\n"
-            "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+        _make_v04_repo(
+            sub, has_local_yml=has_local, pin="v0.7.10",
+            has_dev_launcher=False,  # trigger step_dev_launcher
         )
         state = wds_detect_state(sub)
         steps = wds_decide_steps(
             state, current_tag="v0.7.10", repo_root=sub,
         )
-        assert STEP_SUPPLEMENT_SETUP in steps, (
-            f"supplement missing for has_local_yml={has_local}; "
+        assert STEP_DEV_LAUNCHER in steps, (
+            f"dev_launcher missing for has_local_yml={has_local}; "
             f"steps={steps}"
         )
 
@@ -7342,4 +6179,549 @@ def test_v0710_state_carries_seed_legacy_flag(tmp_path):
     assert "has_local_yml" in state
     assert "has_seed_script" in state
     assert "current_pin" in state
+
+
+# --- v0.7.11 — dev_launcher schema + step_dev_launcher wizard flow ---------
+
+from plugins.proctor.scripts.schema import (
+    validate_pr_test_config as _validate_cfg,
+)
+
+
+def test_v0711_dev_launcher_minimum_valid_config():
+    """A `dev_launcher:` block with just `start:` is the minimal
+    valid shape. Other fields optional. Mirrors the schema doc."""
+    _validate_cfg({
+        "auth": {
+            "type": "form_with_totp",
+            "login_url": "/auth/login",
+            "selectors": {
+                "email": "i", "password": "i",
+                "totp": "i", "submit": "b",
+            },
+            "accounts": [
+                {"name": "dev", "email": "x", "password": "y",
+                 "totp_seed": "JBSWY3DPEHPK3PXP"},
+            ],
+        },
+        "dev_launcher": {"start": "./dev.sh all"},
+    })
+
+
+def test_v0711_dev_launcher_all_fields_valid():
+    """All optional fields accepted in the canonical example shape."""
+    _validate_cfg({
+        "dev_launcher": {
+            "start": "./dev.sh all",
+            "stop": "./dev.sh stop",
+            "status": "./dev.sh status",
+            "wait_for": "curl -fsS http://localhost:9801/ >/dev/null 2>&1",
+            "wait_timeout_seconds": 90,
+        },
+    })
+
+
+def test_v0711_dev_launcher_missing_start_rejected():
+    from plugins.proctor.scripts.schema import SchemaError
+    with pytest.raises(SchemaError, match="dev_launcher"):
+        _validate_cfg({"dev_launcher": {}})
+    with pytest.raises(SchemaError, match="dev_launcher"):
+        _validate_cfg({"dev_launcher": {"stop": "./dev.sh stop"}})
+
+
+def test_v0711_dev_launcher_empty_start_rejected():
+    from plugins.proctor.scripts.schema import SchemaError
+    with pytest.raises(SchemaError, match="start"):
+        _validate_cfg({"dev_launcher": {"start": ""}})
+    with pytest.raises(SchemaError, match="start"):
+        _validate_cfg({"dev_launcher": {"start": "   "}})
+
+
+def test_v0711_dev_launcher_non_dict_rejected():
+    from plugins.proctor.scripts.schema import SchemaError
+    with pytest.raises(SchemaError, match="dev_launcher"):
+        _validate_cfg({"dev_launcher": "./dev.sh all"})
+    with pytest.raises(SchemaError, match="dev_launcher"):
+        _validate_cfg({"dev_launcher": ["./dev.sh", "all"]})
+
+
+def test_v0711_dev_launcher_bad_wait_timeout_rejected():
+    from plugins.proctor.scripts.schema import SchemaError
+    with pytest.raises(SchemaError, match="wait_timeout_seconds"):
+        _validate_cfg({"dev_launcher": {
+            "start": "./dev.sh all",
+            "wait_timeout_seconds": 0,
+        }})
+    with pytest.raises(SchemaError, match="wait_timeout_seconds"):
+        _validate_cfg({"dev_launcher": {
+            "start": "./dev.sh all",
+            "wait_timeout_seconds": "ninety",
+        }})
+
+
+def test_v0711_dev_launcher_unknown_keys_rejected():
+    """Schema rejects typos so consumers learn about them early."""
+    from plugins.proctor.scripts.schema import SchemaError
+    with pytest.raises(SchemaError, match="unexpected keys"):
+        _validate_cfg({"dev_launcher": {
+            "start": "./dev.sh all",
+            "warmup": "echo hi",  # typo
+        }})
+
+
+def test_v0711_dev_launcher_absent_keeps_legacy_setup_valid():
+    """Backward compat: a config without `dev_launcher:` still
+    validates (legacy `setup:` array consumers unchanged)."""
+    _validate_cfg({"base_url": "http://localhost:9801"})  # no dev_launcher
+    _validate_cfg({})  # totally empty config still ok at this validator
+
+
+# --- v0.7.11 — step_dev_launcher iterator paths -----------------------------
+
+
+def test_v0711_step_dev_launcher_fires_when_block_absent(tmp_path):
+    """Existing v0.4 consumer on v0.7.11 wizard run: config.yml has
+    no `dev_launcher:` block → step_dev_launcher fires."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    state = wds_detect_state(tmp_path)
+    assert state["has_dev_launcher"] is False
+    steps = wds_decide_steps(state, current_tag="v0.7.11", repo_root=tmp_path)
+    assert STEP_DEV_LAUNCHER in steps
+
+
+def test_v0711_step_dev_launcher_skips_when_block_present(tmp_path):
+    """Idempotent: once `dev_launcher:` is in config.yml, the step
+    no longer fires on subsequent wizard runs."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=True,
+    )
+    state = wds_detect_state(tmp_path)
+    assert state["has_dev_launcher"] is True
+    steps = wds_decide_steps(state, current_tag="v0.7.11", repo_root=tmp_path)
+    assert STEP_DEV_LAUNCHER not in steps
+
+
+def test_v0711_step_dev_launcher_first_envelope_is_three_option_ask(tmp_path):
+    """The wizard's first envelope for this step is an ask_user
+    with EXACTLY three options (script / template / skip)."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.7.11",
+                      repo_root=tmp_path)
+    assert env["type"] == "ask_user"
+    assert env["header"] == "Dev launcher"
+    labels = [o["label"] for o in env["options"]]
+    assert len(labels) == 3
+    assert any("one-click script" in l for l in labels)
+    assert any("generic template" in l for l in labels)
+    assert any(l.startswith("Skip") for l in labels)
+
+
+def test_v0711_step_dev_launcher_skip_path_writes_nothing(tmp_path):
+    """Skip path: wizard emits `show` + completes; no config change."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    cfg_path = tmp_path / ".proctor" / "config.yml"
+    original_cfg = cfg_path.read_text()
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    env = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="Skip — keep using the legacy `setup:` array",
+    )
+    if env["type"] == "show":
+        assert "legacy" in env["markdown"].lower()
+        env = _run_wizard(state_file, current_tag="v0.7.11",
+                          repo_root=tmp_path)
+    assert env["type"] == "done"
+    # Config untouched — no dev_launcher block added.
+    assert cfg_path.read_text() == original_cfg
+    assert "dev_launcher:" not in cfg_path.read_text()
+
+
+def test_v0711_step_dev_launcher_one_click_writes_block(tmp_path):
+    """One-click path: wizard walks start → stop → wait_for →
+    timeout, then writes the `dev_launcher:` block to config.yml."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    cfg_path = tmp_path / ".proctor" / "config.yml"
+    state_file = tmp_path / "wizard-state.json"
+
+    # Step 1: offer.
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    # Step 2: pick one-click. Wizard prompts for `start`.
+    env_start = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="I have a one-click script (Recommended)",
+    )
+    assert env_start["type"] == "ask_user"
+    assert "start command" in env_start["header"].lower()
+    # Step 3: provide start, then prompted for stop.
+    env_stop = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="./dev.sh all",
+    )
+    assert env_stop["type"] == "ask_user"
+    assert "stop command" in env_stop["header"].lower()
+    # Step 4: provide stop, then prompted for wait_for.
+    env_wait = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="./dev.sh stop",
+    )
+    assert env_wait["type"] == "ask_user"
+    assert "readiness check" in env_wait["header"].lower()
+    # Step 5: provide wait_for, then prompted for timeout.
+    env_to = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="curl -fsS http://localhost:9801/ >/dev/null 2>&1",
+    )
+    assert env_to["type"] == "ask_user"
+    assert "timeout" in env_to["header"].lower()
+    # Step 6: provide timeout, wizard writes config + emits show.
+    env_done = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="90",
+    )
+    # Either show then terminal done (two envelopes) or just done.
+    if env_done["type"] == "show":
+        assert "dev_launcher" in env_done["markdown"]
+        env_done = _run_wizard(state_file, current_tag="v0.7.11",
+                               repo_root=tmp_path)
+    assert env_done["type"] == "done", env_done
+
+    # Verify the config.yml now has a valid dev_launcher block.
+    cfg = cfg_path.read_text()
+    assert "dev_launcher:" in cfg
+    assert "start: ./dev.sh all" in cfg
+    assert "stop: ./dev.sh stop" in cfg
+    assert "wait_timeout_seconds: 90" in cfg
+    # Schema validates the merged result.
+    import yaml as _yaml
+    _validate_cfg(_yaml.safe_load(cfg))
+
+
+def test_v0711_step_dev_launcher_one_click_empty_stop_writes_minimal_block(tmp_path):
+    """When the user leaves optional fields blank, the wizard writes
+    only the required `start:` (plus any non-blank optional fields)."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    cfg_path = tmp_path / ".proctor" / "config.yml"
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="I have a one-click script (Recommended)")
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="make dev")
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="")  # no stop
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="")  # no wait_for
+    env = _run_wizard(state_file, current_tag="v0.7.11",
+                      repo_root=tmp_path, answer="")  # default timeout
+    if env["type"] == "show":
+        env = _run_wizard(state_file, current_tag="v0.7.11",
+                          repo_root=tmp_path)
+    assert env["type"] == "done", env
+    cfg = cfg_path.read_text()
+    assert "dev_launcher:" in cfg
+    assert "start: make dev" in cfg
+    assert "stop:" not in cfg
+    assert "wait_for:" not in cfg
+    assert "wait_timeout_seconds:" not in cfg
+
+
+def test_v0711_step_dev_launcher_template_path_writes_inert_script(tmp_path):
+    """Template path: wizard copies the inert generic template to
+    `.proctor/dev-launcher-template.sh` (chmod +x). No config change."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    cfg_path = tmp_path / ".proctor" / "config.yml"
+    original_cfg = cfg_path.read_text()
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    env = _run_wizard(
+        state_file, current_tag="v0.7.11", repo_root=tmp_path,
+        answer="Show me a generic template I can adapt",
+    )
+    if env["type"] == "show":
+        assert "dev-launcher-template.sh" in env["markdown"]
+    template_path = tmp_path / ".proctor" / "dev-launcher-template.sh"
+    assert template_path.exists()
+    # Executable bit set.
+    import os
+    mode = os.stat(template_path).st_mode & 0o777
+    assert mode & 0o100, oct(mode)
+    # Template is intentionally inert — TODO markers, no project-specific bash.
+    body = template_path.read_text()
+    assert "TODO: implement up" in body
+    assert "kill_tree" in body  # the macOS-friendly helper is there
+    assert "TODO: implement setup" in body
+    # Config file unchanged.
+    assert cfg_path.read_text() == original_cfg
+
+
+def test_v0711_step_dev_launcher_one_click_rejects_empty_start(tmp_path):
+    """Required-field validation: empty start command → error envelope."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="I have a one-click script (Recommended)")
+    env = _run_wizard(state_file, current_tag="v0.7.11",
+                      repo_root=tmp_path, answer="")
+    assert env["type"] == "error"
+    assert "start" in env["message"].lower()
+
+
+def test_v0711_step_dev_launcher_rejects_bad_timeout(tmp_path):
+    """Required-field validation: non-positive-int timeout → error."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path)
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="I have a one-click script (Recommended)")
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="./dev.sh all")
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="")
+    _run_wizard(state_file, current_tag="v0.7.11", repo_root=tmp_path,
+                answer="")
+    env = _run_wizard(state_file, current_tag="v0.7.11",
+                      repo_root=tmp_path, answer="not-a-number")
+    assert env["type"] == "error"
+    assert "wait_timeout_seconds" in env["message"]
+
+
+# --- v0.7.11 — plan_smells supplementary-binary rule REMOVED ----------------
+
+
+def test_v0711_plan_smells_supplementary_binary_rule_removed():
+    """The v0.7.7-v0.7.10 rule is gone — passing the legacy
+    setup_context shape with all conditions met no longer produces
+    the warning."""
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    change_map = {
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes as a "
+                    "trimmed array.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "Source-level wire-up", "how": "grep ...",
+             "risk": "medium", "depends_on": []},
+        ],
+    }
+    # Both v0.7.7/v0.7.8 and v0.7.9 key shapes — neither produces
+    # the warning anymore.
+    for setup_context in (
+        {"daemons_running": ["mcd-daemon"],
+         "daemon_touched": ["mcd-daemon"]},
+        {"supplementary_binaries_running": ["mcd-daemon"],
+         "supplementary_binary_touched": ["mcd-daemon"]},
+    ):
+        warnings = plan_check(
+            plan, change_map=change_map, setup_context=setup_context,
+        )
+        assert not any(
+            "supplementary-binary-present" in w for w in warnings
+        ), warnings
+
+
+def test_v0711_plan_smells_cli_accepts_setup_context_for_backcompat(tmp_path):
+    """CLI still parses --setup-context flag (for v0.7.7-v0.7.10
+    callers) but the deleted rule no longer fires."""
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "grep wiring", "how": "grep",
+             "risk": "low", "depends_on": []},
+        ],
+    }))
+    cm_path = tmp_path / "change-map.json"
+    cm_path.write_text(json.dumps({
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes "
+                    "as trimmed tokens.",
+        },
+    }))
+    sc_path = tmp_path / "setup-context.json"
+    sc_path.write_text(json.dumps({
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": ["mcd-daemon"],
+    }))
+    script = str(
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts" / "plan_smells.py"
+    )
+    result = subprocess.run(
+        ["python3", script, "--strict",
+         "--change-map", str(cm_path),
+         "--setup-context", str(sc_path)],
+        stdin=open(plan_path), capture_output=True, text=True,
+    )
+    # CLI exits 0 (no warnings); the legacy rule's message is absent.
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "supplementary-binary-present" not in result.stdout
+
+
+# --- v0.7.11 — wizard_detect_binaries.py REMOVED ----------------------------
+
+
+def test_v0711_wizard_detect_binaries_script_deleted():
+    """The v0.7.7-v0.7.10 scanner script no longer exists in the
+    plugin tree."""
+    script = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts"
+        / "wizard_detect_binaries.py"
+    )
+    assert not script.exists(), (
+        f"wizard_detect_binaries.py still on disk at {script}; "
+        "v0.7.11 was supposed to delete it."
+    )
+
+
+# --- v0.7.11 — STEP_ORDER + STEP_DEV_LAUNCHER constants --------------------
+
+
+def test_v0711_decide_steps_step_order_includes_dev_launcher():
+    """STEP_ORDER pins dev_launcher between legacy_layout_migrate
+    and regenerate_local_yml."""
+    from plugins.proctor.scripts import wizard_decide_steps as mod
+    assert mod.STEP_ORDER == [
+        mod.STEP_LEGACY_LAYOUT_MIGRATE,
+        mod.STEP_DEV_LAUNCHER,
+        mod.STEP_REGENERATE_LOCAL_YML,
+        mod.STEP_BUMP_ACTION_PIN,
+        mod.STEP_FRESH_INSTALL,
+    ]
+
+
+def test_v0711_step_supplement_setup_aliases_step_dev_launcher():
+    """Backward-compat: the v0.7.7-v0.7.10 constant
+    `STEP_SUPPLEMENT_SETUP` is preserved as an alias for the new
+    `STEP_DEV_LAUNCHER`. Any external caller importing the old name
+    still resolves to a real step id."""
+    from plugins.proctor.scripts import wizard_decide_steps as mod
+    assert mod.STEP_SUPPLEMENT_SETUP == mod.STEP_DEV_LAUNCHER
+    assert mod.STEP_DEV_LAUNCHER == "step_dev_launcher"
+
+
+def test_v0711_decide_mode_shim_aliases_dev_launcher_to_amend_daemons(tmp_path):
+    """The single-mode shim aliases the new dev_launcher step to the
+    legacy v0.7.8 mode name `amend-daemons` so older prose / tests
+    that branch on `mode == "amend-daemons"` keep working."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=True, pin="v0.7.11",
+        has_dev_launcher=False,
+    )
+    state = wdm_state(tmp_path)
+    d = wdm_decide(state, current_tag="v0.7.11", repo_root=tmp_path)
+    assert d["mode"] == "amend-daemons", d
+
+
+# --- v0.7.11 — executor SKILL.md prose for dev_launcher precedence ----------
+
+
+def test_v0711_executor_skill_documents_dev_launcher_precedence():
+    """The executing-pr-tests SKILL must describe the v0.7.11
+    precedence (`dev_launcher` first, fall through to `setup:`,
+    error when neither configured)."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills" / "executing-pr-tests"
+        / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    # The precedence prose:
+    assert "dev_launcher" in text
+    assert "dev_launcher.start" in text or "dev_launcher`" in text
+    assert "Legacy `setup:` array" in text or "Legacy setup" in text
+    # Teardown via dev_launcher.stop is documented:
+    assert "dev_launcher.stop" in text
+
+
+def test_v0711_planner_skill_drops_supplementary_binary_section():
+    """The planning-pr-tests SKILL no longer carries the
+    "Detect which supplementary binaries..." section. The deleted
+    `supplementary_binaries_running` / `supplementary_binary_touched`
+    plumbing must NOT appear as REQUIRED inputs anymore."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
+        / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    # The new v0.7.11 section is present.
+    assert "Trust the project's dev_launcher" in text
+    # The v0.7.11 section explicitly says we don't do binary scanning.
+    assert "What the planner does NOT do" in text
+
+
+def test_v0711_proctor_init_md_describes_dev_launcher_step():
+    """The /proctor:proctor-init command prose documents the new
+    Step 7.5 dev_launcher step + the three-option offer."""
+    cmd_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "commands" / "proctor-init.md"
+    )
+    text = cmd_path.read_text()
+    assert "Step 7.5 — Dev launcher" in text
+    # The three paths:
+    assert "one-click script" in text
+    assert "generic template" in text
+    # Schema field reference.
+    assert "dev_launcher:" in text
+    assert "dev-launcher-template.sh" in text
+
+
+# --- v0.7.11 — dev-launcher template is shipped + inert ---------------------
+
+
+def test_v0711_dev_launcher_template_exists_and_is_inert():
+    """The template ships at plugins/proctor/templates/ and contains
+    ONLY TODO stubs — no project-specific bash logic."""
+    template = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "templates"
+        / "dev-launcher.sh.template"
+    )
+    assert template.exists(), template
+    body = template.read_text()
+    # Subcommands declared.
+    for sub in ("setup", "up", "down", "status", "logs"):
+        assert f"cmd_{sub}()" in body, f"subcommand {sub!r} missing"
+    # TODO markers present (proof of intentional inertness).
+    assert body.count("TODO:") >= 3
+    # Project-specific lines only appear as commented-out examples
+    # (any `go run` reference must be inside a `# ...` comment).
+    for line in body.splitlines():
+        if "go run ./cmd/" in line:
+            assert line.lstrip().startswith("#"), (
+                f"non-comment `go run ./cmd/` baked into template: {line!r}"
+            )
 
