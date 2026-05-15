@@ -523,77 +523,337 @@ def _handle_regen_local(
     state, step_data, answer, bash_rc, repo_root, plugin_root,
     current_tag,
 ):
-    """Local-yml regeneration. The actual regen is multi-step
-    (re-runs Section 7 + Step 8c-pre seed-script regen) and stays in
-    legacy SKILL.md prose; this step just surfaces the user's choice
-    and emits a pointer envelope.
+    """Regenerate ``.proctor/local.yml`` from the seed script.
 
-    Sub-states:
-      None → asked
-      'asked' + answer → show / done sentinel.
+    v0.7.10 implementation. Pre-v0.7.10 this handler emitted a
+    ``show`` envelope pointing at legacy SKILL.md prose and called it
+    done — no actual regeneration happened. The mcd-website audit
+    showed that left existing consumers' seed scripts with the
+    pre-v0.7.9 hardcoded SETUP_BLOCK heredoc, so wizard writes to
+    ``setup-block.yml`` were silently ignored on every re-run.
+
+    The handler now does real work in three phases:
+
+    1. **Migrate seed-local.sh in place** when it still ships with
+       the legacy hardcoded heredoc. Salvages the existing heredoc
+       content into ``.proctor/setup-block.yml`` (preserving the
+       user's tailored setup) when that file doesn't exist, then
+       rewrites the heredoc block in seed-local.sh to read from
+       ``.proctor/setup-block.yml`` (with a generic fallback heredoc
+       for the absent-file case).
+
+       Already-migrated seed scripts (containing the v0.7.9 awk
+       reader pattern) skip this phase.
+
+    2. **Emit a ``bash`` envelope** that runs
+       ``./.proctor/seed-local.sh`` against the consumer's env. The
+       AI invokes the command, captures rc, re-invokes the wizard
+       with ``--bash-rc``.
+
+    3. **Handle exit code**. rc=0 → SUB_COMPLETE with
+       ``regenerated-and-ran``. rc≠0 → emit an ``error`` envelope
+       with actionable guidance (bring DB up via docker-compose,
+       re-run the wizard — it picks up here).
+
+    Sub-states: ``None`` → ``running_bash``; ``running_bash`` +
+    ``bash_rc`` → SUB_COMPLETE.
+
+    The pre-v0.7.10 ask_user that offered three regeneration
+    options is gone — every option except "regenerate + re-run" was
+    either a no-op or a punt to legacy prose, so v0.7.10 just does
+    the right thing without asking. The user-facing AskUser prose in
+    ``wizard_decide_steps._STEP_INFO`` is preserved for the
+    backward-compat shim only.
     """
     sub = step_data.get("sub")
     if sub is None:
-        info = _step_info("step_regenerate_local_yml")
+        seed_path = repo_root / ".proctor" / "seed-local.sh"
+        local_path = repo_root / ".proctor" / "local.yml"
+
+        if not seed_path.is_file():
+            return (
+                _show(
+                    "## `.proctor/seed-local.sh` not found\n\n"
+                    "Cannot regenerate `.proctor/local.yml` without a "
+                    "seed script. Re-run `/proctor:proctor-init` "
+                    "after the seed script is in place, or generate "
+                    "one via the fresh-install path."
+                ),
+                {**step_data, "outcome": "seed-script-missing"},
+                SUB_COMPLETE,
+            )
+
+        # Phase 1: migrate seed-local.sh in place when needed.
+        migrate_outcome = "skipped"
+        try:
+            migrate_outcome = _migrate_seed_local_sh(
+                seed_path=seed_path,
+                setup_block_path=repo_root / ".proctor" / "setup-block.yml",
+            )
+        except Exception as e:  # noqa: BLE001
+            return (
+                _show(
+                    f"## Seed-local.sh migration failed\n\n"
+                    f"{e}\n\n"
+                    f"`.proctor/seed-local.sh` left untouched. Run "
+                    "the wizard again after resolving the file-system "
+                    "error."
+                ),
+                {
+                    **step_data,
+                    "outcome": f"migrate-failed: {e}",
+                },
+                SUB_COMPLETE,
+            )
+
+        # Phase 2: emit the bash envelope that runs seed-local.sh.
+        # We deliberately do NOT prefix `docker-compose up -d db` or
+        # any consumer-specific env bootstrap — those vary per repo
+        # and the user knows which ones to run beforehand. If the DB
+        # isn't reachable seed-local.sh's own setup commands will
+        # exit non-zero, the wizard surfaces the failure, the user
+        # brings up the dependencies, and re-runs the wizard (this
+        # step picks up where it left off because rc≠0 doesn't mark
+        # the step complete).
+        cmd = f'bash "{seed_path}"'
+        if local_path.exists():
+            description = (
+                "Re-run seed-local.sh to refresh "
+                ".proctor/local.yml from the current "
+                ".proctor/setup-block.yml + config.yml."
+            )
+        else:
+            description = (
+                "Run seed-local.sh to generate "
+                ".proctor/local.yml from the current "
+                ".proctor/setup-block.yml + config.yml."
+            )
         return (
-            _ask_user(
-                header=info["ask_user"]["header"],
-                question=info["ask_user"]["question"],
-                options=info["ask_user"]["options"],
-            ),
-            {**step_data, "sub": SUB_ASKED},
-            SUB_ASKED,
+            _bash(cmd, description=description),
+            {
+                **step_data,
+                "sub": SUB_RUNNING_BASH,
+                "migrate_outcome": migrate_outcome,
+            },
+            SUB_RUNNING_BASH,
         )
-    if sub == SUB_ASKED:
-        if not answer:
+
+    if sub == SUB_RUNNING_BASH:
+        if bash_rc is None:
             return (
                 _error(
-                    "wizard expected an --answer after the local-"
-                    "regen question."
+                    "wizard expected --bash-rc after seed-local.sh "
+                    "ran."
                 ),
                 step_data,
                 SUB_COMPLETE,
             )
-        if "Regenerate seed-local.sh AND re-run" in answer:
+        migrate_outcome = step_data.get("migrate_outcome", "skipped")
+        if bash_rc == 0:
+            local_path = repo_root / ".proctor" / "local.yml"
+            local_ok = local_path.exists()
             return (
                 _show(
-                    "## Next: regenerate seed-local.sh + re-run it\n\n"
-                    "The chosen path walks Section 7's setup-"
-                    "confirmation (Step 7f) + Section 8c-pre's seed-"
-                    "script regeneration. Fall back to the legacy "
-                    "`commands/proctor-init.md` prose: start at "
-                    "Section 7a (login mechanism confirmation) and "
-                    "walk through 7e + 7f. After regeneration, run "
-                    "`./.proctor/seed-local.sh` to populate "
-                    "`.proctor/local.yml`."
+                    f"## Regenerated `.proctor/local.yml`\n\n"
+                    f"seed-local.sh exited 0 "
+                    f"(migration: {migrate_outcome}).\n"
+                    + (
+                        "`.proctor/local.yml` is present and ready "
+                        "to be read by PRoctor.\n"
+                        if local_ok else
+                        "WARNING: seed-local.sh succeeded but "
+                        "`.proctor/local.yml` is not present. The "
+                        "seed script may be writing to a different "
+                        "path — check its output.\n"
+                    )
                 ),
-                {**step_data, "outcome": "regenerate-and-rerun"},
+                {
+                    **step_data,
+                    "outcome": (
+                        f"regenerated-and-ran "
+                        f"(migration: {migrate_outcome})"
+                    ),
+                },
                 SUB_COMPLETE,
             )
-        if "Just run the existing seed-local.sh" in answer:
-            return (
-                _show(
-                    "## Next: run `./.proctor/seed-local.sh`\n\n"
-                    "Wizard didn't touch the seed script. Running it "
-                    "populates `.proctor/local.yml` using whatever "
-                    "setup commands are baked in."
-                ),
-                {**step_data, "outcome": "run-existing-seed"},
-                SUB_COMPLETE,
-            )
+        # rc ≠ 0 — emit an error envelope and DON'T mark the step
+        # complete, so re-running the wizard picks up here. We
+        # surface actionable guidance for the most common failure
+        # mode (DB / Redis not running) but stay generic — the
+        # bash envelope's output is already in the AI's transcript.
         return (
-            _show(
-                "## Local-config regeneration skipped\n\n"
-                "Wizard moves on. You'll need to populate "
-                "`.proctor/local.yml` yourself before running "
-                "`/proctor:proctor`."
+            _error(
+                "seed-local.sh exited "
+                f"{bash_rc}. The most common cause is that the local "
+                "dev dependencies aren't running yet (Postgres, "
+                "Redis, MySQL, etc. depending on your stack). Bring "
+                "them up — typically via `docker-compose up -d` "
+                "or a project-specific `make dev` — then re-run "
+                "`/proctor:proctor-init`. The wizard will resume "
+                "at this step.\n\n"
+                f"Migration phase outcome: {migrate_outcome}. The "
+                "seed-script rewrite (if any) is already on disk; "
+                "the failure is downstream."
             ),
-            {**step_data, "outcome": "skipped"},
+            {
+                **step_data,
+                "outcome": (
+                    f"seed-rerun-failed-rc-{bash_rc} "
+                    f"(migration: {migrate_outcome})"
+                ),
+                # Reset sub so re-running re-emits the bash envelope.
+                "sub": None,
+            },
             SUB_COMPLETE,
         )
     return _error(
         f"unknown regenerate-local-yml sub-state {sub!r}"
     ), step_data, SUB_COMPLETE
+
+
+# v0.7.10 — seed-local.sh in-place migration. Pre-v0.7.9 seed scripts
+# shipped with the SETUP_BLOCK content hardcoded in a heredoc. The
+# rewrite replaces the heredoc block with a conditional that reads
+# from .proctor/setup-block.yml when present (and falls back to a
+# generic heredoc for the file-absent case).
+#
+# Pattern shape we look for:
+#
+#     SETUP_BLOCK=$(cat <<'YAML'
+#       - <commands>
+#       ...
+#     YAML
+#     )
+#
+# Rewritten to:
+#
+#     if [ -f .proctor/setup-block.yml ]; then
+#         SETUP_BLOCK=$(awk '/^setup:/,0' .proctor/setup-block.yml | tail -n +2)
+#     else
+#         SETUP_BLOCK=$(cat <<'YAML'
+#       - <generic fallback>
+#     YAML
+#     )
+#     fi
+
+import re as _re  # local alias to avoid colliding with module-top re
+
+_HEREDOC_BLOCK_RE = _re.compile(
+    r"^([ \t]*)SETUP_BLOCK=\$\(cat\s+<<\s*'YAML'\s*\n"
+    r"(.*?)"
+    r"^([ \t]*)YAML\s*\n"
+    r"([ \t]*)\)\s*$",
+    _re.MULTILINE | _re.DOTALL,
+)
+
+
+def _seed_already_migrated(text: str) -> bool:
+    return bool(
+        _re.search(
+            r"awk\s+'[^']*setup:[^']*'\s+\.proctor/setup-block\.yml",
+            text,
+        )
+    )
+
+
+def _migrate_seed_local_sh(
+    seed_path: Path, setup_block_path: Path,
+) -> str:
+    """Migrate an existing ``.proctor/seed-local.sh`` to read its
+    SETUP_BLOCK content from ``.proctor/setup-block.yml`` instead of
+    a hardcoded heredoc.
+
+    Steps:
+
+    1. Read seed-local.sh. If it already contains the v0.7.9 awk
+       reader, return ``"already-migrated"`` without touching the
+       file.
+    2. Locate the ``SETUP_BLOCK=$(cat <<'YAML' ... YAML)`` block.
+       Salvage the heredoc body. When ``setup_block_path`` doesn't
+       exist, write the salvaged body into it (preserves the user's
+       tailored hardcoded commands as the baseline). When the file
+       already exists, leave it alone — the wizard's prior writes
+       are the source of truth.
+    3. Replace the heredoc block with the conditional that reads
+       setup-block.yml (with the salvaged heredoc body kept as the
+       fallback for when setup-block.yml is absent).
+    4. Write seed-local.sh atomically (tmp-file rename).
+
+    Returns one of:
+    - ``"already-migrated"`` — no rewrite was needed.
+    - ``"migrated-salvaged-setup-block"`` — rewrote seed-local.sh
+       and salvaged content into setup-block.yml.
+    - ``"migrated-kept-existing-setup-block"`` — rewrote
+       seed-local.sh; setup-block.yml already existed so wasn't
+       touched.
+    - ``"no-heredoc-found"`` — seed-local.sh doesn't contain the
+       legacy heredoc pattern and doesn't contain the awk reader
+       either. Unusual shape; we leave it alone.
+
+    Idempotent across re-runs: a migrated seed script is detected
+    by the awk-reader presence and skipped.
+    """
+    text = seed_path.read_text(errors="replace")
+    if _seed_already_migrated(text):
+        return "already-migrated"
+
+    m = _HEREDOC_BLOCK_RE.search(text)
+    if m is None:
+        return "no-heredoc-found"
+
+    leading_indent = m.group(1)
+    heredoc_body = m.group(2)
+    yaml_terminator_indent = m.group(3)
+    paren_indent = m.group(4)
+
+    # Salvage to setup-block.yml when the file doesn't exist.
+    salvage_outcome = "kept-existing-setup-block"
+    if not setup_block_path.exists():
+        setup_block_path.parent.mkdir(parents=True, exist_ok=True)
+        salvaged_yaml = (
+            "# AUTO-MANAGED by /proctor:proctor-init wizard. The\n"
+            "# contents below were salvaged from the pre-v0.7.9\n"
+            "# hardcoded SETUP_BLOCK heredoc inside seed-local.sh\n"
+            "# during the v0.7.10 migration. Hand-edit freely — the\n"
+            "# wizard's supplement-setup step appends new entries\n"
+            "# without overwriting existing ones.\n"
+            "setup:\n"
+            + heredoc_body
+        )
+        if not salvaged_yaml.endswith("\n"):
+            salvaged_yaml += "\n"
+        tmp_sb = setup_block_path.with_suffix(
+            setup_block_path.suffix + ".wizard-tmp"
+        )
+        tmp_sb.write_text(salvaged_yaml)
+        tmp_sb.replace(setup_block_path)
+        salvage_outcome = "salvaged-setup-block"
+
+    # Build the replacement conditional. Preserve the original block's
+    # leading indentation so the rewritten script stays consistent
+    # with the surrounding code.
+    fallback_body = heredoc_body.rstrip("\n") + "\n"
+    replacement = (
+        f"{leading_indent}if [ -f .proctor/setup-block.yml ]; then\n"
+        f"{leading_indent}    SETUP_BLOCK=$(awk '/^setup:/,0' "
+        f".proctor/setup-block.yml | tail -n +2)\n"
+        f"{leading_indent}else\n"
+        f"{leading_indent}    SETUP_BLOCK=$(cat <<'YAML'\n"
+        f"{fallback_body}"
+        f"{yaml_terminator_indent}YAML\n"
+        f"{paren_indent})\n"
+        f"{leading_indent}fi"
+    )
+
+    new_text = text[:m.start()] + replacement + text[m.end():]
+    tmp_seed = seed_path.with_suffix(seed_path.suffix + ".wizard-tmp")
+    tmp_seed.write_text(new_text)
+    # Preserve the executable bit.
+    import os as _os
+    _os.chmod(tmp_seed, _os.stat(seed_path).st_mode)
+    tmp_seed.replace(seed_path)
+
+    return f"migrated-{salvage_outcome}"
 
 
 @_register("step_supplement_setup")

@@ -2,6 +2,81 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.10 — 2026-05-15
+
+### Step-iterator bug-fix release: Bug A (supplement dropped) + Bug B (regenerate is a no-op) + Bug C (seed-local.sh not auto-migrated)
+
+**Motivating evidence.** v0.7.9 shipped the step iterator + `setup-block.yml` as the canonical setup source. The user re-ran `/proctor:proctor-init` against mcd-website with v0.7.9 installed and surfaced three structural issues in one session:
+
+```
+{"type": "ask_user", "question": "...local.yml is missing. How would you like to proceed?",
+ "options": ["Regenerate seed-local.sh AND re-run it", ...]}
+User answered: "Regenerate seed-local.sh AND re-run it (Recommended)"
+{"type": "show", "markdown": "## Next: regenerate seed-local.sh + re-run it. ... fall back to the legacy SKILL.md prose"}
+```
+
+Three causes:
+
+1. **Bug A — `step_supplement_setup` was silently dropped from the executed list** when `.proctor/local.yml` was missing. The v0.7.9 `decide_steps` applies-condition gated supplement on `has_local_yml` even though the only true precondition is "cmd/*/main.go binaries exist not already in setup-block.yml". On the user's first run (no `local.yml` yet) the wizard returned `[step_regenerate_local_yml, step_bump_action_pin]` and never offered to scan for binaries.
+2. **Bug B — `step_regenerate_local_yml`'s handler was prose-handoff only.** The handler emitted a `show` envelope pointing at legacy `commands/proctor-init.md` Section 7 prose and called itself done. No actual seed-script re-run happened; the AI in the user's session read the prose, decided the existing seed script was already good, and ran it manually.
+3. **Bug C — existing `.proctor/seed-local.sh` shipped with the pre-v0.7.9 hardcoded `SETUP_BLOCK` heredoc.** v0.7.9 specified the seed script should read from `.proctor/setup-block.yml` via `awk '/^setup:/,0' .proctor/setup-block.yml | tail -n +2`, but no auto-migration of existing consumers' seed scripts was implemented. As a result, even if `step_supplement_setup` HAD fired (it didn't, per Bug A), the seed-script would have re-run its hardcoded heredoc on the next invocation and silently ignored the wizard's `setup-block.yml` writes.
+
+### Fix A — `wizard_decide_steps.py` applies-conditions are now truly independent
+
+- **`step_supplement_setup` no longer gates on `has_local_yml`.** The applies-condition is now purely: `has_new_config` AND `not _setup_block_lists_all_cmd_binaries(repo_root)`. The setup-block.yml is checked from the config dir; the binaries are detected from the filesystem; local.yml's presence is irrelevant.
+- **`step_regenerate_local_yml` broadens its applies-condition.** Fires when `.proctor/seed-local.sh` exists AND (`local.yml` is missing OR the seed script still ships with the pre-v0.7.9 hardcoded heredoc). The new sub-clause (legacy heredoc) is what triggers Bug C's auto-migration on existing consumers.
+- **`detect_state` reports a new key `seed_has_legacy_heredoc`**: True when `seed-local.sh` contains `SETUP_BLOCK=$(cat <<'YAML'` AND does NOT contain the v0.7.9 awk reader. Used by the new applies-condition above.
+- **`decide_steps` returns the steps SORTED by canonical `STEP_ORDER`** so check order doesn't influence execution order. Independent applies-conditions + canonical-order sort = no hidden cross-step coupling.
+- **`STEP_ORDER` reordered**: supplement now precedes regenerate (data-flow dependency — supplement writes `setup-block.yml`, regenerate reads it to produce `local.yml`). Bump and fresh-install slots are unchanged. New order: `[legacy_layout_migrate, supplement_setup, regenerate_local_yml, bump_action_pin, fresh_install]`.
+
+### Fix B + C — `_handle_regen_local` does real work and auto-migrates legacy seed scripts
+
+- **`wizard_run.py::_handle_regen_local`** rewritten end-to-end. The handler now:
+  1. **Detects the seed script's shape**. If the script already contains the v0.7.9 awk reader, the migration phase is skipped (`outcome: already-migrated`). If it contains the legacy `SETUP_BLOCK=$(cat <<'YAML'` heredoc, the migration phase runs.
+  2. **Migrates seed-local.sh in place**. The pre-v0.7.9 heredoc body is salvaged. When `.proctor/setup-block.yml` doesn't exist, the salvaged body is written there (preserves the consumer's tailored hardcoded commands as the canonical baseline). When the file already exists (e.g. supplement-setup wrote it earlier in the same wizard run), it's left alone. The seed script's heredoc block is rewritten in place to use the v0.7.9 conditional: `if [ -f .proctor/setup-block.yml ]; then SETUP_BLOCK=$(awk ...); else SETUP_BLOCK=$(cat <<'YAML'\n<salvaged fallback>\nYAML\n); fi`. The executable bit is preserved across the atomic tmp-file rename.
+  3. **Emits a `bash` envelope running `./.proctor/seed-local.sh`**. The AI invokes the command (the consumer's docker-compose / DB must be up first — wizard doesn't auto-start those because they vary per repo), captures rc, re-invokes the wizard with `--bash-rc`.
+  4. **Handles exit code**. rc=0 → `show` envelope summarizing regeneration outcome + migration outcome, then SUB_COMPLETE. rc≠0 → `error` envelope with actionable guidance ("seed-local.sh exited N. Bring up your local dev dependencies — typically via `docker-compose up -d` — then re-run `/proctor:proctor-init`"); step substate is reset so a re-run picks up here from the bash phase.
+
+- **New helper `_migrate_seed_local_sh(seed_path, setup_block_path)`** — idempotent in-place seed-script migration. Returns one of: `"already-migrated"`, `"migrated-salvaged-setup-block"`, `"migrated-kept-existing-setup-block"`, `"no-heredoc-found"`. Preserves all other content of seed-local.sh (header comment, role definitions, upsert SQL, etc.) — the rewrite is a precise regex-anchored edit on the SETUP_BLOCK block only.
+
+- The pre-v0.7.10 three-option `ask_user` prompt for regeneration (Regenerate / Just run existing / Skip) is gone — two of those options were no-ops or punt-to-prose, so v0.7.10 just does the right thing without asking. The user-facing `ask_user` metadata in `wizard_decide_steps._STEP_INFO` is preserved for the backward-compat shim only.
+
+### Step ordering enforced
+
+`decide_steps` now sorts its return value by `STEP_ORDER` regardless of check order:
+
+```python
+STEP_ORDER = [
+    STEP_LEGACY_LAYOUT_MIGRATE,
+    STEP_SUPPLEMENT_SETUP,      # writes setup-block.yml
+    STEP_REGENERATE_LOCAL_YML,  # reads setup-block.yml
+    STEP_BUMP_ACTION_PIN,
+    STEP_FRESH_INSTALL,
+]
+```
+
+The iterator processes in this order so when all three apply (the headline mcd-website scenario), supplement writes the canonical block, regenerate produces local.yml from it, then bump updates the workflow pin — instead of v0.7.9's regenerate-then-supplement-then-bump which produced a stale local.yml.
+
+### Tests 395 → 419
+
+24 new tests under `tests/test_helpers.py` covering:
+
+- **Bug A regressions**: supplement fires with `has_local_yml=False`, on a bare-binaries-only repo, on both has_local_yml=True and =False fixtures (pinning the no-cross-dependency invariant).
+- **Bug B regressions**: regenerate's first envelope is `bash` not `show`; rc=0 path emits a `show` summary; rc≠0 path emits an `error` with actionable guidance.
+- **Bug C regressions**: `seed_has_legacy_heredoc` correctly flags legacy seed scripts and ignores already-migrated / absent ones; regenerate fires on legacy heredoc EVEN WHEN local.yml is present; idempotent on already-migrated scripts.
+- **Migration helper**: `_migrate_seed_local_sh` unit-level — rewrites heredoc, returns `already-migrated` on no-op, preserves executable bit.
+- **Iterator orchestration**: all three steps fire on the mcd-website scenario (legacy seed + binaries + missing local.yml + stale pin); canonical order pinned in the iterator end-to-end; retry after seed-script failure resumes at the bash phase.
+- **Salvage semantics**: legacy heredoc's content lands in `setup-block.yml` when the file is absent; pre-existing setup-block.yml is not overwritten.
+- **Schema test for `STEP_ORDER`** updated to the new order; all pre-v0.7.10 tests that pinned the old behavior (regenerate-step asking three options, bump-then-supplement iterator) updated to the v0.7.10 behavior.
+
+Pre-existing test count: 395 (was 396; one test was renamed but stayed in the count). The +24 new tests bring the total to 419.
+
+### Backward compatibility
+
+- `wizard_decide_mode.py` shim still importable. The single-mode alias map is unchanged.
+- The single-mode `mode` field's value tracks the FIRST applicable step (per the new STEP_ORDER): supplement-setup → `amend-daemons`, regenerate → `needs-local-regen`, bump → `bump-only`. A consumer with stale pin + uncovered binaries + missing local.yml now reports `mode=amend-daemons` (was `bump-only` in v0.7.9; was `needs-local-regen` in v0.7.8). This is intentional — the dropped supplement step was Bug A, the new ordering surfaces it.
+- All existing classifier labels, plan_smells keys, schema entry points are unchanged.
+
 ## v0.7.9 — 2026-05-15
 
 ### Wizard step iterator + neutral terminology + setup-block.yml as single source of truth

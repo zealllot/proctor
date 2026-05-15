@@ -125,14 +125,34 @@ STEP_SUPPLEMENT_SETUP = "step_supplement_setup"
 STEP_FRESH_INSTALL = "step_fresh_install"
 
 # Execution order. The list serves as both the iteration order and
-# the canonical list of legal step ids. Preserves v0.7.8 mode-priority
-# semantics for any single-step shape: regenerate-local-yml beats
-# bump-action-pin, which beats supplement-setup.
+# the canonical list of legal step ids.
+#
+# v0.7.10 reorder: ``step_supplement_setup`` now precedes
+# ``step_regenerate_local_yml``. The data flow is supplement (writes
+# ``.proctor/setup-block.yml``) → regenerate (rewrites seed-local.sh
+# to read setup-block.yml, then re-runs it to produce local.yml). If
+# regenerate ran first, the supplement step would later write into
+# setup-block.yml but the local.yml the user just regenerated would
+# already be stale (no supplementary binaries in its setup block).
+#
+# ``step_bump_action_pin`` is independent — it's a self-contained edit
+# of the workflow file. We slot it AFTER the two setup-mutation steps
+# so the wizard's first user-visible action is the substantive setup
+# work rather than a one-line pin bump.
+#
+# v0.7.9 ordering was: legacy → regenerate → bump → supplement → fresh.
+# The new order fixes Bug A from the v0.7.9 audit: supplement was
+# dropped when local.yml was missing (the v0.7.9 ``decide_steps`` gated
+# supplement on ``has_local_yml``), but the only true precondition is
+# "there's a cmd/* binary not yet covered by setup-block.yml". Bug C
+# (seed-local.sh ships with a hardcoded SETUP_BLOCK heredoc) is also
+# folded into ``step_regenerate_local_yml`` via the broader "needs
+# rewrite" check (see ``_seed_needs_rewrite``).
 STEP_ORDER = [
     STEP_LEGACY_LAYOUT_MIGRATE,
+    STEP_SUPPLEMENT_SETUP,
     STEP_REGENERATE_LOCAL_YML,
     STEP_BUMP_ACTION_PIN,
-    STEP_SUPPLEMENT_SETUP,
     STEP_FRESH_INSTALL,
 ]
 
@@ -173,6 +193,17 @@ def detect_state(repo_root: Path) -> dict:
         "has_local_yml": (repo_root / _NEW_LOCAL).exists()
             or (repo_root / _OLD_LOCAL).exists(),
         "has_setup_block_yml": (repo_root / _NEW_SETUP_BLOCK).exists(),
+        # v0.7.10: when seed-local.sh exists and still ships with the
+        # pre-v0.7.9 hardcoded SETUP_BLOCK heredoc, the wizard must
+        # rewrite it to read setup-block.yml — otherwise wizard
+        # amendments to setup-block.yml are silently ignored on every
+        # seed-script re-run. ``seed_has_legacy_heredoc`` is True when
+        # the heredoc pattern is present AND the awk reader pattern is
+        # absent. Other shapes (already migrated, or no seed script
+        # at all) leave it False.
+        "seed_has_legacy_heredoc": _seed_has_legacy_heredoc(
+            repo_root / _NEW_SEED,
+        ),
         "legacy_layout": legacy_layout,
         "new_layout": new_layout,
         "current_pin": _extract_pin(repo_root / _WORKFLOW),
@@ -198,6 +229,51 @@ def _extract_pin(workflow_path: Path) -> str | None:
         return None
     m = _PIN_RE.search(workflow_path.read_text(errors="replace"))
     return m.group(1) if m else None
+
+
+# v0.7.10 — detect the legacy hardcoded SETUP_BLOCK heredoc pattern
+# inside an existing seed-local.sh. Pre-v0.7.9 seed scripts shipped with:
+#
+#     SETUP_BLOCK=$(cat <<'YAML'
+#       - <hardcoded command 1>
+#       - <hardcoded command 2>
+#       ...
+#     YAML
+#     )
+#
+# v0.7.9+ replaced this with an awk reader that pulls the block from
+# ``.proctor/setup-block.yml`` (falling back to a generic heredoc when
+# the file is missing). Existing consumers' seed scripts weren't
+# auto-migrated in v0.7.9, so wizard amendments to setup-block.yml
+# were ignored. v0.7.10's ``step_regenerate_local_yml`` does the
+# in-place rewrite.
+_LEGACY_HEREDOC_RE = re.compile(
+    r"SETUP_BLOCK=\$\(cat\s+<<\s*'YAML'\s*$", re.MULTILINE,
+)
+_AWK_READER_RE = re.compile(
+    r"awk\s+'[^']*setup:[^']*'\s+\.proctor/setup-block\.yml",
+)
+
+
+def _seed_has_legacy_heredoc(seed_path: Path) -> bool:
+    """True when ``seed_path`` is a file that contains the pre-v0.7.9
+    hardcoded SETUP_BLOCK heredoc AND does NOT contain the v0.7.9 awk
+    reader pattern. Either of:
+
+    - The seed script doesn't exist → False (no migration needed).
+    - The script already has the awk reader → False (already
+      migrated).
+    - The script has only the heredoc → True (needs rewrite).
+    """
+    if not seed_path.is_file():
+        return False
+    try:
+        text = seed_path.read_text(errors="replace")
+    except OSError:
+        return False
+    if _AWK_READER_RE.search(text):
+        return False
+    return bool(_LEGACY_HEREDOC_RE.search(text))
 
 
 # --- applies-condition helpers --------------------------------------
@@ -293,10 +369,14 @@ def _setup_block_lists_all_cmd_binaries(
                 pass
 
     if not sources_text:
-        # No setup source exists at all — step_supplement_setup can't
-        # write into nothing. Defer to step_regenerate_local_yml /
-        # step_fresh_install to bootstrap first.
-        return True
+        # No setup source exists at all — step_supplement_setup should
+        # bootstrap setup-block.yml from scratch with the detected
+        # binaries. v0.7.10: previously this returned True (skipped
+        # the step), deferring to regenerate / fresh; but Bug A's fix
+        # decouples these — supplement writes setup-block.yml
+        # regardless, then regenerate / fresh produce local.yml from
+        # it.
+        return False
 
     for c in candidates:
         path = c.get("path", "")
@@ -342,20 +422,45 @@ def decide_steps(
 
     steps: list[str] = []
 
-    # 1. Legacy layout — must run first so subsequent steps see the
-    #    canonical .proctor/ paths.
+    # Walk each applies-condition independently. Each step's check
+    # depends ONLY on that step's own precondition — no hidden coupling
+    # between checks. Bug A from the v0.7.9 audit was caused by
+    # gating supplement on ``has_local_yml``; v0.7.10 removes that
+    # cross-dependency. The final ``steps`` list is sorted per
+    # ``STEP_ORDER`` before return, so check order here doesn't affect
+    # execution order.
+
+    # Legacy layout — pre-v0.4 .pr-test.yml present and no new config
+    # yet. Must run before everything else so subsequent steps see
+    # the canonical .proctor/ paths.
     if s["legacy_layout"] and not s["has_new_config"]:
         steps.append(STEP_LEGACY_LAYOUT_MIGRATE)
 
-    # 2. Regenerate .proctor/local.yml — seed script present but the
-    #    file PRoctor reads at runtime is missing. Higher priority
-    #    than pin bump because a missing local.yml blocks every
-    #    PRoctor run, while a stale pin only blocks the NEXT release.
-    if s["has_seed_script"] and not s["has_local_yml"]:
+    # Supplement setup — fires whenever the repo has at least one
+    # cmd/*/main.go binary that isn't yet referenced in
+    # .proctor/setup-block.yml or .proctor/local.yml's setup block.
+    # v0.7.10: NO LONGER gated on has_local_yml. The supplement step
+    # writes to setup-block.yml regardless; the subsequent
+    # step_regenerate_local_yml reads that file when producing the
+    # new local.yml. This is Bug A's fix.
+    if (
+        s["has_new_config"]
+        and not _setup_block_lists_all_cmd_binaries(repo_root)
+    ):
+        steps.append(STEP_SUPPLEMENT_SETUP)
+
+    # Regenerate .proctor/local.yml — seed script present AND EITHER
+    # local.yml is missing OR seed-local.sh still has the pre-v0.7.9
+    # hardcoded SETUP_BLOCK heredoc (needs in-place rewrite so wizard
+    # amendments to setup-block.yml are honored). Bug C's fix folds
+    # the seed-script-migration trigger into this step.
+    if s["has_seed_script"] and (
+        not s["has_local_yml"] or s.get("seed_has_legacy_heredoc")
+    ):
         steps.append(STEP_REGENERATE_LOCAL_YML)
 
-    # 3. Bump action pin — runs whenever the workflow is older than
-    #    --current-tag.
+    # Bump action pin — runs whenever the workflow is older than
+    # --current-tag. Independent of every other step.
     if (
         current_tag
         and s["current_pin"]
@@ -363,20 +468,9 @@ def decide_steps(
     ):
         steps.append(STEP_BUMP_ACTION_PIN)
 
-    # 4. Supplement setup with cmd/* binaries — fires when the
-    #    consumer has binaries not yet referenced in the setup. Only
-    #    applies on the v0.4+ layout (legacy layouts get migrated
-    #    first then supplemented on the next wizard run). Requires
-    #    local.yml present — otherwise step_regenerate_local_yml has
-    #    to bootstrap first.
-    if (
-        s["has_new_config"]
-        and s["has_local_yml"]
-        and not _setup_block_lists_all_cmd_binaries(repo_root)
-    ):
-        steps.append(STEP_SUPPLEMENT_SETUP)
-
-    return steps
+    # Sort by canonical execution order before returning.
+    order_index = {sid: i for i, sid in enumerate(STEP_ORDER)}
+    return sorted(steps, key=lambda sid: order_index.get(sid, 999))
 
 
 # --- decision envelope (for compatibility + UX) ---------------------

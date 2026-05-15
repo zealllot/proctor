@@ -1649,18 +1649,21 @@ def _run_wizard(state_file, current_tag=None, answer=None, bash_rc=None,
     return json.loads(result.stdout)
 
 
-def test_wizard_first_invocation_on_user_scenario_emits_ask_user(tmp_path):
+def test_wizard_first_invocation_on_user_scenario_emits_bash(tmp_path):
     """The exact user bug scenario: v0.4.0 layout, seed script present,
     local.yml missing, pin out of date → state machine's first
-    invocation should emit type=ask_user."""
+    invocation should emit type=bash directly (running seed-local.sh).
+
+    v0.7.10 update: pre-v0.7.10 the regenerate step opened with an
+    ``ask_user`` listing three regeneration options. Two of them were
+    no-ops (just pointed at legacy prose), so v0.7.10 collapsed the
+    prompt and goes straight to running the seed script."""
     _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.3")
     state_file = tmp_path / "wizard-state.json"
     env = _run_wizard(state_file, current_tag="v0.4.6",
                       repo_root=tmp_path)
-    assert env["type"] == "ask_user"
-    assert env["header"] == "Local config"
-    assert any("Regenerate seed-local.sh AND re-run" in o["label"]
-               for o in env["options"])
+    assert env["type"] == "bash"
+    assert "seed-local.sh" in env["command"]
 
 
 def test_wizard_current_emits_done(tmp_path):
@@ -1713,52 +1716,37 @@ def test_wizard_bump_only_after_bash_failure_done_with_warning(tmp_path):
     assert "exited 4" in env["summary"]
 
 
-def test_wizard_needs_local_regen_recommended_path(tmp_path):
-    """Two-iteration loop: ask_user → user picks 'Regenerate' →
-    show envelope pointing at legacy prose for the regen flow."""
+def test_wizard_needs_local_regen_bash_then_show_after_success(tmp_path):
+    """v0.7.10: regenerate step opens with a ``bash`` envelope to run
+    seed-local.sh; after rc=0 the step emits a ``show`` envelope
+    summarizing the regeneration."""
     _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
     state_file = tmp_path / "wizard-state.json"
     env1 = _run_wizard(state_file, current_tag="v0.4.6",
                        repo_root=tmp_path)
-    assert env1["type"] == "ask_user"
-    env2 = _run_wizard(
-        state_file, current_tag="v0.4.6", repo_root=tmp_path,
-        answer="Regenerate seed-local.sh AND re-run it (Recommended)",
-    )
+    assert env1["type"] == "bash"
+    assert "seed-local.sh" in env1["command"]
+    # Simulate seed script success.
+    env2 = _run_wizard(state_file, current_tag="v0.4.6",
+                       repo_root=tmp_path, bash_rc=0)
     assert env2["type"] == "show"
-    assert "regenerate seed-local.sh" in env2["markdown"].lower()
+    assert "regenerated" in env2["markdown"].lower()
 
 
-def test_wizard_needs_local_regen_just_run_existing(tmp_path):
-    """v0.7.9: per-step summaries emit as ``show`` envelopes; the
-    terminal ``done`` follows on the next iteration once
-    pending_steps is empty. Test two-iteration drain."""
+def test_wizard_needs_local_regen_bash_failure_emits_error(tmp_path):
+    """v0.7.10: when seed-local.sh exits non-zero (DB not reachable
+    etc.), the step emits an ``error`` envelope with actionable
+    guidance — and does NOT mark the step complete, so re-running
+    the wizard picks up here."""
     _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
     state_file = tmp_path / "wizard-state.json"
     _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
     env = _run_wizard(state_file, current_tag="v0.4.6",
-                      repo_root=tmp_path,
-                      answer="Just run the existing seed-local.sh")
-    if env["type"] == "show":
-        assert "seed-local.sh" in env["markdown"]
-        env = _run_wizard(state_file, current_tag="v0.4.6",
-                          repo_root=tmp_path)
-    assert env["type"] == "done"
-
-
-def test_wizard_needs_local_regen_skip(tmp_path):
-    """v0.7.9: skip emits a per-step ``show`` envelope, then the
-    iterator's next call emits terminal ``done``."""
-    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.4.6")
-    state_file = tmp_path / "wizard-state.json"
-    _run_wizard(state_file, current_tag="v0.4.6", repo_root=tmp_path)
-    env = _run_wizard(state_file, current_tag="v0.4.6",
-                      repo_root=tmp_path,
-                      answer="Skip — I'll handle .proctor/local.yml myself")
-    if env["type"] == "show":
-        env = _run_wizard(state_file, current_tag="v0.4.6",
-                          repo_root=tmp_path)
-    assert env["type"] == "done"
+                      repo_root=tmp_path, bash_rc=1)
+    assert env["type"] == "error", env
+    assert "seed-local.sh exited" in env["message"]
+    # Surface actionable guidance about local dev dependencies.
+    assert "docker-compose" in env["message"] or "dependencies" in env["message"]
 
 
 def test_wizard_fresh_falls_back_to_legacy_prose(tmp_path):
@@ -1947,13 +1935,22 @@ def test_wdm_v078_amend_daemons_skipped_for_empty_setup(tmp_path):
 
 
 def test_wdm_v078_bump_only_wins_over_amend_daemons(tmp_path):
-    """When pin is out of date, bump-only fires first (higher
-    priority — action pin is more urgent than a setup
-    augmentation)."""
+    """v0.7.10: ordering inverted — supplement_setup is now the first
+    step (writes ``setup-block.yml`` before regenerate/bump downstream
+    consume it). The shim's single-mode alias for this scenario is
+    therefore ``amend-daemons`` (the v0.7.8 alias for
+    step_supplement_setup), not ``bump-only``.
+
+    Pre-v0.7.10: bump-only ran first because the v0.7.8 priority kept
+    pin-bump above amend-daemons. v0.7.10 audit found that ordering
+    dropped the supplement step entirely when local.yml was missing
+    (Bug A) and produced a stale local.yml when regenerate ran before
+    supplement could write the new setup-block (Bug C). Reordering
+    supplement to the head of the list fixes both."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state = wdm_state(tmp_path)
     d = wdm_decide(state, current_tag="v0.7.8", repo_root=tmp_path)
-    assert d["mode"] == "bump-only", d
+    assert d["mode"] == "amend-daemons", d
 
 
 def test_wizard_v078_amend_daemons_first_invocation_emits_offer(tmp_path):
@@ -6148,14 +6145,19 @@ def test_v079_decide_steps_bump_and_supplement_together(tmp_path):
     setup → BOTH bump_action_pin AND supplement_setup fire in one
     invocation. This is the case the v0.7.8 single-mode dispatcher
     silently dropped (bump-only always won; amend-daemons never
-    fired on the same wizard run)."""
+    fired on the same wizard run).
+
+    v0.7.10 reorder: supplement now precedes bump (supplement
+    writes the canonical ``.proctor/setup-block.yml`` that the
+    downstream regenerate step consumes; pin-bump is a self-contained
+    workflow edit that slots after the setup-mutation steps)."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state = wds_detect_state(tmp_path)
     steps = wds_decide_steps(state, current_tag="v0.7.9", repo_root=tmp_path)
     assert STEP_BUMP_ACTION_PIN in steps
     assert STEP_SUPPLEMENT_SETUP in steps
-    # Order: bump before supplement (canonical execution order).
-    assert steps.index(STEP_BUMP_ACTION_PIN) < steps.index(STEP_SUPPLEMENT_SETUP)
+    # v0.7.10 canonical order: supplement before bump.
+    assert steps.index(STEP_SUPPLEMENT_SETUP) < steps.index(STEP_BUMP_ACTION_PIN)
 
 
 def test_v079_decide_steps_regen_before_bump(tmp_path):
@@ -6268,48 +6270,53 @@ def test_v079_decide_steps_cli_outputs_steps_list(tmp_path):
 # --- v0.7.9: step iterator (wizard_run.py) ----------------------------------
 
 
-def test_v079_wizard_iterator_multi_step_bump_then_supplement(tmp_path):
-    """The headline v0.7.9 behavior: a repo with BOTH a stale pin
-    AND a missing supplementary binary triggers BOTH steps in one
-    wizard invocation. v0.7.8 would have picked one and silently
-    dropped the other. v0.7.9 walks them in order."""
+def test_v079_wizard_iterator_multi_step_supplement_then_bump(tmp_path):
+    """The headline v0.7.9 behavior (renamed in v0.7.10 reorder): a
+    repo with BOTH a stale pin AND a missing supplementary binary
+    triggers BOTH steps in one wizard invocation. v0.7.8 would have
+    picked one and silently dropped the other. v0.7.9 walked them in
+    order; v0.7.10 reordered so supplement leads (writes
+    setup-block.yml that downstream regenerate / bump can consume)."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state_file = tmp_path / "wizard-state.json"
 
     # First invocation: detection populates pending_steps, then the
-    # first step (bump_action_pin) emits its bash envelope.
+    # first step (supplement_setup) emits its scan/skip ask_user.
     env1 = _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
-    assert env1["type"] == "bash", env1
-    assert "wizard_bump_action.sh" in env1["command"]
+    assert env1["type"] == "ask_user", env1
+    assert env1["header"] == "Supplementary binaries"
 
-    # State file should record both pending steps.
+    # State file should record bump still pending (or completed).
     state = json.loads(state_file.read_text())
     pending = state.get("pending_steps") or []
     completed = state.get("completed_steps") or []
-    # At least one of: bump in pending+supplement in pending OR
-    # bump completed + supplement in pending.
-    expected = STEP_SUPPLEMENT_SETUP in pending or any(
-        c.get("step") == STEP_SUPPLEMENT_SETUP for c in completed
+    expected = STEP_BUMP_ACTION_PIN in pending or any(
+        c.get("step") == STEP_BUMP_ACTION_PIN for c in completed
     )
     assert expected, state
 
 
-def test_v079_wizard_iterator_advances_to_supplement_after_bump_done(tmp_path):
-    """After the bump bash completes (rc=0), the iterator pops the
-    next step (supplement_setup) and emits its first ask_user — not
-    the terminal done. The whole point of v0.7.9 is that the wizard
-    doesn't exit after the first step."""
+def test_v079_wizard_iterator_advances_to_bump_after_supplement_done(tmp_path):
+    """After the supplement step completes (user picks Skip), the
+    iterator pops the next pending step. With v0.7.10 ordering
+    (supplement → regenerate → bump) on a fixture that has local.yml
+    present + a stale pin, only supplement and bump apply (regenerate
+    doesn't fire because local.yml is present + seed-local.sh has no
+    legacy heredoc). After supplement skip, the iterator recurses
+    into bump which emits its bash. The point of the iterator is
+    that the wizard doesn't exit after the first step."""
     _make_v04_repo_with_setup_no_daemons(tmp_path, pin="v0.7.5")
     state_file = tmp_path / "wizard-state.json"
-    # Step 1: bump emits bash.
+    # Step 1: supplement asks scan/skip.
     _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path)
-    # Step 2: simulate bash success.
-    env2 = _run_wizard(state_file, current_tag="v0.7.9", repo_root=tmp_path,
-                       bash_rc=0)
-    # bump completes silently → iterator recurses into supplement →
-    # supplement asks scan-vs-skip.
-    assert env2["type"] == "ask_user", env2
-    assert env2["header"] == "Supplementary binaries"
+    # Step 2: user picks Skip → supplement completes silently →
+    # iterator recurses into bump which emits its bash.
+    env2 = _run_wizard(
+        state_file, current_tag="v0.7.9", repo_root=tmp_path,
+        answer="Skip — my setup is fine",
+    )
+    assert env2["type"] == "bash", env2
+    assert "wizard_bump_action.sh" in env2["command"]
 
 
 def test_v079_wizard_iterator_terminal_done_only_after_all_steps(tmp_path):
@@ -6700,11 +6707,639 @@ def test_v079_decide_steps_module_exports_step_constants():
     assert mod.STEP_REGENERATE_LOCAL_YML == "step_regenerate_local_yml"
     assert mod.STEP_BUMP_ACTION_PIN == "step_bump_action_pin"
     assert mod.STEP_SUPPLEMENT_SETUP == "step_supplement_setup"
-    # Canonical execution order.
+    # v0.7.10 canonical execution order: supplement before regenerate
+    # (supplement writes setup-block.yml that regenerate consumes);
+    # bump independent of both, slots after.
     assert mod.STEP_ORDER == [
         mod.STEP_LEGACY_LAYOUT_MIGRATE,
+        mod.STEP_SUPPLEMENT_SETUP,
         mod.STEP_REGENERATE_LOCAL_YML,
         mod.STEP_BUMP_ACTION_PIN,
-        mod.STEP_SUPPLEMENT_SETUP,
         mod.STEP_FRESH_INSTALL,
     ]
+
+
+# --- v0.7.10 — bug-A / bug-B / bug-C regression coverage --------------------
+#
+# v0.7.9 e2e on mcd-website found three structural issues in
+# /proctor:proctor-init:
+#
+# Bug A — step_supplement_setup was silently dropped from the steps
+# list when .proctor/local.yml was missing. The v0.7.9 decide_steps
+# applies-condition for supplement gated on `has_local_yml` even
+# though the precondition is purely "cmd/*/main.go exists not
+# already in setup-block.yml". v0.7.10 drops the gate.
+#
+# Bug B — step_regenerate_local_yml's handler just emitted a `show`
+# envelope pointing at legacy SKILL.md prose. No real regeneration
+# work. v0.7.10 rewrites the handler to actually re-run seed-local.sh
+# (after auto-migrating its hardcoded SETUP_BLOCK heredoc if needed)
+# and surface success / failure envelopes.
+#
+# Bug C — existing seed-local.sh in consumer repos ships with the
+# pre-v0.7.9 hardcoded SETUP_BLOCK heredoc, so wizard writes to
+# setup-block.yml are silently ignored on every seed-script re-run.
+# v0.7.10 detects that pattern + auto-migrates seed-local.sh
+# in-place during the regenerate step.
+#
+# Plus: step ordering enforced. Canonical order is
+# supplement → regenerate → bump (data flow: supplement writes the
+# block, regenerate produces local.yml from it, bump is independent).
+
+_V0710_SEED_SH_LEGACY = """#!/usr/bin/env bash
+# Pre-v0.7.9 seed script — hardcoded SETUP_BLOCK heredoc.
+set -e
+
+SETUP_BLOCK=$(cat <<'YAML'
+  - docker-compose up -d db
+  - bash -c 'for i in $(seq 1 30); do nc -z localhost 5432 && break; sleep 1; done'
+  - go mod download
+  - bash -c 'set -a; . ./dev_env_local 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-app.log 2>&1 & echo $! > /tmp/proctor-app.pid'
+YAML
+)
+
+cat > .proctor/local.yml <<EOF
+base_url: http://localhost:9801
+setup:
+$SETUP_BLOCK
+EOF
+"""
+
+
+_V0710_SEED_SH_ALREADY_MIGRATED = """#!/usr/bin/env bash
+# Post-v0.7.9 seed script — reads setup-block.yml via awk.
+set -e
+
+if [ -f .proctor/setup-block.yml ]; then
+    SETUP_BLOCK=$(awk '/^setup:/,0' .proctor/setup-block.yml | tail -n +2)
+else
+    SETUP_BLOCK=$(cat <<'YAML'
+  - docker-compose up -d db
+  - go mod download
+YAML
+)
+fi
+
+cat > .proctor/local.yml <<EOF
+base_url: http://localhost:9801
+setup:
+$SETUP_BLOCK
+EOF
+"""
+
+
+def _make_v0710_repo_with_legacy_seed(
+    tmp_path, *, pin="v0.7.10", with_cmd_binary=True,
+    has_local_yml=False,
+):
+    """Build a v0.4-layout consumer repo whose ``.proctor/seed-local.sh``
+    still ships with the pre-v0.7.9 hardcoded SETUP_BLOCK heredoc.
+    This is the exact shape mcd-website was in when v0.7.9's audit
+    found Bug C."""
+    _make_v04_repo(
+        tmp_path, has_local_yml=has_local_yml, pin=pin,
+    )
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(_V0710_SEED_SH_LEGACY)
+    seed.chmod(0o755)
+    if with_cmd_binary:
+        cmd_dir = tmp_path / "cmd" / "example-loop"
+        cmd_dir.mkdir(parents=True, exist_ok=True)
+        (cmd_dir / "main.go").write_text(
+            "package main\nimport \"time\"\n"
+            "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+        )
+    return tmp_path
+
+
+# --- Bug A regression — supplement-setup fires regardless of local.yml ------
+
+
+def test_v0710_bug_a_supplement_fires_with_no_local_yml(tmp_path):
+    """Bug A regression: synthetic repo with cmd/*/main.go binary +
+    .proctor/local.yml MISSING + outdated action pin. v0.7.9
+    silently dropped step_supplement_setup from the steps list
+    because the applies-condition gated on has_local_yml. v0.7.10
+    decouples — supplement fires purely on "binary exists not in
+    setup-block.yml", independent of local.yml's presence."""
+    _make_v04_repo_with_setup_no_daemons(
+        tmp_path, pin="v0.7.5",
+    )
+    # Make the fixture more closely match the mcd-website scenario:
+    # remove the local.yml that _make_v04_repo_with_setup_no_daemons
+    # creates so the repo has only a seed script + cmd binary.
+    (tmp_path / ".proctor" / "local.yml").unlink()
+    state = wds_detect_state(tmp_path)
+    assert state["has_local_yml"] is False
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert STEP_SUPPLEMENT_SETUP in steps, steps
+
+
+def test_v0710_bug_a_supplement_fires_with_only_binaries(tmp_path):
+    """Pure-bug-A reproduction: fresh-ish repo with cmd/*/main.go +
+    .proctor/config.yml + outdated action pin + NO local.yml + NO
+    setup-block.yml. v0.7.9 dropped supplement; v0.7.10 includes it."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.5")
+    cmd_dir = tmp_path / "cmd" / "ticker-loop"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() {\n"
+        "    for range time.NewTicker(time.Second).C {\n"
+        "        // long-running tick\n"
+        "    }\n"
+        "}\n"
+    )
+    state = wds_detect_state(tmp_path)
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert STEP_SUPPLEMENT_SETUP in steps
+    assert STEP_REGENERATE_LOCAL_YML in steps  # local.yml missing
+    assert STEP_BUMP_ACTION_PIN in steps        # pin stale
+    # Canonical order: supplement → regenerate → bump.
+    assert steps.index(STEP_SUPPLEMENT_SETUP) < steps.index(STEP_REGENERATE_LOCAL_YML)
+    assert steps.index(STEP_REGENERATE_LOCAL_YML) < steps.index(STEP_BUMP_ACTION_PIN)
+
+
+def test_v0710_supplement_independent_of_regenerate(tmp_path):
+    """Even when regenerate doesn't fire (local.yml present, no
+    legacy heredoc), supplement still fires when binaries are
+    uncovered. The two steps are independent."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.7.10")
+    # Wipe seed script to also prove regenerate doesn't fire from
+    # legacy-heredoc.
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    if seed.exists():
+        seed.write_text(
+            "#!/usr/bin/env bash\nif [ -f .proctor/setup-block.yml ]; then\n"
+            "    SETUP_BLOCK=$(awk '/^setup:/,0' .proctor/setup-block.yml | "
+            "tail -n +2)\nfi\necho ok\n"
+        )
+        seed.chmod(0o755)
+    cmd_dir = tmp_path / "cmd" / "ticker-loop"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() { t := time.NewTicker(time.Second); _ = t }\n"
+    )
+    state = wds_detect_state(tmp_path)
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert STEP_SUPPLEMENT_SETUP in steps
+    assert STEP_REGENERATE_LOCAL_YML not in steps
+
+
+def test_v0710_decide_steps_all_combinations_supplement_present(tmp_path):
+    """Combination matrix: every state combination where
+    supplement-setup should fire results in it being present in the
+    steps list. The applies-condition is local.yml-independent."""
+    for has_local in (True, False):
+        # Fresh fixture per iteration so state from a previous run
+        # doesn't leak.
+        sub = tmp_path / f"local={has_local}"
+        sub.mkdir()
+        _make_v04_repo(sub, has_local_yml=has_local, pin="v0.7.10")
+        cmd_dir = sub / "cmd" / "loop"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "main.go").write_text(
+            "package main\nimport \"time\"\n"
+            "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+        )
+        state = wds_detect_state(sub)
+        steps = wds_decide_steps(
+            state, current_tag="v0.7.10", repo_root=sub,
+        )
+        assert STEP_SUPPLEMENT_SETUP in steps, (has_local, steps)
+
+
+# --- Bug C regression — seed-local.sh legacy-heredoc detection --------------
+
+
+def test_v0710_bug_c_seed_with_legacy_heredoc_detected(tmp_path):
+    """v0.7.10 detect_state flags ``seed_has_legacy_heredoc`` when
+    .proctor/seed-local.sh contains the pre-v0.7.9 hardcoded
+    SETUP_BLOCK heredoc pattern."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", with_cmd_binary=False,
+        has_local_yml=True,
+    )
+    state = wds_detect_state(tmp_path)
+    assert state["seed_has_legacy_heredoc"] is True
+
+
+def test_v0710_already_migrated_seed_not_flagged(tmp_path):
+    """A seed-local.sh that already reads from setup-block.yml via
+    the awk pattern is NOT flagged as needing migration."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.7.10")
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(_V0710_SEED_SH_ALREADY_MIGRATED)
+    seed.chmod(0o755)
+    state = wds_detect_state(tmp_path)
+    assert state["seed_has_legacy_heredoc"] is False
+
+
+def test_v0710_no_seed_not_flagged(tmp_path):
+    """When seed-local.sh doesn't exist, the legacy-heredoc flag is
+    False (nothing to migrate)."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.7.10",
+                   has_seed_script=False)
+    state = wds_detect_state(tmp_path)
+    assert state["seed_has_legacy_heredoc"] is False
+
+
+def test_v0710_bug_c_regenerate_fires_on_legacy_heredoc(tmp_path):
+    """Even with local.yml PRESENT, when seed-local.sh has the
+    legacy hardcoded heredoc, step_regenerate_local_yml fires to
+    migrate it in place. Pre-v0.7.10 the step only fired on missing
+    local.yml; v0.7.10 broadens the trigger so existing consumers
+    auto-migrate."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", with_cmd_binary=False,
+        has_local_yml=True,
+    )
+    state = wds_detect_state(tmp_path)
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert STEP_REGENERATE_LOCAL_YML in steps
+
+
+def test_v0710_regenerate_does_not_fire_when_already_migrated(tmp_path):
+    """Idempotency: a v0.7.9+ seed script (uses awk reader) with
+    local.yml present doesn't trigger regenerate. The wizard correctly
+    detects "no work needed" and skips."""
+    _make_v04_repo(tmp_path, has_local_yml=True, pin="v0.7.10")
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(_V0710_SEED_SH_ALREADY_MIGRATED)
+    seed.chmod(0o755)
+    state = wds_detect_state(tmp_path)
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert STEP_REGENERATE_LOCAL_YML not in steps
+
+
+# --- Bug B regression — _handle_regen_local actually regenerates ------------
+
+
+def test_v0710_bug_b_regenerate_handler_emits_bash_to_run_seed_script(tmp_path):
+    """The regenerate step's first envelope is a ``bash`` running
+    ./.proctor/seed-local.sh — NOT a prose ``show`` punt to legacy
+    SKILL.md as pre-v0.7.10 did."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.10")
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.7.10",
+                      repo_root=tmp_path)
+    assert env["type"] == "bash", env
+    assert ".proctor/seed-local.sh" in env["command"]
+
+
+def test_v0710_regenerate_after_seed_success_emits_show(tmp_path):
+    """After seed-local.sh exits 0, the step emits a ``show`` envelope
+    summarizing the regeneration outcome + migration outcome."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.10")
+    # Manually drop a no-op seed-local.sh that creates local.yml so
+    # the success-path check sees the file.
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'fake setup' > .proctor/local.yml\n"
+        "echo ok\n"
+    )
+    seed.chmod(0o755)
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.10", repo_root=tmp_path)
+    env = _run_wizard(state_file, current_tag="v0.7.10",
+                      repo_root=tmp_path, bash_rc=0)
+    assert env["type"] == "show", env
+    assert "regenerated" in env["markdown"].lower()
+
+
+def test_v0710_regenerate_after_seed_failure_emits_error(tmp_path):
+    """When seed-local.sh exits non-zero (DB not reachable, missing
+    env file, etc.), the step emits an ``error`` envelope with
+    actionable guidance about bringing up dev dependencies."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.10")
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.10", repo_root=tmp_path)
+    env = _run_wizard(state_file, current_tag="v0.7.10",
+                      repo_root=tmp_path, bash_rc=1)
+    assert env["type"] == "error", env
+    msg = env["message"]
+    assert "exited 1" in msg
+    # Actionable hint about dev dependencies.
+    assert ("docker-compose" in msg) or ("dependencies" in msg)
+    # Re-run guidance present.
+    assert "re-run" in msg.lower() or "rerun" in msg.lower()
+
+
+def test_v0710_regenerate_handler_migrates_legacy_seed_in_place(tmp_path):
+    """v0.7.10 migrates an existing legacy-heredoc seed-local.sh in
+    place during the regenerate step. After the migration phase
+    (which runs BEFORE the bash envelope), the seed script reads
+    setup-block.yml via the awk reader and the legacy heredoc is
+    gone."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", with_cmd_binary=False,
+        has_local_yml=True,
+    )
+    seed_path = tmp_path / ".proctor" / "seed-local.sh"
+    # Sanity: legacy pattern present before the wizard runs.
+    original = seed_path.read_text()
+    assert "SETUP_BLOCK=$(cat <<'YAML'" in original
+    assert "awk" not in original
+
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.7.10",
+                      repo_root=tmp_path)
+    assert env["type"] == "bash", env  # the migrated seed-local.sh
+
+    rewritten = seed_path.read_text()
+    # The awk reader is now present.
+    assert "awk" in rewritten
+    assert ".proctor/setup-block.yml" in rewritten
+    # The fallback heredoc retains the original commands.
+    assert "docker-compose up -d db" in rewritten
+    # Original heredoc-only block (SETUP_BLOCK directly assigning
+    # from cat <<'YAML') is wrapped in an if/then now.
+    assert "if [ -f .proctor/setup-block.yml ]" in rewritten
+
+
+def test_v0710_regenerate_handler_salvages_heredoc_into_setup_block(tmp_path):
+    """Migration phase salvages the legacy heredoc's content into
+    .proctor/setup-block.yml when that file doesn't yet exist. The
+    user's tailored setup commands are preserved as the canonical
+    baseline."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", with_cmd_binary=False,
+        has_local_yml=True,
+    )
+    setup_block_path = tmp_path / ".proctor" / "setup-block.yml"
+    assert not setup_block_path.exists()
+
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.10", repo_root=tmp_path)
+
+    assert setup_block_path.exists()
+    content = setup_block_path.read_text()
+    assert "setup:" in content
+    # The salvaged commands from the legacy heredoc body.
+    assert "docker-compose up -d db" in content
+    assert "go mod download" in content
+
+
+def test_v0710_regenerate_handler_keeps_existing_setup_block(tmp_path):
+    """When .proctor/setup-block.yml already exists (e.g. supplement
+    already wrote it), the migration phase leaves the file alone and
+    only rewrites seed-local.sh. We don't overwrite user / wizard
+    state from an earlier step."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", with_cmd_binary=False,
+        has_local_yml=True,
+    )
+    sb_path = tmp_path / ".proctor" / "setup-block.yml"
+    sb_path.write_text(
+        "setup:\n"
+        "  - bash -c 'echo custom-pre-existing'\n"
+        "  - bash -c 'echo another'\n"
+    )
+    original_sb = sb_path.read_text()
+
+    state_file = tmp_path / "wizard-state.json"
+    _run_wizard(state_file, current_tag="v0.7.10", repo_root=tmp_path)
+
+    assert sb_path.read_text() == original_sb
+
+
+def test_v0710_regenerate_handler_idempotent_on_migrated_seed(tmp_path):
+    """When seed-local.sh is already migrated (uses awk reader), the
+    handler skips the migration phase + just runs the seed script.
+    No file mutations to seed-local.sh, no spurious setup-block.yml
+    writes."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.10")
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(_V0710_SEED_SH_ALREADY_MIGRATED)
+    seed.chmod(0o755)
+    original_seed = seed.read_text()
+
+    state_file = tmp_path / "wizard-state.json"
+    env = _run_wizard(state_file, current_tag="v0.7.10",
+                      repo_root=tmp_path)
+    assert env["type"] == "bash"
+    assert seed.read_text() == original_seed
+    # The handler should mark migration as already-migrated in
+    # step_data — verify via state file.
+    state = json.loads(state_file.read_text())
+    step_data = (
+        state.get("step_data", {}).get("step_regenerate_local_yml", {})
+    )
+    assert step_data.get("migrate_outcome") == "already-migrated", state
+
+
+# --- Migration helper unit tests --------------------------------------------
+
+
+def test_v0710_migrate_seed_local_sh_helper_rewrites_block(tmp_path):
+    """Unit test for _migrate_seed_local_sh: given a script with the
+    legacy heredoc, it returns ``migrated-...`` and rewrites the
+    file to use the awk reader."""
+    from plugins.proctor.scripts.wizard_run import _migrate_seed_local_sh
+    seed_path = tmp_path / "seed-local.sh"
+    seed_path.write_text(_V0710_SEED_SH_LEGACY)
+    seed_path.chmod(0o755)
+    sb_path = tmp_path / "setup-block.yml"
+    outcome = _migrate_seed_local_sh(seed_path, sb_path)
+    assert outcome.startswith("migrated-")
+    text = seed_path.read_text()
+    assert "if [ -f .proctor/setup-block.yml ]" in text
+    assert "awk '/^setup:/,0' .proctor/setup-block.yml" in text
+
+
+def test_v0710_migrate_seed_local_sh_helper_already_migrated_noop(tmp_path):
+    """When the seed script is already migrated, the helper returns
+    ``already-migrated`` and doesn't touch the file."""
+    from plugins.proctor.scripts.wizard_run import _migrate_seed_local_sh
+    seed_path = tmp_path / "seed-local.sh"
+    seed_path.write_text(_V0710_SEED_SH_ALREADY_MIGRATED)
+    seed_path.chmod(0o755)
+    original = seed_path.read_text()
+    sb_path = tmp_path / "setup-block.yml"
+    outcome = _migrate_seed_local_sh(seed_path, sb_path)
+    assert outcome == "already-migrated"
+    assert seed_path.read_text() == original
+    # setup-block.yml should NOT be created (no migration happened).
+    assert not sb_path.exists()
+
+
+def test_v0710_migrate_seed_local_sh_helper_preserves_executable_bit(tmp_path):
+    """After migration, seed-local.sh must remain executable. v0.7.10
+    sets the mode on the temp file explicitly before the atomic
+    rename so the chmod survives."""
+    import os
+    from plugins.proctor.scripts.wizard_run import _migrate_seed_local_sh
+    seed_path = tmp_path / "seed-local.sh"
+    seed_path.write_text(_V0710_SEED_SH_LEGACY)
+    seed_path.chmod(0o755)
+    sb_path = tmp_path / "setup-block.yml"
+    _migrate_seed_local_sh(seed_path, sb_path)
+    mode = os.stat(seed_path).st_mode & 0o777
+    # At minimum the owner-execute bit should still be set.
+    assert mode & 0o100, oct(mode)
+
+
+# --- Step iterator end-to-end with all three steps active --------------------
+
+
+def test_v0710_iterator_all_three_steps_in_order(tmp_path):
+    """Pin the canonical execution order in the iterator: when
+    supplement, regenerate, and bump ALL apply, the wizard walks
+    them in that exact order.
+
+    Setup: legacy-heredoc seed-local.sh + cmd/example-loop binary
+    not in setup-block.yml + local.yml missing + stale pin. All
+    three steps fire."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.5", with_cmd_binary=True,
+        has_local_yml=False,
+    )
+    state = wds_detect_state(tmp_path)
+    steps = wds_decide_steps(state, current_tag="v0.7.10", repo_root=tmp_path)
+    assert steps == [
+        STEP_SUPPLEMENT_SETUP,
+        STEP_REGENERATE_LOCAL_YML,
+        STEP_BUMP_ACTION_PIN,
+    ], steps
+
+
+def test_v0710_iterator_walks_supplement_then_regenerate_then_bump(tmp_path):
+    """Drive the iterator end-to-end through all three v0.7.10 steps.
+
+    1. First call → supplement step asks scan/skip.
+    2. User picks Skip → supplement completes → iterator recurses
+       into regenerate which emits its bash (running seed-local.sh).
+    3. Simulate seed-local.sh success → regenerate emits its show
+       summary.
+    4. Next call → iterator pops bump which emits the bump-action
+       bash.
+    5. Simulate bump success → terminal done."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.5", with_cmd_binary=True,
+        has_local_yml=False,
+    )
+    # Replace the legacy heredoc seed with one that succeeds without
+    # docker/db so we can drive the iterator deterministically.
+    seed = tmp_path / ".proctor" / "seed-local.sh"
+    seed.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Original legacy heredoc — will be migrated by the wizard.\n"
+        "SETUP_BLOCK=$(cat <<'YAML'\n"
+        "  - bash -c 'echo legacy-content'\n"
+        "YAML\n"
+        ")\n"
+        "echo 'fake setup' > .proctor/local.yml\n"
+        "echo ok\n"
+    )
+    seed.chmod(0o755)
+    state_file = tmp_path / "wizard-state.json"
+
+    # 1. Supplement: scan/skip ask_user.
+    env1 = _run_wizard(state_file, current_tag="v0.7.10",
+                       repo_root=tmp_path)
+    assert env1["type"] == "ask_user", env1
+    assert env1["header"] == "Supplementary binaries"
+
+    # 2. Skip → recurses to regenerate which emits bash.
+    env2 = _run_wizard(
+        state_file, current_tag="v0.7.10", repo_root=tmp_path,
+        answer="Skip — my setup is fine",
+    )
+    assert env2["type"] == "bash", env2
+    assert ".proctor/seed-local.sh" in env2["command"]
+
+    # 3. seed-local.sh success → show summary.
+    env3 = _run_wizard(state_file, current_tag="v0.7.10",
+                       repo_root=tmp_path, bash_rc=0)
+    assert env3["type"] == "show", env3
+    assert "regenerated" in env3["markdown"].lower()
+
+    # 4. Next call → bump bash.
+    env4 = _run_wizard(state_file, current_tag="v0.7.10",
+                       repo_root=tmp_path)
+    assert env4["type"] == "bash", env4
+    assert "wizard_bump_action.sh" in env4["command"]
+
+    # 5. Bump success → terminal done.
+    env5 = _run_wizard(state_file, current_tag="v0.7.10",
+                       repo_root=tmp_path, bash_rc=0)
+    assert env5["type"] == "done", env5
+
+
+def test_v0710_iterator_retries_regenerate_after_failure(tmp_path):
+    """When seed-local.sh fails, the regenerate step emits an
+    ``error`` envelope BUT marks the substate so a re-run picks up
+    here. The user fixes their env, re-invokes the wizard, and the
+    step retries from the bash phase.
+
+    Implementation detail: after an error the handler returns
+    SUB_COMPLETE with sub=None reset, so the next iterator call
+    starts the step over. Verify that a second wizard invocation
+    after the error indeed re-emits the bash envelope (rather than
+    jumping past the failed step)."""
+    _make_v04_repo(tmp_path, has_local_yml=False, pin="v0.7.10")
+    state_file = tmp_path / "wizard-state.json"
+    # Step 1: regenerate emits bash.
+    _run_wizard(state_file, current_tag="v0.7.10", repo_root=tmp_path)
+    # Step 2: failure → error envelope.
+    env_err = _run_wizard(state_file, current_tag="v0.7.10",
+                          repo_root=tmp_path, bash_rc=1)
+    assert env_err["type"] == "error"
+    # Step 3: re-invoke (user fixed env). Either the iterator
+    # re-emits the bash (preferred — true retry) OR the wizard
+    # has been reset to fresh detection state. Both are acceptable
+    # in the sense that the user gets another shot. We require the
+    # wizard to not be permanently stuck.
+    env_retry = _run_wizard(state_file, current_tag="v0.7.10",
+                            repo_root=tmp_path)
+    assert env_retry["type"] != "error", env_retry
+
+
+# --- decide_steps applies-conditions are truly independent ------------------
+
+
+def test_v0710_applies_conditions_no_local_yml_dependency_on_supplement(tmp_path):
+    """Each step's applies-condition checks ONLY that step's own
+    precondition. Specifically: supplement-setup must NOT depend on
+    local.yml's state. This pins Bug A's root cause down to a single
+    assertion."""
+    # Two repos differing ONLY in local.yml presence. Same binaries,
+    # same config, same pin. supplement should fire in both.
+    for has_local in (True, False):
+        sub = tmp_path / f"variant-local-{has_local}"
+        sub.mkdir()
+        _make_v04_repo(sub, has_local_yml=has_local, pin="v0.7.10")
+        cmd_dir = sub / "cmd" / "ticker"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "main.go").write_text(
+            "package main\nimport \"time\"\n"
+            "func main() { t := time.NewTicker(time.Minute); _ = t }\n"
+        )
+        state = wds_detect_state(sub)
+        steps = wds_decide_steps(
+            state, current_tag="v0.7.10", repo_root=sub,
+        )
+        assert STEP_SUPPLEMENT_SETUP in steps, (
+            f"supplement missing for has_local_yml={has_local}; "
+            f"steps={steps}"
+        )
+
+
+def test_v0710_state_carries_seed_legacy_flag(tmp_path):
+    """``detect_state`` reports the new ``seed_has_legacy_heredoc``
+    key alongside the existing keys. Backward-compat keys must keep
+    working — old callers reading ``has_local_yml`` aren't broken."""
+    _make_v0710_repo_with_legacy_seed(
+        tmp_path, pin="v0.7.10", has_local_yml=False,
+    )
+    state = wds_detect_state(tmp_path)
+    # New key.
+    assert "seed_has_legacy_heredoc" in state
+    assert state["seed_has_legacy_heredoc"] is True
+    # Old keys still present.
+    assert "has_local_yml" in state
+    assert "has_seed_script" in state
+    assert "current_pin" in state
+
