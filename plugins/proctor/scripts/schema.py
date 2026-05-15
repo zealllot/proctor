@@ -656,3 +656,60 @@ def load_config(repo_root: str | os.PathLike[str] = ".") -> dict:
         overlay = yaml.safe_load(local_path.read_text()) or {}
         return _deep_merge_overlay(base, overlay)
     return base
+
+
+# ---------------------------------------------------------------------------
+# .proctor/setup-block.yml validation (v0.7.9+) — canonical setup commands
+# the wizard writes and seed-local.sh reads when regenerating local.yml.
+# ---------------------------------------------------------------------------
+
+def validate_setup_block(content) -> None:
+    """Validate the shape of ``.proctor/setup-block.yml``.
+
+    Accepted shape:
+
+    .. code-block:: yaml
+
+        setup:
+          - <string command>
+          - <string command>
+
+    Required: top-level mapping with EXACTLY one key, ``setup:``.
+    The value must be a list (possibly empty); every list entry must
+    be a non-empty string.
+
+    ``content`` is the parsed YAML (a dict) — the caller is responsible
+    for the file read + YAML parse. Raises :class:`SchemaError` on any
+    deviation.
+
+    The file is intentionally minimal: it's a single block the wizard
+    owns, embedded into ``.proctor/local.yml`` by ``seed-local.sh``.
+    Pre-v0.7.9 the block lived hard-coded inside the seed script's
+    SETUP_BLOCK heredoc, which meant wizard edits to ``setup:`` were
+    silently overwritten on the next seed-script re-run. v0.7.9
+    extracts the block into this file so the wizard owns it
+    durably."""
+    _require(
+        isinstance(content, dict),
+        ".proctor/setup-block.yml: must be a YAML mapping",
+    )
+    extra_keys = set(content.keys()) - {"setup"}
+    _require(
+        not extra_keys,
+        f".proctor/setup-block.yml: unexpected top-level key(s) "
+        f"{sorted(extra_keys)}; only `setup:` is allowed",
+    )
+    _require(
+        "setup" in content,
+        ".proctor/setup-block.yml: must have a top-level `setup:` key",
+    )
+    setup = content["setup"]
+    _require(
+        isinstance(setup, list),
+        ".proctor/setup-block.yml.setup: must be a list of command strings",
+    )
+    for i, cmd in enumerate(setup):
+        _require(
+            isinstance(cmd, str) and cmd.strip(),
+            f".proctor/setup-block.yml.setup[{i}]: must be a non-empty string",
+        )

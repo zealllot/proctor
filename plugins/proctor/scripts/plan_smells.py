@@ -35,34 +35,44 @@ Conservative by design — false positives make the approval gate noisy
 and reviewers learn to ignore warnings. The two patterns are tuned to
 fire on the exact phrasings the planner has produced in practice.
 
-## v0.7.7 — daemon-output coverage
+## v0.7.7+ — supplementary-binary output coverage
 
 The v0.7.6 e2e against mcd-website PR #1126 found that when a
 project ships multiple ``cmd/*/main.go`` binaries (HTTP server +
-publish-loop daemon), PRoctor's local setup only ran ``go run .``
-which started the HTTP server but NOT the daemon. PRs describing
+long-running supplementary binary that re-publishes on a tick),
+PRoctor's local setup only ran ``go run .`` which started the
+HTTP server but NOT the supplementary binary. PRs describing
 "published JSON includes trimmed tokens" never got verified at
-runtime because the daemon that does the publishing wasn't running.
-The planner shipped a lint-only item ("source-level: SplitTags
-calls Trim") and the runtime gap was invisible.
+runtime because the binary that does the publishing wasn't
+running. The planner shipped a lint-only item ("source-level:
+SplitTags calls Trim") and the runtime gap was invisible.
 
-The v0.7.7 fix has two halves:
+The v0.7.7+ fix has two halves:
 
 1. The /proctor:proctor-init wizard now detects ``cmd/*/main.go``
-   binaries and prompts the user to include their daemons in
-   ``.proctor/local.yml setup:`` — see
+   binaries and prompts the user to include their long-running
+   supplementary binaries in ``.proctor/local.yml setup:`` — see
    ``scripts/wizard_detect_binaries.py``.
-2. This module's ``missing-runtime-verify-when-daemon-present``
-   rule fires when ``setup_context.daemons_running`` is non-empty
-   AND the diff touches a file reachable from any of those daemons
-   AND PR body mentions output keywords (publish/JSON/endpoint/
-   output/serialize) AND the plan has no ``tool: bash`` / ``curl``
-   item that curls against the daemon's output URL.
+2. This module's
+   ``missing-runtime-verify-when-supplementary-binary-present``
+   rule (v0.7.9; renamed from ``...-when-daemon-present``) fires
+   when ``setup_context.supplementary_binaries_running`` is
+   non-empty AND the diff touches a file reachable from any of
+   those binaries AND PR body mentions output keywords
+   (publish/JSON/endpoint/output/serialize) AND the plan has no
+   ``tool: bash`` / ``curl`` item that curls against the binary's
+   output URL.
 
-Combined, the wizard half makes runtime verification POSSIBLE (the
-daemon is in setup, so it publishes), and the lint half makes the
-planner ACCOUNTABLE for using that capability when the PR shape
-calls for it.
+v0.7.9 renamed the ``setup_context`` keys for neutrality
+(``daemons_running`` → ``supplementary_binaries_running``,
+``daemon_touched`` → ``supplementary_binary_touched``). The
+v0.7.7/v0.7.8 keys remain accepted as aliases so plans persisted
+under the old names keep working.
+
+Combined, the wizard half makes runtime verification POSSIBLE
+(the supplementary binary is in setup, so it publishes), and the
+lint half makes the planner ACCOUNTABLE for using that capability
+when the PR shape calls for it.
 """
 
 from __future__ import annotations
@@ -364,114 +374,134 @@ def _pr_body_coverage_warnings(
     return warnings
 
 
-# Keywords that signal the PR is talking about a daemon's produced
-# output (published JSON, serialized payload, HTTP response from an
-# output endpoint). When the diff touches daemon-reachable code AND
-# the PR body uses one of these vocabularies, the v0.7.7 rule
-# expects a runtime curl-against-output-URL item.
-_DAEMON_OUTPUT_KEYWORDS_RE = re.compile(
+# Keywords that signal the PR is talking about a supplementary
+# binary's produced output (published JSON, serialized payload, HTTP
+# response from an output endpoint). When the diff touches code
+# reachable from a supplementary binary AND the PR body uses one of
+# these vocabularies, the v0.7.7+ rule expects a runtime
+# curl-against-output-URL item.
+_SUPPLEMENTARY_OUTPUT_KEYWORDS_RE = re.compile(
     r"\b(?:publish(?:ed|ing|es)?|publis[s]?h|serializ(?:ed|es?|ing|ation)|"
     r"output|endpoint|JSON|payload|emit(?:ted|s|ting)?|writ(?:es?|ten|ing)\s+to\s+S3|"
     r"upload(?:ed|s|ing)?\s+to\s+S3|render(?:ed|s|ing)?\s+(?:JSON|response))\b",
     re.IGNORECASE,
 )
 
-# Patterns identifying items that DO verify daemon output at runtime
-# — used to decide whether the rule has been satisfied. We accept
-# either a curl against a URL-shaped value OR a bash item whose
-# how:/what: explicitly mentions polling for daemon-published output.
+# Patterns identifying items that DO verify supplementary-binary
+# output at runtime — used to decide whether the rule has been
+# satisfied. We accept either a curl against a URL-shaped value OR a
+# bash item whose how:/what: explicitly mentions polling for
+# binary-published output.
 _RUNTIME_OUTPUT_VERIFY_RE = re.compile(
     r"\bcurl\b|\bwget\b|\bhttp(?:s)?://|"
     r"\bpoll(?:s|ed|ing)?\s+for\s+(?:publish|output|JSON|S3)|"
-    r"\bawait\s+(?:publish|output)|\bwait\s+for\s+(?:ticker|daemon|publish)",
+    r"\bawait\s+(?:publish|output)|"
+    r"\bwait\s+for\s+(?:ticker|daemon|publish|loop)",
     re.IGNORECASE,
 )
 
 
-def _missing_runtime_verify_when_daemon_present_warnings(
+def _missing_runtime_verify_when_supplementary_binary_present_warnings(
     plan: dict,
     change_map: dict | None,
     setup_context: dict | None,
 ) -> list[str]:
-    """v0.7.7: when the project runs a daemon in local setup AND the
-    diff touches code reachable from that daemon AND the PR body
-    mentions output-producing keywords (publish / JSON / endpoint /
-    serialize / output), the plan MUST include at least one bash /
-    curl item that verifies the daemon's output at runtime.
+    """v0.7.7+: when the project runs a supplementary binary in local
+    setup AND the diff touches code reachable from that binary AND
+    the PR body mentions output-producing keywords (publish / JSON /
+    endpoint / serialize / output), the plan MUST include at least
+    one bash / curl item that verifies the binary's output at
+    runtime.
 
-    The check is the lint half of the "daemons are in setup, plan a
-    real verify item" v0.7.7 contract. Without it, plans silently
-    fall back to lint-only items asserting source-level facts
-    ("SplitTags is called from RebuildBanners") when the actual
-    bug — would the published JSON come out trimmed? — never gets
-    runtime-exercised.
+    The check is the lint half of the "supplementary binaries are in
+    setup, plan a real verify item" v0.7.7 contract. Without it,
+    plans silently fall back to lint-only items asserting
+    source-level facts ("SplitTags is called from RebuildBanners")
+    when the actual bug — would the published JSON come out
+    trimmed? — never gets runtime-exercised.
 
-    Inputs:
-    - ``setup_context.daemons_running`` — list of daemon names the
-      planner parsed from ``.proctor/local.yml`` / ``.proctor/
-      config.yml`` ``setup:`` block.
-    - ``setup_context.daemon_touched`` — list of daemon names whose
-      code path the diff touches (planner-computed; the SKILL
-      prose tells the planner to grep cmd/<name>/main.go imports
-      vs. diff-changed files).
+    Inputs (v0.7.9 keys; v0.7.7/v0.7.8 keys remain accepted as
+    aliases for backward-compat):
+
+    - ``setup_context.supplementary_binaries_running`` — list of
+      binary names the planner parsed from ``.proctor/local.yml`` /
+      ``.proctor/config.yml`` ``setup:`` block.
+      (v0.7.7/v0.7.8 alias: ``daemons_running``.)
+    - ``setup_context.supplementary_binary_touched`` — list of
+      binary names whose code path the diff touches (planner-
+      computed; the SKILL prose tells the planner to grep
+      cmd/<name>/main.go imports vs. diff-changed files).
+      (v0.7.7/v0.7.8 alias: ``daemon_touched``.)
     - ``change_map.pr_context.body`` — PR body prose, scanned for
       output-keyword mentions.
     - ``plan.items[]`` — scanned for any bash / curl item whose
       how/what contains a curl-against-URL pattern.
 
     Rule fires only when all three conditions are met. False
-    positives are kept low by requiring the explicit daemon-touched
-    list rather than guessing from diff paths — the planner
-    already knows which daemons it's worth verifying because the
-    SKILL prose makes it think through that mapping.
+    positives are kept low by requiring the explicit ``touched``
+    list rather than guessing from diff paths — the planner already
+    knows which binaries are worth verifying because the SKILL
+    prose walks it through that mapping.
     """
     if not setup_context or not isinstance(setup_context, dict):
         return []
-    daemons_running = setup_context.get("daemons_running") or []
-    daemon_touched = setup_context.get("daemon_touched") or []
-    if not daemons_running or not daemon_touched:
+    # v0.7.9 keys with v0.7.7/v0.7.8 fallbacks for back-compat.
+    running = (
+        setup_context.get("supplementary_binaries_running")
+        or setup_context.get("daemons_running")
+        or []
+    )
+    touched = (
+        setup_context.get("supplementary_binary_touched")
+        or setup_context.get("daemon_touched")
+        or []
+    )
+    if not running or not touched:
         return []
 
-    # Find a daemon that's both running AND touched by the diff.
-    touched_in_setup = [
-        d for d in daemon_touched if d in daemons_running
-    ]
+    touched_in_setup = [d for d in touched if d in running]
     if not touched_in_setup:
         return []
 
-    # PR body must talk about output. Pull body from the change_map.
     body = ""
     if change_map and isinstance(change_map, dict):
         ctx = change_map.get("pr_context") or {}
         if isinstance(ctx, dict):
             body = ctx.get("body") or ""
-    if not body or not _DAEMON_OUTPUT_KEYWORDS_RE.search(body):
+    if not body or not _SUPPLEMENTARY_OUTPUT_KEYWORDS_RE.search(body):
         return []
 
-    # Look for a runtime verify item — bash or curl tool that talks
-    # about hitting an output URL or polling for daemon output.
     items = plan.get("items") or []
     for it in items:
         if it.get("tool") not in ("bash", "curl"):
             continue
         corpus = _item_corpus(it)
         if _RUNTIME_OUTPUT_VERIFY_RE.search(corpus):
-            return []  # satisfied — at least one runtime verify item
+            return []
 
-    daemons_str = ", ".join(repr(d) for d in touched_in_setup)
+    bins_str = ", ".join(repr(d) for d in touched_in_setup)
     return [
-        f"missing-runtime-verify-when-daemon-present: daemon(s) "
-        f"{daemons_str} are in local setup AND touched by the diff, "
-        f"AND the PR body mentions output (publish/JSON/endpoint/"
-        f"serialize/output keywords), BUT the plan has no bash/curl "
-        f"item that curls against the daemon's output URL or polls "
-        f"for daemon-published output. Add a runtime verify item "
-        f"that waits for the daemon's ticker and asserts the "
+        f"missing-runtime-verify-when-supplementary-binary-present: "
+        f"binary/binaries {bins_str} are in local setup AND touched "
+        f"by the diff, AND the PR body mentions output "
+        f"(publish/JSON/endpoint/serialize/output keywords), BUT "
+        f"the plan has no bash/curl item that curls against the "
+        f"binary's output URL or polls for its published output. "
+        f"Add a runtime verify item that waits for the binary's "
+        f"loop (ticker / scheduler / cron) and asserts the "
         f"published output reflects the PR's stated change. If the "
         f"output URL is genuinely unverifiable in your environment, "
         f"plan a tool='skip' item with reason explaining the gap so "
         f"the report makes it visible — don't silently lint-only."
     ]
+
+
+# v0.7.7/v0.7.8 callers may still reference the old name. Keep an
+# alias so internal callers — and any consumer-side scripts that
+# imported it — don't break.
+_missing_runtime_verify_when_daemon_present_warnings = (
+    _missing_runtime_verify_when_supplementary_binary_present_warnings
+)
 
 
 def _new_symbol_not_exercised_warnings(
@@ -541,14 +571,20 @@ def check(
     inputs are optional — when absent, the v0.7.5 behavior is
     preserved (backward compat).
 
-    v0.7.7+: when ``setup_context`` is provided, the
-    missing-runtime-verify-when-daemon-present check fires when
-    a daemon is in setup AND touched by the diff AND the PR body
-    mentions output keywords AND no runtime curl item exists. The
-    parameter shape is ``{"daemons_running": [...],
-    "daemon_touched": [...]}`` — both lists of daemon names
-    (binary names from ``cmd/<name>/main.go``). Absent: no-op
-    (backward compat)."""
+    v0.7.7+ (v0.7.9 renamed): when ``setup_context`` is provided,
+    the ``missing-runtime-verify-when-supplementary-binary-present``
+    check fires when a supplementary binary is in setup AND touched
+    by the diff AND the PR body mentions output keywords AND no
+    runtime curl item exists. The parameter shape (v0.7.9) is::
+
+        {
+            "supplementary_binaries_running": [...],
+            "supplementary_binary_touched":    [...],
+        }
+
+    The v0.7.7/v0.7.8 key names (``daemons_running`` /
+    ``daemon_touched``) are still accepted as aliases for
+    backward-compat. Absent: no-op."""
     items = plan.get("items") or []
     combined_warnings: list[str] = []
     missing_roundtrip_warnings: list[str] = []
@@ -663,9 +699,10 @@ def check(
     # compat).
     pr_body_warnings = _pr_body_coverage_warnings(plan, change_map)
     new_symbol_warnings = _new_symbol_not_exercised_warnings(plan, diff_text)
-    # v0.7.7 new check — same pattern, no-op when setup_context absent.
-    daemon_verify_warnings = (
-        _missing_runtime_verify_when_daemon_present_warnings(
+    # v0.7.7 new check (v0.7.9 renamed). Same pattern, no-op when
+    # setup_context absent.
+    supplementary_verify_warnings = (
+        _missing_runtime_verify_when_supplementary_binary_present_warnings(
             plan, change_map, setup_context,
         )
     )
@@ -675,14 +712,14 @@ def check(
     coverage_warnings.sort()
     pr_body_warnings.sort()
     new_symbol_warnings.sort()
-    daemon_verify_warnings.sort()
+    supplementary_verify_warnings.sort()
     return (
         combined_warnings
         + missing_roundtrip_warnings
         + coverage_warnings
         + pr_body_warnings
         + new_symbol_warnings
-        + daemon_verify_warnings
+        + supplementary_verify_warnings
     )
 
 
@@ -729,12 +766,15 @@ def _main() -> int:
         "--setup-context",
         default=None,
         help=("Optional path to setup-context.json with shape "
-              "{daemons_running: [...], daemon_touched: [...]}. "
-              "When provided AND both lists overlap AND the PR body "
-              "mentions output keywords, the v0.7.7 "
-              "missing-runtime-verify-when-daemon-present rule fires "
-              "if the plan has no bash/curl item against the "
-              "daemon's output URL."),
+              "{supplementary_binaries_running: [...], "
+              "supplementary_binary_touched: [...]} (v0.7.9; the "
+              "v0.7.7/v0.7.8 keys daemons_running / daemon_touched "
+              "are accepted as aliases). When provided AND both "
+              "lists overlap AND the PR body mentions output "
+              "keywords, the missing-runtime-verify-when-"
+              "supplementary-binary-present rule fires if the plan "
+              "has no bash/curl item against the binary's output "
+              "URL."),
     )
     args = p.parse_args()
 
@@ -772,7 +812,8 @@ def _main() -> int:
                 sys.stderr.write(
                     f"warning: --setup-context at {args.setup_context} "
                     f"could not be parsed ({e}); skipping "
-                    f"missing-runtime-verify-when-daemon-present check.\n"
+                    f"missing-runtime-verify-when-supplementary-"
+                    f"binary-present check.\n"
                 )
     warnings = check(
         plan,

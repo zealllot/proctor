@@ -54,7 +54,7 @@ The script emits one JSON envelope to stdout. Parse the `type` field.
 
 **1b. Branch on `type`** — exactly one action per iteration:
 
-- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. If the envelope has `"multi_select": true` (v0.7.8+, used by the amend-daemons binary-picker), call AskUserQuestion in multi-select mode and join the selected labels with `", "` before passing back as `--answer`. After the user answers, save `PREV_ANSWER=<selected-label(s)>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
+- **`type=ask_user`**: call `AskUserQuestion` with the `header` / `question` / `options` from the envelope. If the envelope has `"multi_select": true` (v0.7.8+, used by the supplementary-binaries picker step), call AskUserQuestion in multi-select mode and join the selected labels with `", "` before passing back as `--answer`. After the user answers, save `PREV_ANSWER=<selected-label(s)>` and `PREV_BASH_RC=` (clear). **Continue to next iteration (1a)** — DO NOT exit the turn after the AskUserQuestion answer; immediately re-invoke `wizard_run.py` with `--answer "$PREV_ANSWER"`.
 
 - **`type=show`**: emit the `markdown` field verbatim to chat. Save `PREV_ANSWER=` (clear) and `PREV_BASH_RC=`. **Continue to next iteration (1a)** in the same response — don't end the turn.
 
@@ -223,17 +223,25 @@ Then continue to normal MODE branching below (re-evaluate the env vars after the
 
 **v0.4.5+ deterministic decision (REQUIRED FIRST STEP)**
 
-Before reading the prose bullets below, **run the decision script** to get an unambiguous MODE pick. The bullets are documentation of what each MODE means; the script is the source of truth for which MODE to use. The v0.3-and-earlier "AI walks bullets, picks first match" flow failed in production because the AI silently skipped bullets keyed on detection-block-computed variables. The script removes that failure mode.
+Before reading the prose bullets below, **run the decision script** to get an unambiguous picklist. The bullets are documentation of what each step means; the script is the source of truth for which step(s) to run. The v0.3-and-earlier "AI walks bullets, picks first match" flow failed in production because the AI silently skipped bullets keyed on detection-block-computed variables. The script removes that failure mode.
+
+v0.7.9 replaced the single-mode dispatcher (`wizard_decide_mode.py`) with a STEP ITERATOR (`wizard_decide_steps.py`) that returns an ORDERED LIST of all applicable steps. Real upgrade scenarios (stale pin AND missing supplementary binary in setup, etc.) trigger multiple steps in one wizard invocation rather than dropping all but one. The single-mode entry point is preserved as a backward-compat shim so older prose snippets keep working.
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_decide_mode.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_decide_steps.py \
     --current-tag "$CURRENT_TAG" \
     --repo-root .
 ```
 
-Output is JSON with shape `{state, mode, next_action, ask_user}`:
-- `mode` is one of: `fresh`, `legacy-migration`, `needs-local-regen`, `bump-only-with-seed`, `migrate`, `bump-only`, `current`
-- `ask_user` is either `null` (no user input needed; execute `next_action` directly) or an object with `{header, question, options[]}` — surface as an AskUserQuestion call.
+Output is JSON with shape `{state, steps, current_tag, mode, next_action, ask_user}`:
+- `steps` is a list of step ids the wizard will run in order. Possible step ids (canonical execution order):
+  - `step_legacy_layout_migrate` — pre-v0.4 `.pr-test.yml` files present.
+  - `step_regenerate_local_yml` — seed-local.sh present but `.proctor/local.yml` missing.
+  - `step_bump_action_pin` — workflow pin is older than `--current-tag`.
+  - `step_supplement_setup` — `cmd/*/main.go` binaries not yet in setup-block.
+  - `step_fresh_install` — none of the above and no `.proctor/` directory.
+- `mode` is the backward-compat alias for the FIRST step in `steps` (or `"current"` when `steps` is empty). Older prose that branches on `mode` keeps working at the single-mode level. New prose should branch on `steps`.
+- `ask_user` is either `null` (no user input needed) or the first step's user-facing question.
 
 **You MUST**:
 1. Run the script.
@@ -878,13 +886,15 @@ Free-text input. Pre-fill example shape: `https://<service>.<env>.<your-org-dev-
 
 Save as `BASE_URL`.
 
-### Step 7.5 — Multi-binary detection (v0.7.7+, fresh mode only)
+### Step 7.5 — Multi-binary detection (v0.7.7+, supplementary binaries)
 
-**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap. The project ships multiple `cmd/*/main.go` binaries — the HTTP server (root `main.go`) AND `cmd/mcd-daemon/main.go` (a 1-minute ticker that republishes banners/categories to S3) AND one-shot CLI tools (`cmd/mcd-publisher`, `cmd/mcd-sitemap`). Pre-v0.7.7 `.proctor/local.yml setup:` ran `go run .` which started the HTTP server but NOT mcd-daemon. PRs that claimed "Published JSON include_tags/exclude_tags are arrays of trimmed tokens" couldn't be verified at runtime because mcd-daemon — the binary that DOES the publishing — wasn't running.
+**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap. The project ships multiple `cmd/*/main.go` binaries — the HTTP server (root `main.go`) AND `cmd/mcd-daemon/main.go` (a 1-minute ticker that republishes banners/categories to S3) AND short single-pass CLI tools (`cmd/mcd-publisher`, `cmd/mcd-sitemap`). Pre-v0.7.7 `.proctor/local.yml setup:` ran `go run .` which started the HTTP server but NOT the supplementary long-running binary. PRs that claimed "Published JSON include_tags/exclude_tags are arrays of trimmed tokens" couldn't be verified at runtime because the binary that DOES the publishing wasn't running.
 
-The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, classify each as `http-server` / `daemon` / `one-shot` / `unknown`, and ask the user which ones PRoctor should start during setup. Daemons selected here get appended to `setup:`, so they run during PRoctor invocations and produce output the planner can runtime-verify with a plain `curl`.
+The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, classify each as `serves-http` / `runs-loop` / `runs-once` / `unknown`, and ask the user which ones PRoctor should start during setup. Supplementary binaries selected here get appended to the `setup:` block, so they run during PRoctor invocations and produce output the planner can runtime-verify with a plain `curl`.
 
-**Runs in `MODE=fresh` (full new install — the v0.7.7 path) AND `MODE=amend-daemons` (v0.7.8+ — existing consumer whose `setup:` lacks `go run ./cmd/` lines).** Skip in `MODE=migrate` (existing consumer; their `setup:` was already set up by hand) and `MODE=bump-only` (pin bump only).
+**Runs in `step_fresh_install` AND `step_supplement_setup`** (the v0.7.9 step-iterator equivalents of the v0.7.8 `fresh` and `amend-daemons` modes). Skipped when no `cmd/*/main.go` binary exists OR when every detected binary is already referenced in the current setup-block.
+
+**Vocabulary note (v0.7.9).** Classification labels and step names are intentionally neutral — they describe what the binary STRUCTURALLY does, not what a particular consumer happens to call it. The consumer-side filenames (`cmd/mcd-daemon`, `cmd/<X>-worker`, `cmd/<X>-publisher`) are kept as-is in evidence and citations because they're the project's actual files. The category labels are the ones the wizard substitutes into prompts.
 
 **Procedure:**
 
@@ -895,51 +905,62 @@ The fix: detect every `cmd/*/main.go` (plus the root `main.go`) at init time, cl
        --repo-root .
    ```
 
-   Output: `{"candidates": [{"path", "binary_name", "looks_like", "evidence"}, ...]}`. Empty `candidates` → skip the whole step (no Go binaries; this is a Node/Python/etc. repo).
+   Output: `{"candidates": [{"path", "binary_name", "looks_like", "evidence"}, ...]}`. `looks_like` is one of `serves-http` / `runs-loop` / `runs-once` / `unknown`. Empty `candidates` → skip the whole step (no Go binaries; this is a Node/Python/etc. repo).
 
 2. Surface as AskUserQuestion (multi-select). Defaults:
-   - All `http-server` entries are REQUIRED (can't deselect — the wizard re-adds them if the user tries).
-   - All `daemon` entries are PRESELECTED (user can untick if they explicitly don't want a daemon in setup — e.g. it requires an external dep they can't easily run locally).
-   - `one-shot` entries are NOT preselected.
+   - All `serves-http` entries are typically already covered by the existing Step 7f wait-loop (the project's primary server). Default OFF (don't add a second listener) unless the user explicitly wants two HTTP servers running.
+   - All `runs-loop` entries are PRESELECTED (typical candidates: they run continuously and emit side effects PRoctor may need to observe).
+   - `runs-once` entries are NOT preselected (short single-pass CLI utilities; user runs on-demand).
    - `unknown` entries are NOT preselected (let the user decide).
 
    Question text:
 
-   > "Detected these binaries under cmd/. Select which PRoctor should start as part of local setup.
+   > "PRoctor detected these additional binaries under cmd/ that aren't currently started in your local setup. Select which should run alongside your main server during PRoctor runs. The classification is heuristic — read each binary's evidence and decide based on YOUR project's intent.
    >
-   > For projects with publish loops / cron / async workers, selecting their daemons here is what makes runtime verification possible — admin save → daemon publishes → PRoctor can curl the output URL.
+   >   [ ] mcd-daemon (runs-loop)
+   >       Evidence: matches 'time.Tick(time.Minute)' + 'utils.RunJob' (×15); also matches 'http.ListenAndServe' — runs-loop precedence applied. Path: cmd/mcd-daemon/main.go
    >
-   > [REQUIRED] root main.go (http-server)
-   > [recommended] cmd/<X>-daemon (looks like: daemon — ticker/job loop detected)
-   > [optional] cmd/<X>-worker (looks like: daemon — workerqueue/goroutine detected)
-   > [skip] cmd/<X>-publisher (looks like: one-shot — no ticker; run on-demand only)
-   > [skip] cmd/<X>-sitemap (looks like: one-shot — short, no ticker)"
+   >   [ ] mcd-form (serves-http)
+   >       Evidence: matches 'router.Run'. Path: cmd/mcd-form/main.go
+   >
+   >   [ ] mcd-app-config-worker (runs-loop)
+   >       Evidence: matches 'time.NewTicker' + 'http.ListenAndServe'. Path: cmd/mcd-app-config-worker/main.go
+   >
+   >   [ ] mcd-sitemap-generator (runs-once)
+   >       Evidence: short (94 lines), no runs-loop pattern. Path: cmd/mcd-sitemap-generator/main.go
+   >
+   >   [ ] mcd-republisher (runs-once)
+   >       Evidence: short (118 lines), no runs-loop pattern. Path: cmd/mcd-republisher/main.go
+   >
+   > Suggestion: 'runs-loop' binaries are typical candidates for inclusion (they run continuously and emit side effects PRoctor may need to observe). 'runs-once' binaries are typically NOT for setup. But your project's intent is authoritative."
 
-   Substitute the actual candidate paths and binary names from the detect output.
+   Substitute the actual candidate paths, binary names, and evidence from the detect output. NO mention of "daemon" / "worker" / "publish" / "cron" anywhere in the user-facing prompt — those are project-specific nouns, not the wizard's category labels. The user-facing CATEGORY is always one of `serves-http` / `runs-loop` / `runs-once` / `unknown`; filenames in evidence stay as the project actually names them.
 
-3. For each selected daemon (not the root http-server — that's covered by the existing Step 7f wait-loop pattern), generate two lines for `.proctor/local.yml setup:`:
+3. For each selected binary (not the root `serves-http` — that's covered by the existing Step 7f wait-loop), generate two lines for `.proctor/setup-block.yml setup:`:
 
    ```yaml
    - bash -c '[ -f /tmp/proctor-<NAME>.pid ] && kill "$(cat /tmp/proctor-<NAME>.pid)" 2>/dev/null; true'
    - bash -c 'set -a; . ./dev_env_local 2>/dev/null || . ./dev_env 2>/dev/null || true; set +a; nohup go run ./<PATH> > /tmp/proctor-<NAME>.log 2>&1 & echo $! > /tmp/proctor-<NAME>.pid'
    ```
 
-   Where `<NAME>` is the binary's directory name (e.g. `mcd-daemon` from `cmd/mcd-daemon/main.go` → `proctor-mcd-daemon.pid`) and `<PATH>` is the candidate's `path` field. The pidfile names are scoped per-binary so multiple daemons don't collide.
+   Where `<NAME>` is the binary's directory name (e.g. `mcd-daemon` from `cmd/mcd-daemon/main.go` → `proctor-mcd-daemon.pid`) and `<PATH>` is the candidate's `path` field. The pidfile names are scoped per-binary so multiple supplementary processes don't collide.
 
-4. After the daemon `go run` lines, add a final `sleep 3` line. Daemons run async and don't expose HTTP, so the wait-for-port loop pattern doesn't work — give them 3 seconds to get past their init (DB connection, config load, first ticker setup) before tests start.
+4. After the supplementary `go run` lines, add a final `sleep 3` line if it isn't already in the setup-block. Long-running supplementary binaries typically don't expose an HTTP wait endpoint, so the wait-for-port pattern doesn't work — give them 3 seconds to get past their init (DB connection, config load, first loop iteration) before tests start.
 
-5. The existing wait-for-port loop for the http-server (Step 7f) stays unchanged. The daemon lines slot in AFTER the http-server wait-loop and BEFORE the test execution begins.
+5. The existing wait-for-port loop for the `serves-http` main server (Step 7f) stays unchanged in `.proctor/setup-block.yml`. The supplementary lines slot in AFTER the http wait-loop and BEFORE the test execution begins.
 
-**Wiring note for the state machine.** `MODE=fresh` still falls back to legacy SKILL.md prose for the full install. But v0.7.8 adds a NEW `MODE=amend-daemons` that the state machine drives end-to-end for an existing v0.7.6-era consumer (local.yml exists, `setup:` is non-empty, no `go run ./cmd/` line):
+6. v0.7.9: the wizard writes to `.proctor/setup-block.yml` (the canonical source) rather than directly editing `.proctor/local.yml`. `seed-local.sh` reads from `.proctor/setup-block.yml` when regenerating `.proctor/local.yml`, so the wizard's amendments survive seed-script re-runs. (Pre-v0.7.9, the seed script had the setup block hard-coded in a heredoc — wizard edits to `local.yml` were silently overwritten on next seed re-run.) After writing, the wizard emits a `show` envelope: "Wrote `.proctor/setup-block.yml` with N supplementary binaries. Run `./.proctor/seed-local.sh` to regenerate `.proctor/local.yml` and pick up the new setup."
 
-1. State `INIT` → `wizard_decide_mode.py` returns `mode=amend-daemons` → wizard emits `ask_user` (`header=Daemon scan`) offering Scan / Skip.
-2. If user picks "Skip" → wizard emits `done`.
+**Wiring note for the step iterator (v0.7.9).** The wizard's step iterator (`scripts/wizard_run.py`) drives `step_supplement_setup` end-to-end for existing consumers whose setup-block lacks one or more `cmd/*/main.go` references:
+
+1. Iterator pops `step_supplement_setup` from pending_steps → wizard emits `ask_user` (`header=Supplementary binaries`) offering Scan / Skip.
+2. If user picks "Skip" → step completes with outcome `skipped`. Iterator moves on; if no more steps are pending, the terminal `done` fires.
 3. If user picks "Scan" → wizard emits a `bash` envelope running `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/wizard_detect_binaries.py --repo-root . > /tmp/proctor-wizard-binaries.json` and the AI runs it.
-4. After `--bash-rc 0` → wizard reads the JSON, sorts candidates (daemon → unknown → http-server → one-shot), emits `ask_user` (`header=Daemons to start in setup`, `multi_select=true`).
-5. AI calls `AskUserQuestion` in multi-select mode. AI passes the user's picks back as `--answer "label1, label2"` (comma-separated). Wizard amends `.proctor/local.yml setup:` with the two-line group per pick (kill + start) via the helper `_amend_local_yml_with_daemons` (string-level edit; preserves comments; idempotent — re-running skips entries already in setup).
-6. Wizard emits `done` with a summary citing the added binaries.
+4. After `--bash-rc 0` → wizard reads the JSON, sorts candidates (`runs-loop` → `unknown` → `serves-http` → `runs-once`), emits `ask_user` (`header=Supplementary binaries to start in setup`, `multi_select=true`).
+5. AI calls `AskUserQuestion` in multi-select mode. AI passes the user's picks back as `--answer "label1, label2"` (comma-separated). Wizard writes `.proctor/setup-block.yml` with one kill+start pair per pick (idempotent — re-running skips entries already in the block) AND amends `.proctor/local.yml setup:` for the current run.
+6. Step completes with outcome `wrote-block-added-<N>-local-added-<M>`. Iterator moves on; the final `done` envelope summarises all completed steps.
 
-For `MODE=fresh` the legacy SKILL.md prose still applies (Step 7.5 procedure above runs in the AI's hands, then Step 8c-pre writes the seed script). State-machine integration of fresh-mode is deferred.
+For the `step_fresh_install` path, the legacy prose in this file (Sections 1–8) still applies. Step iterator integration for fresh-mode is deferred.
 
 ### Step 7f — Confirm setup commands + env source (v0.3.41+)
 
@@ -1473,41 +1494,58 @@ Substitute the wizard's discovered values for `<ACCOUNTS[i].name>`, `<APP_PORT>`
 
 Make the script executable: `chmod +x <path-to-script>`.
 
-#### `STACK_AWARE_SETUP_COMMANDS` to embed in `.proctor/local.yml`
+#### `STACK_AWARE_SETUP_COMMANDS` and `.proctor/setup-block.yml` (v0.7.9+)
 
-Re-use the same template from Section 8b's `.proctor/local.yml.example` setup block — same pidfile pattern, same wait-loop, same stack-specific build/run command. Compose the list:
+v0.7.9 split the setup-commands ownership: `.proctor/setup-block.yml` is the canonical source the wizard writes, and `seed-local.sh` READS that file when regenerating `.proctor/local.yml`. Before v0.7.9 the seed script had the setup block hard-coded inside its `SETUP_BLOCK` heredoc — so when the wizard amended `.proctor/local.yml` (e.g. to add a supplementary `runs-loop` binary), the next `./.proctor/seed-local.sh` run silently overwrote the amendment with the heredoc default.
 
-```
-- docker compose -f <COMPOSE_HIT> up -d              (if COMPOSE_HIT)
-- bash -c 'for i in $(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'  (if COMPOSE_HIT)
-- bash -c '[ -f /tmp/proctor-<REPO_NAME>.pid ] && kill "$(cat /tmp/proctor-<REPO_NAME>.pid)" 2>/dev/null; true'
-- <build commands per stack — go mod download / pnpm install / pip install -e .>
-- bash -c '<source-dev-env if exists> nohup <run command> > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
-- bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:<APP_PORT><AUTH_LOGIN_URL> >/dev/null 2>&1 && break; sleep 1; done || { tail -50 /tmp/proctor-<REPO_NAME>.log; exit 1; }'
-```
+The v0.7.9 contract:
 
-These commands go INSIDE the seed script's heredoc (each preceded by `echo "  - ..."`) and **escape the heredoc properly**: use a single-quoted heredoc delimiter (`<<'YAML'`) for the YAML emission OR consistently escape `$` to `\$` where the bash expansion should happen at PRoctor RUN time, not at seed-script run time. Concretely: `$(seq 1 30)`, `$i`, `$(cat ...)` in the setup commands must REMAIN AS LITERAL TEXT inside the YAML so PRoctor's executor can run them later — they're not meant to expand when the seed script writes the file.
+- **`.proctor/setup-block.yml`** — committed alongside the rest of the consumer's PRoctor files. Schema:
 
-To make that bulletproof, generate the setup commands as a single quoted heredoc'd block:
+  ```yaml
+  # AUTO-MANAGED by /proctor:proctor-init wizard. Hand edits will be
+  # honored until the next wizard run that touches the supplementary-
+  # binaries step.
+  setup:
+    - docker compose -f docker-compose.yml up -d
+    - bash -c 'for i in $(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'
+    - bash -c '[ -f /tmp/proctor-<REPO_NAME>.pid ] && kill "$(cat /tmp/proctor-<REPO_NAME>.pid)" 2>/dev/null; true'
+    - go mod download
+    - bash -c 'set -a; . ./dev_env_local 2>/dev/null || . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+    # ... step_supplement_setup appends `- bash -c '... go run ./cmd/<NAME>/main.go ...'` pairs here ...
+    - bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:<APP_PORT><AUTH_LOGIN_URL> >/dev/null 2>&1 && break; sleep 1; done || { echo "server failed"; exit 1; }'
+    - sleep 3
+  ```
 
-```bash
-# REPO_NAME, APP_PORT, AUTH_LOGIN_URL, DB_PORT come from the wizard's
-# earlier discovery; substitute them BEFORE feeding to the heredoc so
-# the literal values land in the emitted YAML.
-SETUP_BLOCK=$(cat <<YAML
-  - docker compose -f docker-compose.yml up -d
-  - bash -c 'for i in \$(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'
-  - bash -c '[ -f /tmp/proctor-${REPO_NAME}.pid ] && kill "\$(cat /tmp/proctor-${REPO_NAME}.pid)" 2>/dev/null; true'
-  - go mod download
-  - bash -c 'set -a; . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-${REPO_NAME}.log 2>&1 & echo \$! > /tmp/proctor-${REPO_NAME}.pid'
-  - bash -c 'for i in \$(seq 1 60); do curl -fsS http://localhost:${APP_PORT}${AUTH_LOGIN_URL} >/dev/null 2>&1 && break; sleep 1; done || { tail -50 /tmp/proctor-${REPO_NAME}.log; exit 1; }'
-YAML
-)
-```
+  `scripts/schema.py::validate_setup_block` enforces top-level key is exactly `setup:` with a list of non-empty strings.
 
-`${REPO_NAME}` / `${APP_PORT}` / `${AUTH_LOGIN_URL}` / `<DB_PORT>` are placeholders — the wizard substitutes them at generation time. The `\$` escapes preserve `$i`, `$(seq ...)`, `$(cat ...)` as literal text inside the emitted YAML so PRoctor's executor can run them later.
+- **`seed-local.sh`** READS `.proctor/setup-block.yml` when regenerating `.proctor/local.yml`. Specifically, when the wizard's seed-script-emit step composes the YAML, instead of dumping a hardcoded heredoc it does:
 
-Then in the YAML emission section: `echo "$SETUP_BLOCK"` to dump it verbatim. The single-quoted heredoc preserves `$i`, `$(seq ...)`, `$(cat ...)` as literal text.
+  ```bash
+  if [ -f .proctor/setup-block.yml ]; then
+      # Strip the leading `setup:` line; keep the `  - ...` bullets.
+      SETUP_BLOCK=$(awk '/^setup:/,0' .proctor/setup-block.yml | tail -n +2)
+  else
+      # Fallback (first-time install / file deleted): use the
+      # wizard-template default — just the main server, no
+      # supplementary binaries.
+      SETUP_BLOCK=$(cat <<'YAML'
+    - docker compose -f docker-compose.yml up -d
+    - bash -c 'for i in $(seq 1 30); do nc -z localhost <DB_PORT> && break; sleep 1; done'
+    - bash -c '[ -f /tmp/proctor-<REPO_NAME>.pid ] && kill "$(cat /tmp/proctor-<REPO_NAME>.pid)" 2>/dev/null; true'
+    - go mod download
+    - bash -c 'set -a; . ./dev_env_local 2>/dev/null || . ./dev_env 2>/dev/null || true; set +a; nohup go run . > /tmp/proctor-<REPO_NAME>.log 2>&1 & echo $! > /tmp/proctor-<REPO_NAME>.pid'
+    - bash -c 'for i in $(seq 1 60); do curl -fsS http://localhost:<APP_PORT><AUTH_LOGIN_URL> >/dev/null 2>&1 && break; sleep 1; done || { echo "server failed"; exit 1; }'
+  YAML
+  )
+  fi
+  ```
+
+  The single-quoted heredoc delimiter (`<<'YAML'`) preserves `$i`, `$(seq ...)`, `$(cat ...)` as literal text so PRoctor's executor can run them later (they aren't meant to expand when the seed script writes the local.yml file).
+
+`<REPO_NAME>` / `<APP_PORT>` / `<AUTH_LOGIN_URL>` / `<DB_PORT>` are placeholders the wizard substitutes at generation time (when the wizard FIRST creates `.proctor/setup-block.yml`). Subsequent wizard runs amend the existing file without touching those baked-in values.
+
+Then in the YAML emission section: `echo "$SETUP_BLOCK"` to dump it verbatim into `.proctor/local.yml`'s setup block. This single source-of-truth pattern means wizard amendments survive seed-script re-runs.
 
 ### 8c — Update `.gitignore`
 

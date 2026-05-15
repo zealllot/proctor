@@ -76,26 +76,26 @@ Skipped items come in four flavors — render each distinctly so the reviewer do
 - **`reason: "data-dep-failed: t-007"`** → `⏭ skipped (upstream t-007 failed)`. Test was INVALIDATED by an intra-run sibling. Reviewer should fix the upstream first.
 - **`reason: "data-template-missing: t-007.created_id"`** → `⏭ skipped (upstream t-007 didn't produce created_id)`. Same family — producer broke its contract; reviewer jumps to t-007's row.
 - **`reason: "precondition-not-met"`** (v0.3.29+) → `⚠ skipped (environment precondition failed)`. Different cause: the test's assumed starting state is missing — this is an ENVIRONMENT GAP, not a bug in the diff under test. Render the failing command and its exit code from `evidence` so the reviewer can rerun PRoctor against a properly seeded environment.
-- **`reason: "no-daemon-in-setup"`** (v0.7.7+) → `⚠ skipped (daemon not in local setup)`. The planner wanted to runtime-verify a daemon-produced output (published JSON, S3 object, periodic emit) but the daemon binary isn't started by `.proctor/local.yml setup:`. See the "Runtime verification gaps" section below for the consolidated view.
+- **`reason: "no-supplementary-binary-in-setup"`** (v0.7.7+; renamed from `no-daemon-in-setup` in v0.7.9) → `⚠ skipped (supplementary binary not in local setup)`. The planner wanted to runtime-verify a supplementary-binary-produced output (published JSON, S3 object, periodic emit) but the binary isn't started by `.proctor/local.yml setup:`. See the "Runtime verification gaps" section below for the consolidated view. The v0.7.7/v0.7.8 skip reason `no-daemon-in-setup` is still accepted as a synonym for backward-compat with persisted plan files.
 
 Don't render any of these collapsed identically to ordinary opt-out `skipped` items (`tool: "skip"` or `status: "skipped"` without a reason).
 
 ## Runtime verification gaps section (v0.7.7+)
 
-When test-results contains one or more items with `reason: "no-daemon-in-setup"`, render a dedicated section RIGHT BEFORE the per-item sections (after the header and visual-regression sections). This consolidates the "wanted to runtime-verify but couldn't" gaps so the reviewer sees the structural blocker — not just N skipped items scattered through the body.
+When test-results contains one or more items with `reason: "no-supplementary-binary-in-setup"` (or the v0.7.7/v0.7.8 alias `"no-daemon-in-setup"`), render a dedicated section RIGHT BEFORE the per-item sections (after the header and visual-regression sections). This consolidates the "wanted to runtime-verify but couldn't" gaps so the reviewer sees the structural blocker — not just N skipped items scattered through the body.
 
 ```markdown
 ### Runtime verification gaps
 
-The planner wanted to runtime-verify these daemon-produced outputs but the daemon binaries aren't started by `.proctor/local.yml setup:`. Affected items ran a lint-only fallback instead.
+The planner wanted to runtime-verify these binary-produced outputs but the corresponding `cmd/<NAME>/main.go` binaries aren't started by `.proctor/local.yml setup:`. Affected items ran a lint-only fallback instead.
 
 - `<binary-name-1>` (item `<t-id>`): would run `<one-line how:>` — skipped because `<binary-name-1>` is not in setup.
 - `<binary-name-2>` (item `<t-id>`): would run `<one-line how:>` — skipped because `<binary-name-2>` is not in setup.
 
-**To enable runtime verification**, re-run `/proctor:proctor-init` and select the listed daemon binaries when prompted at the "which binaries should PRoctor start" step. PRoctor will append `go run ./cmd/<name>` lines to your `.proctor/local.yml setup:`, the daemons will run during the next PRoctor invocation, and these items will execute as planned instead of skipping.
+**To enable runtime verification**, re-run `/proctor:proctor-init` and select the listed binaries when prompted at the supplementary-binaries step. PRoctor will append `go run ./cmd/<name>` lines to `.proctor/setup-block.yml` (and amend `.proctor/local.yml setup:` for the current run), the binaries will run during the next PRoctor invocation, and these items will execute as planned instead of skipping.
 ```
 
-Skip the whole section when no item has `reason: "no-daemon-in-setup"`.
+Skip the whole section when no item has either skip reason. The section is RENAMED ONLY internally — the section's prose `### Runtime verification gaps` header is already generic (v0.7.7) and stays unchanged.
 
 Derive the binary name from the item's `rationale` or `how:` — the planner cites it explicitly. If multiple items reference the same binary, list each item under that binary (don't merge across binaries — they're separate verification gaps).
 
