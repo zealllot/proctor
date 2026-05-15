@@ -61,27 +61,48 @@ Output: a single `TestResults` JSON object.
 
    In CI mode (no local dev server — `auth:` present, `setup:` empty), skip this step entirely. The CI test env is already deployed at the PR's SHA via the workflow.
 
-2b. **Run setup** from the merged config, with cwd set to `$WORKTREE_DIR`. Each command via Bash. If any exits non-zero → abort with `aborted: "setup-failed"`.
+2b. **Bring up the dev environment** from the merged config, with cwd set to `$WORKTREE_DIR`. Each command via Bash.
 
    The merged config is `.proctor/config.yml` overlaid by `.proctor/local.yml`
    when the latter exists (the file is gitignored — only developers
-   running PRoctor locally will have one). In practice:
+   running PRoctor locally will have one). Precedence (v0.7.11+):
 
-   - **CI runs** (deployed test env, `auth:` present, no `setup:` in
-     `.proctor/config.yml`, no `.proctor/local.yml`) → setup is empty, skip
-     this step. Auth in step 3 logs into the already-deployed server.
-   - **Local runs** (developer's `claude /proctor:proctor`, where
-     `.proctor/local.yml` provides `setup:` to bring up the dev
-     server) → setup runs, restarts the local server fresh each
-     invocation, THEN auth logs in.
-   - **Legacy CI bring-up** (v0.2.x consumers, no `auth:`, just
-     `setup:` + `base_url`) → setup runs, auth is skipped.
+   1. **`dev_launcher` block** (recommended, new in v0.7.11). When
+      `.proctor/config.yml.dev_launcher.start` is set, run that ONE
+      command via Bash. Then, when `dev_launcher.wait_for` is set,
+      poll it in a loop (every 1s, exit 0 wins) until either it
+      succeeds or `wait_timeout_seconds` elapses (default 60).
+      When `wait_for` is unset, sleep 2s as a basic settling pause.
+      If `start` exits non-zero OR the readiness poll times out →
+      abort with `aborted: "dev-launcher-failed"`.
 
-   Setup commands typically include a "kill previous PRoctor-managed
-   PID via pidfile" idiom so every invocation gets a fresh server
-   without colliding with other PRoctor instances or the dev's own
-   processes. The wizard's `.proctor/local.yml.example` ships this
-   pattern by default.
+   2. **Legacy `setup:` array** (v0.7.10-and-earlier, preserved).
+      When `dev_launcher` is absent but `.proctor/config.yml setup:`
+      or `.proctor/local.yml setup:` is a non-empty list, run each
+      command in order via Bash. If any exits non-zero → abort
+      with `aborted: "setup-failed"`.
+
+   3. **Neither configured** → error: "PRoctor doesn't know how to
+      start your dev env. Run `/proctor:proctor-init` and configure
+      either `dev_launcher` or `setup:`."
+
+   In practice:
+
+   - **CI runs** (deployed test env, `auth:` present, neither
+     `dev_launcher` nor `setup:`) → bring-up is empty, skip this
+     step. Auth in step 3 logs into the already-deployed server.
+   - **Local runs with dev_launcher** (recommended) → `start` runs
+     once, readiness check passes, tests run. After tests `stop`
+     runs (if set) regardless of pass/fail.
+   - **Local runs with legacy `setup:`** → setup commands run as
+     before. No auto-teardown (the legacy path never had one — the
+     consumer's own setup typically embeds a "kill previous
+     PRoctor-managed PID via pidfile" idiom for re-runs).
+
+   Don't try to be clever about which path to pick — read
+   `dev_launcher` first; if absent, fall through to `setup:`. Both
+   paths can coexist on disk during a migration; `dev_launcher`
+   wins when both are present.
 
 3. **Login per account, group items by `as_account`** (v0.3.0+, only when
    `.proctor/config.yml.auth` is set). For each distinct `as_account` value
@@ -272,10 +293,18 @@ Exception: the dev server's `go run` / `pnpm dev` MUST run from inside the workt
      `render_item_artifacts.py` will surface the missing artifact in
      the per-item section so the human reviewer sees what's absent.
 
-5. After all items finish, **clean up**: close all browser contexts;
-   in legacy mode, also kill setup processes by sending SIGTERM to
-   the process group started by setup commands (use `setsid` to start
-   them; track the PIDs in `<logs_dir>/setup.pids`).
+5. After all items finish, **clean up**: close all browser contexts.
+
+   **Dev-environment teardown** (precedence mirrors step 2b):
+
+   - **`dev_launcher.stop`** (v0.7.11+) — when set, run the command
+     via Bash regardless of test pass/fail. Don't fail the run on
+     a non-zero exit; surface the rc in the run log and continue.
+   - **Legacy `setup:` mode** — kill setup processes by sending
+     SIGTERM to the process group started by setup commands (use
+     `setsid` to start them; track the PIDs in
+     `<logs_dir>/setup.pids`). Preserved for v0.7.10-and-earlier
+     consumers.
 
    Then **tear down the worktree** (v0.3.37+) regardless of pass/fail:
 

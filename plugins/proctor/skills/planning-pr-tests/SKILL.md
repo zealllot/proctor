@@ -152,70 +152,33 @@ The followed docs feed the same `rationale:` discipline above — when a plannin
    - When `requirement_hints` and the diff disagree, plan items for BOTH: one that verifies the body's stated behavior, one that verifies the diff's actual behavior. The mismatch is itself useful signal in the report.
    - If `pr_context` is empty or absent, fall back to inferring tests from the diff alone — same as before.
 
-## Detect which supplementary binaries run in local setup (v0.7.7+)
+## Trust the project's dev_launcher (v0.7.11+)
 
-**Why this step exists.** The v0.7.6 e2e against mcd-website PR #1126 found a real gap: projects with multiple `cmd/*/main.go` binaries (HTTP server + a long-running supplementary binary on a 1-minute ticker + a single-pass sitemap CLI) typically had ONLY the HTTP server in `.proctor/local.yml setup:`. PRs claiming "Published JSON include_tags is an array of trimmed tokens" couldn't be verified at runtime because the supplementary binary doing the publishing wasn't started; the planner had to fall back to a lint-only "grep that the wiring exists" item and the actual published-JSON-on-S3 contract went unchecked.
+v0.7.7–v0.7.10 had this SKILL walk `.proctor/local.yml setup:` looking for `go run ./cmd/<name>` lines to know which supplementary binaries the project starts, then mapped diff hunks against `cmd/<name>/main.go` imports to decide which binaries the diff might affect at runtime. **All of that is gone in v0.7.11.** The right model: the project's launcher (`./dev.sh all` / `make dev` / `pnpm dev` / etc., declared in `.proctor/config.yml.dev_launcher.start`) brings up whatever processes the project owner says belong in a dev environment. The planner doesn't need to know what those processes are — it just needs to know whether the environment is up.
 
-v0.7.7's wizard half (`/proctor:proctor-init`) now offers to bring up ALL the project's long-running supplementary binaries in setup. The planner half — this section — uses that signal to plan a real runtime verify item when the diff touches code reachable from a supplementary binary.
+**What the planner reads.** When `.proctor/config.yml.dev_launcher` is set:
 
-**Procedure.** Before writing items, read `.proctor/local.yml` (when local mode) or `.proctor/config.yml` (CI mode); parse the `setup:` array; classify each command by the binary it invokes:
+- `dev_launcher.start` — the project's launch command. Informational only; the planner doesn't substitute or analyze it.
+- `dev_launcher.wait_for` (optional) — a bash command that exits 0 when the environment is fully ready. Useful as a `verify_precondition_via` value on plan items that depend on the env being up before the assertion can run.
 
-- `go run . <args>` → HTTP server (the repo's main binary). Don't list separately — that's the default.
-- `go run ./cmd/<name>` or `go run ./cmd/<name> <args>` → record `<name>` as a supplementary binary running in setup.
-- Skip docker-compose lines, sleep / wait loops, pidfile cleanup commands, db-seed scripts, env-source lines — they aren't supplementary binaries.
-
-Build a `setup_context.supplementary_binaries_running = ["<name1>", "<name2>"]` list. (v0.7.7/v0.7.8 also accepted the key `daemons_running` — kept as a backward-compat alias in `plan_smells.py`.)
-
-Then for each binary in `supplementary_binaries_running`, determine whether the diff touches code reachable from `cmd/<name>/main.go`:
-
-- File under `cmd/<name>/` itself → directly reachable.
-- File under `models/` / `services/` / `pkg/` that's imported (transitively) by `cmd/<name>/main.go` → reachable. Heuristic: grep `cmd/<name>/main.go` for `import` lines, follow one level (read each imported package's files for the changed file's package).
-- File under `cmd/<other>/` only → NOT reachable from this binary.
-- File under `web/` / `templates/` / `frontend/` → typically frontend-only; reachable only if `cmd/<name>/main.go` serves those (unusual for runs-loop binaries).
-
-Record the set as `setup_context.supplementary_binary_touched` (v0.7.7/v0.7.8 alias: `daemon_touched`).
-
-**When `supplementary_binary_touched ∩ supplementary_binaries_running` is non-empty AND the PR body mentions output keywords** (publish / JSON / endpoint / output / serialize / emit / "writes to S3"), plan a runtime verify item — the supplementary binary is in setup, it WILL produce output, and the PR is claiming that output looks a specific way. Don't lint-only it. The planner's rationale should name the specific binary (e.g. "depends on mcd-daemon being in setup for its publish ticker to fire") so reviewers see the consumer-specific cause, but the SKILL-LEVEL CATEGORY here stays generic (`supplementary binary`).
-
-The item's shape:
+When the wait_for command is set, plan items that hit the live env can reference it as a precondition:
 
 ```jsonc
 {
-  "id": "t-N",
-  "what": "HAPPY: published output reflects PR changes after supplementary binary's loop iteration",
-  "how": "for i in $(seq 1 120); do RESP=$(curl -sf \"<published-url>\"); if [ -n \"$RESP\" ] && echo \"$RESP\" | jq -e '<assertion derived from PR body>'; then echo OK; break; fi; sleep 1; done; [ -n \"$RESP\" ] || { echo FAIL; exit 1; }",
-  "tool": "bash",
-  "category": "api",
-  "risk": "high",
-  "depends_on": [],
-  "rationale": "Auto-planned because `<binary-name>` is in setup_context.supplementary_binaries_running AND diff touches <file-list>. PR body says <quoted output claim>; the binary should publish that within its loop interval (60s for a 1-minute ticker; the loop above tries for 120s as a safety margin)."
+  "id": "t-005",
+  "what": "HAPPY: ...",
+  "verify_precondition_via": "curl -fsS http://localhost:9801/healthz >/dev/null 2>&1"
+  // ^ pull this from dev_launcher.wait_for verbatim
 }
 ```
 
-Derive `<published-url>` from the diff or repo conventions (search for `apiURL = ` / `publishedURL` / `bucket.PutObject` patterns; ask `BASE_URL` env-var only if both lead nowhere). Derive `<assertion derived from PR body>` from the body's concrete claim — e.g. "include_tags is a JSON array" → `jq -e '.include_tags | type == "array"'`.
+This makes "dev env didn't come up" distinguishable from "the change under test is broken" in the report (the precondition-not-met skip path was added in v0.3.29 — see schema's `verify_precondition_via` field).
 
-**When the necessary supplementary binary is NOT in `supplementary_binaries_running`** but the diff touches code under `cmd/<name>/` or paths reachable from it AND the PR body mentions output keywords, the planner MUST NOT silently lint-only. Do BOTH:
+**What the planner does NOT do anymore.** No `cmd/*/main.go` discovery, no import-graph reachability analysis, no `supplementary_binaries_running` / `supplementary_binary_touched` lists, no `setup_context` JSON. The deleted `plan_smells.py` rule (`missing-runtime-verify-when-supplementary-binary-present`) is gone — `pr-body-coverage` already catches "PR body mentions output X that no plan item verifies" generically. If a PR claims published output from a long-running process, plan a `bash` item that polls the output URL the same way you'd plan any other runtime-verify item; you don't need to know whether the underlying process is a daemon, worker, or scheduler — the project's launcher already started it.
 
-1. Plan the lint item (source-level wire-up — like v0.7.6's t-010 style: grep that the changed function is called from the supplementary binary's loop body).
-2. AND emit an additional item with `tool: "skip"` and `reason: "no-supplementary-binary-in-setup"` pointing at the missing binary. This makes the gap visible in the report rather than hiding it under a passing lint-only.
+**Legacy `setup:` array consumers.** Same advice — the planner reads `.proctor/local.yml setup:` only as a hint about base_url / wait-loops. The actual content of the setup array (whether it starts one binary or eight) is opaque to the planner.
 
-```jsonc
-{
-  "id": "t-N+1",
-  "what": "SKIPPED: runtime verify against <binary-name>'s published output",
-  "how": "Would run: curl <published-url> | jq <assertion>. Skipped because `<binary-name>` is NOT in .proctor/local.yml setup: — the binary isn't started during PRoctor runs, so its output doesn't exist to verify.",
-  "tool": "skip",
-  "reason": "no-supplementary-binary-in-setup",
-  "category": "api",
-  "risk": "high",
-  "depends_on": [],
-  "rationale": "Surfacing the gap explicitly. To enable runtime verification, re-run `/proctor:proctor-init` and select the `<binary-name>` binary when prompted."
-}
-```
-
-The reporter skill (see `reporting-pr-test-results/SKILL.md`) collects every item with `reason: "no-supplementary-binary-in-setup"` into a dedicated "Runtime verification gaps" section so the reviewer sees the missing-binary problem AND the path to fix it (re-run the init wizard).
-
-`plan_smells.py`'s `missing-runtime-verify-when-supplementary-binary-present` rule (v0.7.7+; renamed from `missing-runtime-verify-when-daemon-present` in v0.7.9) checks the satisfied half — it fires WARN when the supplementary binary IS in setup AND the diff touches it AND the PR talks about output AND no bash/curl item verifies the published output. The check uses the `setup_context` JSON the planner emits.
+**Backward compat for the deleted `no-supplementary-binary-in-setup` skip reason.** Plans written under v0.7.7–v0.7.10 may still contain `skip` items with `reason: "no-supplementary-binary-in-setup"`. The reporter still groups those into "Runtime verification gaps" — see `reporting-pr-test-results/SKILL.md`. New plans should not use this reason; if the PR genuinely can't be runtime-verified, use a generic `reason: "no-runtime-verify-possible"` and explain in `how:`.
 
 ## Coverage balance (read this BEFORE writing the items array)
 
@@ -792,11 +755,10 @@ After writing `test-plan.json` and BEFORE returning to the orchestrator, you MUS
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/plan_smells.py --strict \
     --change-map .proctor/runs/<run-id>/change-map.json \
     --diff .proctor/runs/<run-id>/diff.patch \
-    --setup-context .proctor/runs/<run-id>/setup-context.json \
     < .proctor/runs/<run-id>/test-plan.json
 ```
 
-The `--change-map` and `--diff` flags (v0.7.6+) enable the additional `pr-body-coverage` and `new-symbol-not-exercised` checks. The `--setup-context` flag (v0.7.7+; rule renamed in v0.7.9) enables the `missing-runtime-verify-when-supplementary-binary-present` check — the file should have shape `{"supplementary_binaries_running": [...], "supplementary_binary_touched": [...]}` produced by the supplementary-binary-detection step above. (The v0.7.7/v0.7.8 keys `daemons_running` / `daemon_touched` are still accepted as aliases.) When any of these files is absent (legacy runs), the corresponding check silently no-ops and only the v0.7.5 plan-internal lints run.
+The `--change-map` and `--diff` flags (v0.7.6+) enable the additional `pr-body-coverage` and `new-symbol-not-exercised` checks. (The v0.7.7–v0.7.10 `--setup-context` flag is still parsed for CLI compat but ignored — its `missing-runtime-verify-when-supplementary-binary-present` rule was removed in v0.7.11.) When `--change-map` / `--diff` are absent (legacy runs), the corresponding check silently no-ops and only the v0.7.5 plan-internal lints run.
 
 - **Exit 0** → plan is clean. Print `[proctor:plan] done — N items planned, plan_smells clean` and return.
 - **Exit 1** → READ the warnings on stdout. Each warning tells you exactly what's wrong: items combining happy+negative phrasing, write actions without a `data_from` sibling doing round-trip verification, or 2+ negative items with zero happy-path saves (the "all-negative plan" coverage gap). Regenerate the plan addressing every warning:

@@ -2,6 +2,49 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.11 — 2026-05-15
+
+### Simplification release: drop wizard-side binary detection; the project owns its launch
+
+**Motivating evidence.** v0.7.7–v0.7.10 kept layering wizard-side cleverness onto an assumption that turned out wrong: that PRoctor should detect a project's binaries (`cmd/*/main.go` scanner), classify them (`serves-http` / `runs-loop` / `runs-once` / `unknown`), and write project-specific launch lines into a managed `.proctor/setup-block.yml` file. Each release added more code-paths to handle edge cases the previous one missed (Bug A: supplement dropped when local.yml missing; Bug B: regenerate was a no-op; Bug C: existing seed scripts didn't auto-migrate). The user audit on mcd-website made the right model clear: **the project owns its launch.** The user demonstrated by hand-writing `./dev.sh` — a 200-line bash script with proper subcommands (`setup` / `db` / `main` / `cmd` / `all` / `stop` / `status` / `logs`), per-cmd env-file handling, PID tracking, recursive child-process kill. PRoctor should just call `./dev.sh all` to start and `./dev.sh stop` to teardown — not duplicate or second-guess any of that.
+
+v0.7.11 inverts the relationship:
+
+- **New `.proctor/config.yml.dev_launcher` block.** Required field: `start`. Optional: `stop`, `status`, `wait_for`, `wait_timeout_seconds` (default 60). PRoctor's executor runs `start` once per test run, polls `wait_for` until success or timeout, executes the plan, then runs `stop` (when set) regardless of pass/fail.
+
+- **New `step_dev_launcher` wizard step** replaces `step_supplement_setup`. Three paths the wizard offers:
+  - **I have a one-click script** (Recommended) — wizard walks the user through `start` / `stop` / `wait_for` / `wait_timeout_seconds` open-ended prompts, then writes the `dev_launcher:` block to `.proctor/config.yml`.
+  - **Show me a generic template I can adapt** — wizard copies `plugins/proctor/templates/dev-launcher.sh.template` to `.proctor/dev-launcher-template.sh` (chmod +x). The template is intentionally inert — TODO markers, no project-specific bash logic. The user fills in the TODOs in a fresh Claude Code session and then re-runs the wizard to record the launch command.
+  - **Skip** — keep using the legacy `setup:` array from local.yml. Backward compat preserved; no file changes.
+
+- **Executor SKILL precedence** (`skills/executing-pr-tests/SKILL.md`): `dev_launcher.start` wins when present, fall through to the legacy `setup:` array, error when neither is configured. Teardown: `dev_launcher.stop` runs after tests regardless of pass/fail; legacy mode preserves its v0.7.10 behavior (no auto-teardown).
+
+### What was deleted
+
+- **`plugins/proctor/scripts/wizard_detect_binaries.py`** — the multi-main classifier. 370 lines.
+- **`schema.validate_setup_block`** — `.proctor/setup-block.yml` validator. The file is no longer wizard-managed.
+- **`wizard_run._handle_supplement`, `_amend_local_yml_with_daemons`, `_write_setup_block_yml`** — the supplement-setup state machine and its file-mutation helpers.
+- **`plan_smells.missing-runtime-verify-when-supplementary-binary-present` rule** — required a `setup_context` JSON keyed on supplementary-binary lists the planner can no longer generate. The existing `pr-body-coverage` rule already catches "PR body mentions output X that no plan item verifies" generically.
+- **Planning SKILL "Detect which supplementary binaries..." section** — replaced with a shorter "Trust the project's dev_launcher" section. No more `cmd/*/main.go` discovery, no import-graph reachability analysis, no `supplementary_binaries_running` / `supplementary_binary_touched` plumbing.
+- **`STEP_SUPPLEMENT_SETUP` and the v0.7.8 `amend-daemons` mode name** — the constant is preserved as a backward-compat alias for `STEP_DEV_LAUNCHER`, and the mode-name alias still points at the new step, so external callers / prose referencing the old names keep working.
+
+### Backward compatibility
+
+- **Legacy `setup:` array consumers (v0.7.10-and-earlier)**: zero impact. v0.7.11 executor still runs the array when `dev_launcher` is absent.
+- **Legacy `setup-block.yml` consumers (v0.7.9-only idea, never reached real consumers)**: zero impact. The file is ignored by v0.7.11 runtime; the regenerate step still auto-migrates the pre-v0.7.9 hardcoded `SETUP_BLOCK` heredoc in `seed-local.sh` (Bug C fix from v0.7.10 preserved).
+- **Plan smells CLI**: `--setup-context` flag still accepted (silently ignored). Old `setup_context.daemons_running` / `daemons_touched` / `supplementary_binaries_running` / `supplementary_binary_touched` keys in plan JSON: parsed, then dropped on the floor.
+- **Wizard state files**: state schema unchanged; the `step_supplement_setup` step id still appears in legacy state files and `_MODE_ALIASES` aliases it to the new step.
+
+### Tests 419 → 396
+
+- **Deleted**: `wizard_detect_binaries.py` classifier tests; v0.7.8 classifier regressions; v0.7.7 plan_smells daemon-aware tests; v0.7.9 `validate_setup_block` tests; v0.7.9 "setup-block.yml as canonical source" tests; v0.7.9 terminology audit tests; v0.7.7/v0.7.8 amend-daemons state-machine flow tests; v0.7.10 supplement-fires-when-local-yml-missing regression tests. Total deleted: ~70 tests covering behaviors that no longer exist.
+- **Added** (~30 new tests): `dev_launcher` schema validation matrix (minimum-valid, all-fields, missing-start, empty-start, non-dict, bad-timeout, unknown-keys, absent-still-valid); `step_dev_launcher` flow (fires-when-block-absent, skips-when-block-present, three-option-offer, one-click writes block, one-click empty optional fields write minimal block, template path writes inert script, one-click rejects empty start, rejects bad timeout); plan_smells rule-removed verifications (function-level + CLI-level); `wizard_detect_binaries.py` deletion check; `STEP_ORDER` constants; doc-prose contracts (executor SKILL documents precedence, planner SKILL drops supplementary-binary section, proctor-init.md describes new Step 7.5).
+- **Updated**: v0.7.10 Bug A regression tests refitted to pin the new "dev_launcher fires when block absent, regardless of local.yml" invariant (same shape, different field).
+
+### Net diff
+
+**-1563 lines** across 9 files. The wizard's `cmd/*/main.go` machinery and its dependent scaffolding go away; the small `dev_launcher` schema field + step is the only addition.
+
 ## v0.7.10 — 2026-05-15
 
 ### Step-iterator bug-fix release: Bug A (supplement dropped) + Bug B (regenerate is a no-op) + Bug C (seed-local.sh not auto-migrated)
