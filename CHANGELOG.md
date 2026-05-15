@@ -2,6 +2,37 @@
 
 All notable changes to PRoctor are documented here. Versions follow semver: `v0.x.y` where `x` bumps on minor pipeline-affecting changes and `y` on action wrapper / packaging fixes.
 
+## v0.7.7 — 2026-05-15
+
+### Multi-main detection + daemon-aware planner — runtime verification when the daemon is in setup
+
+The v0.7.6 e2e against mcd-website PR #1126 (run `pr1126-977d89c-36d475a3`, 13:51 wall-clock) found a real gap. The project ships multiple `cmd/*/main.go` binaries:
+
+- root `main.go` — the HTTP server users hit at `/admin`.
+- `cmd/mcd-daemon/main.go` — a 1-minute ticker that re-publishes banners / categories / etc. to S3.
+- `cmd/mcd-publisher/main.go` — one-shot republisher (CLI tool).
+- `cmd/mcd-sitemap/main.go` — one-shot sitemap generator.
+
+PRoctor's `.proctor/local.yml setup:` ran `go run .` which started the HTTP server but NOT mcd-daemon. So when PR #1126 claimed "Published JSON include_tags/exclude_tags are arrays of trimmed tokens", admin save → daemon publishes → published-JSON-on-S3 never happened during the PRoctor run — the daemon wasn't there to do the publishing. The planner shipped an item lint-only-asserting "the wiring calls SplitTags + Trim" and the published-JSON contract that the PR was about went unverified.
+
+The v0.7.6 audit considered inventing a `verification_hooks` config abstraction. v0.7.7 takes the simpler path the user proposed: just bring up ALL the project's daemons in setup. Then the system runs as it normally would for a real developer (HTTP server + publish loops + workers), and PRoctor's planner can plan a plain `curl <published-url>` item that waits for the ticker to fire.
+
+Five fixes:
+
+**Fix A — wizard explicit multi-main detection + selection.** New helper `plugins/proctor/scripts/wizard_detect_binaries.py` scans the consumer repo for `cmd/*/main.go` (plus root `main.go`), classifies each as `http-server` / `daemon` / `one-shot` / `unknown` by pattern-matching the source (`http.ListenAndServe` / `gin.New` for server, `time.NewTicker` / `cron.AddFunc` / `workerqueue` for daemon, short-and-no-pattern for one-shot), and emits a JSON candidate list. `plugins/proctor/commands/proctor-init.md` adds Step 7.5 between Step 7 (env questions) and Step 8 (write config): in `MODE=fresh` only, the wizard runs the detector, surfaces a multi-select AskUserQuestion preselecting all http-server (required) + all daemon (recommended) entries, and appends `bash -c '... nohup go run ./cmd/<name> ...'` pidfile-managed lines to `.proctor/local.yml setup:` for each selected daemon, plus a final `sleep 3` so daemons get past their init before tests start. State-machine integration of the fresh path is deferred to v0.7.8; v0.7.7 ships the detector + prose, and the fresh-mode AI runs the detector directly per the prose.
+
+**Fix B — planner SKILL daemon-awareness.** `plugins/proctor/skills/planning-pr-tests/SKILL.md` adds a "Detect which daemons run in local setup" section. The planner parses `.proctor/local.yml` (or `.proctor/config.yml` in CI mode) `setup:` array, identifies `go run ./cmd/<name>` invocations as daemons, builds `setup_context.daemons_running` and `setup_context.daemon_touched` (the subset where the diff touches code reachable from `cmd/<name>/main.go`). When the intersection is non-empty AND the PR body mentions output keywords (publish / JSON / endpoint / output / serialize), the planner auto-generates a `tool: bash` runtime verify item that curls the published URL in a 120-second poll loop with a `jq` assertion derived from the PR body. When the daemon is NOT running, the planner still emits the lint item AND emits an additional `tool: skip` item with `reason: "no-daemon-in-setup"` — making the gap visible in the report rather than hiding it.
+
+**Fix C — `plan_smells.py missing-runtime-verify-when-daemon-present`.** New lint rule fires when `setup_context.daemons_running ∩ setup_context.daemon_touched` is non-empty AND the PR body matches the daemon-output-keyword regex (`publish` / `JSON` / `endpoint` / `serialize` / `emit` / `output` / "writes to S3") AND no plan item has `tool: bash` / `tool: curl` with a runtime-verify pattern (`curl` / `http(s)://` / "poll for publish/output/JSON/S3" / "wait for ticker/daemon"). Reuses the v0.7.6 stopwords / item-corpus scaffolding. New `--setup-context` CLI flag accepts a JSON path with the shape `{daemons_running: [...], daemon_touched: [...]}`; absent input no-ops the check (backward-compat).
+
+**Fix D — reporter "Runtime verification gaps" section.** `plugins/proctor/skills/reporting-pr-test-results/SKILL.md` adds a dedicated section right after the header / visual-regression sections that consolidates every item with `reason: "no-daemon-in-setup"`. Each entry names the missing binary, the item that wanted to verify against it, and the one-line how. Closing prose explicitly tells the reviewer: "To enable runtime verification, re-run `/proctor:proctor-init` and select the listed daemon binaries when prompted." Skipped items list now documents 4 flavors instead of 3 (`no-daemon-in-setup` distinguished from `data-dep-failed` / `data-template-missing` / `precondition-not-met`).
+
+**Fix E — tests 327 → 340.** New coverage:
+- `wizard_detect_binaries.py`: synthetic repo fixtures with `cmd/<X>-server/main.go` containing `http.ListenAndServe` → classifies http-server; `cmd/<X>-daemon/main.go` containing `time.NewTicker` → classifies daemon; `cmd/<X>-sitemap/main.go` short + no patterns → classifies one-shot; root `main.go` + `cmd/*` mix → correct binary_name derivation.
+- Planner SKILL.md prose: "Detect which daemons run in local setup" section present + daemon-output-keyword examples documented.
+- `plan_smells.py`: synthetic plan + setup_context combos. Rule fires when daemon-running ∩ touched non-empty + PR mentions output + no bash verify item. Doesn't fire when bash item with curl pattern exists. Doesn't fire when daemon not in setup. Doesn't fire when PR body has no output keywords. `--setup-context` CLI flag accepts the JSON file. Backward-compat: absent setup_context = no-op.
+- Reporter SKILL.md prose: "Runtime verification gaps" section template documented; `no-daemon-in-setup` reason rendered.
+
 ## v0.7.6 — 2026-05-15
 
 ### Bundle 5 fixes from user audit against PR-#1126 v0.7.5 e2e (run `pr1126-977d89c-4df3ee71`, 30:31 wall-clock)

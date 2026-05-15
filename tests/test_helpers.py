@@ -5092,3 +5092,452 @@ def test_executor_md_documents_evaluate_script_batching_v076():
     assert "navigate_page" in text
     assert "wait_for" in text
     assert "take_snapshot" in text
+
+
+# --- v0.7.7: wizard_detect_binaries.py — multi-main classifier --------------
+
+
+def _run_detect_binaries(repo_root):
+    """Helper: invoke wizard_detect_binaries.py and return parsed JSON."""
+    script = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts" / "wizard_detect_binaries.py"
+    )
+    result = subprocess.run(
+        ["python3", str(script), "--repo-root", str(repo_root)],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_detect_binaries_classifies_http_server(tmp_path):
+    """A cmd/<X>/main.go whose source contains http.ListenAndServe
+    classifies as http-server. This is the standard Go web-app
+    entry-point shape."""
+    cmd_dir = tmp_path / "cmd" / "mcd-website"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        "import \"net/http\"\n"
+        "func main() {\n"
+        "    http.ListenAndServe(\":8080\", nil)\n"
+        "}\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    candidates = out["candidates"]
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c["path"] == "cmd/mcd-website/main.go"
+    assert c["binary_name"] == "mcd-website"
+    assert c["looks_like"] == "http-server"
+    assert "http.ListenAndServe" in c["evidence"]
+
+
+def test_detect_binaries_classifies_daemon_ticker(tmp_path):
+    """A cmd/<X>/main.go whose source contains time.NewTicker or
+    similar ticker/cron pattern classifies as daemon. Mimics
+    mcd-website's cmd/mcd-daemon — the 1-minute publish-to-S3
+    loop the v0.7.6 audit found PRoctor wasn't starting."""
+    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        "import (\"time\")\n"
+        "func main() {\n"
+        "    ticker := time.NewTicker(time.Minute)\n"
+        "    for range ticker.C {\n"
+        "        publishAll()\n"
+        "    }\n"
+        "}\n"
+        "func publishAll() {}\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    candidates = out["candidates"]
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c["binary_name"] == "mcd-daemon"
+    assert c["looks_like"] == "daemon"
+    assert "time.NewTicker" in c["evidence"]
+
+
+def test_detect_binaries_classifies_one_shot(tmp_path):
+    """A short cmd/<X>/main.go with neither HTTP-server nor ticker/
+    daemon patterns classifies as one-shot — sitemap generators,
+    republishers, migration tools. The wizard should NOT preselect
+    these for setup (they're run on-demand)."""
+    cmd_dir = tmp_path / "cmd" / "mcd-sitemap"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        "import \"fmt\"\n"
+        "func main() {\n"
+        "    fmt.Println(\"generating sitemap\")\n"
+        "}\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    c = out["candidates"][0]
+    assert c["binary_name"] == "mcd-sitemap"
+    assert c["looks_like"] == "one-shot"
+
+
+def test_detect_binaries_unknown_for_long_unrecognized(tmp_path):
+    """A LONG (>200 lines) main.go with no HTTP and no ticker
+    patterns classifies as unknown — better to ask the user than
+    silently lump it with one-shot CLIs. Real-world examples might
+    include batch-job orchestrators or interactive REPLs we don't
+    have heuristics for."""
+    cmd_dir = tmp_path / "cmd" / "weird-binary"
+    cmd_dir.mkdir(parents=True)
+    # 300 lines, none matching either pattern set.
+    body = "\n".join([f"// filler line {i}" for i in range(300)])
+    (cmd_dir / "main.go").write_text(
+        "package main\n"
+        + body + "\n"
+        + "func main() { println(\"hi\") }\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    c = out["candidates"][0]
+    assert c["looks_like"] == "unknown"
+
+
+def test_detect_binaries_walks_root_main_go_and_cmd(tmp_path):
+    """Root main.go is emitted FIRST, then cmd/* entries
+    alphabetically. The binary_name for root main.go uses the
+    repo-root basename so the wizard can reference it
+    consistently across runs."""
+    # Root main.go — http-server style.
+    (tmp_path / "main.go").write_text(
+        "package main\n"
+        "import \"net/http\"\n"
+        "func main() { http.ListenAndServe(\":8080\", nil) }\n"
+    )
+    # cmd/zee — daemon
+    (tmp_path / "cmd" / "zee").mkdir(parents=True)
+    (tmp_path / "cmd" / "zee" / "main.go").write_text(
+        "package main\nimport \"time\"\n"
+        "func main() { t := time.NewTicker(time.Second); _ = t }\n"
+    )
+    # cmd/aaa — http-server (so the sort isn't trivially by classification)
+    (tmp_path / "cmd" / "aaa").mkdir(parents=True)
+    (tmp_path / "cmd" / "aaa" / "main.go").write_text(
+        "package main\nimport \"net/http\"\n"
+        "func main() { http.ListenAndServe(\":9090\", nil) }\n"
+    )
+    out = _run_detect_binaries(tmp_path)
+    paths = [c["path"] for c in out["candidates"]]
+    # Root first, then cmd/* alphabetically.
+    assert paths[0] == "main.go"
+    assert paths[1] == "cmd/aaa/main.go"
+    assert paths[2] == "cmd/zee/main.go"
+    # Root main.go's binary_name is the repo basename.
+    assert out["candidates"][0]["binary_name"] == tmp_path.name
+
+
+def test_detect_binaries_empty_when_no_main_go(tmp_path):
+    """Repo with no main.go (Node / Python / Ruby project) returns
+    empty candidates. The wizard's Step 7.5 then skips the
+    daemon-selection question entirely."""
+    out = _run_detect_binaries(tmp_path)
+    assert out == {"candidates": []}
+
+
+def test_detect_binaries_skips_non_main_go_files_in_cmd(tmp_path):
+    """cmd/<X>/helpers.go etc. don't trigger a candidate — only
+    cmd/<X>/main.go counts. Some projects keep per-binary helper
+    files alongside main.go; those aren't entry points."""
+    cmd_dir = tmp_path / "cmd" / "mcd-daemon"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "helpers.go").write_text("package main\nfunc helper() {}\n")
+    # No main.go — should produce no candidate.
+    out = _run_detect_binaries(tmp_path)
+    assert out == {"candidates": []}
+
+
+# --- v0.7.7: plan_smells daemon-aware missing-runtime-verify check ----------
+
+
+def test_plan_smells_daemon_present_diff_touches_pr_mentions_output_no_verify_fires():
+    """The full positive case: daemon in setup, diff touches daemon
+    code, PR body mentions publish/JSON, plan has only lint-only
+    items. The v0.7.7 rule fires."""
+    change_map = {
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes as a "
+                    "trimmed array. The daemon picks up new banner "
+                    "fields and republishes them on the next tick.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "Source-level: SplitTags is called from "
+                     "publishAll", "how": "grep ...",
+             "risk": "medium", "depends_on": []},
+        ],
+    }
+    setup_context = {
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": ["mcd-daemon"],
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(
+        plan, change_map=change_map, setup_context=setup_context,
+    )
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert len(daemon) == 1
+    assert "mcd-daemon" in daemon[0]
+
+
+def test_plan_smells_daemon_present_bash_curl_item_satisfies():
+    """When the plan DOES include a bash item with curl-against-URL,
+    the rule is satisfied — no warning. This is the success-path
+    the planner is supposed to reach."""
+    change_map = {
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes as a "
+                    "trimmed array.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "Source-level wire-up", "how": "grep ...",
+             "risk": "medium", "depends_on": []},
+            {"id": "t-2", "category": "api", "tool": "bash",
+             "what": "HAPPY: published JSON include_tags is a trimmed "
+                     "array after daemon ticker fires",
+             "how": "for i in $(seq 1 120); do RESP=$(curl -sf "
+                    "\"https://example.test/banners.json\"); "
+                    "echo \"$RESP\" | jq -e '.include_tags | "
+                    "type == \"array\"' && break; sleep 1; done",
+             "risk": "high", "depends_on": []},
+        ],
+    }
+    setup_context = {
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": ["mcd-daemon"],
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(
+        plan, change_map=change_map, setup_context=setup_context,
+    )
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert daemon == []
+
+
+def test_plan_smells_daemon_not_running_no_warning():
+    """When the daemon ISN'T in local setup, the planner is excused
+    — the runtime verify is genuinely impossible. The rule only
+    fires when the daemon IS running but the planner failed to use
+    that capability."""
+    change_map = {
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes as a "
+                    "trimmed array.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "grep wiring", "how": "grep",
+             "risk": "low", "depends_on": []},
+        ],
+    }
+    setup_context = {
+        "daemons_running": [],  # nothing in setup
+        "daemon_touched": ["mcd-daemon"],
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(
+        plan, change_map=change_map, setup_context=setup_context,
+    )
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert daemon == []
+
+
+def test_plan_smells_daemon_not_touched_no_warning():
+    """When the diff DOESN'T touch any daemon-reachable code, no
+    runtime verify is required — the daemon is irrelevant to this
+    PR. Rule shouldn't fire."""
+    change_map = {
+        "pr_context": {
+            "body": "Cosmetic CSS change — published JSON unchanged.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "frontend", "tool": "lint-only",
+             "what": "CSS file syntax valid",
+             "how": "stylelint", "risk": "low", "depends_on": []},
+        ],
+    }
+    setup_context = {
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": [],  # diff doesn't reach any daemon
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(
+        plan, change_map=change_map, setup_context=setup_context,
+    )
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert daemon == []
+
+
+def test_plan_smells_daemon_pr_body_no_output_keywords_no_warning():
+    """When the PR body doesn't mention publish/JSON/output/etc.
+    keywords, the planner had no signal to plan a runtime verify
+    in the first place. Rule shouldn't fire — false-positive
+    avoidance."""
+    change_map = {
+        "pr_context": {
+            "body": "Refactor: rename internal helper for clarity. "
+                    "No behavior change.",
+        },
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "renamed identifier compiles",
+             "how": "go build", "risk": "low", "depends_on": []},
+        ],
+    }
+    setup_context = {
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": ["mcd-daemon"],
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(
+        plan, change_map=change_map, setup_context=setup_context,
+    )
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert daemon == []
+
+
+def test_plan_smells_daemon_no_setup_context_no_op_backward_compat():
+    """Backward compat: calling plan_check WITHOUT setup_context
+    preserves the v0.7.6 behavior — the v0.7.7 daemon check no-ops
+    silently."""
+    change_map = {
+        "pr_context": {"body": "Published JSON has trimmed tokens."},
+    }
+    plan = {
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "chrome-devtools",
+             "what": "HAPPY: save record", "how": "fill+save",
+             "risk": "high", "depends_on": [], "produces": ["created_id"]},
+            {"id": "t-2", "category": "api", "tool": "chrome-devtools",
+             "what": "Re-open saved record, fields round-trip",
+             "how": "navigate+reload", "risk": "high",
+             "depends_on": ["t-1"], "data_from": ["t-1"]},
+        ],
+    }
+    from plugins.proctor.scripts.plan_smells import check as plan_check
+    warnings = plan_check(plan, change_map=change_map)
+    # No setup_context → daemon check inert; only the v0.7.6 checks
+    # might fire. Specifically the daemon-named warning must NOT.
+    daemon = [w for w in warnings
+              if "missing-runtime-verify-when-daemon-present" in w]
+    assert daemon == []
+
+
+def test_plan_smells_cli_strict_accepts_setup_context_flag(tmp_path):
+    """CLI integration: --setup-context flag routes through to the
+    new check. Synthetic plan + change-map + setup-context where
+    all three conditions are met → strict mode exits 1."""
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({
+        "items": [
+            {"id": "t-1", "category": "api", "tool": "lint-only",
+             "what": "grep wiring", "how": "grep",
+             "risk": "low", "depends_on": []},
+        ],
+    }))
+    cm_path = tmp_path / "change-map.json"
+    cm_path.write_text(json.dumps({
+        "pr_context": {
+            "body": "Published JSON include_tags now serializes as "
+                    "trimmed tokens.",
+        },
+    }))
+    sc_path = tmp_path / "setup-context.json"
+    sc_path.write_text(json.dumps({
+        "daemons_running": ["mcd-daemon"],
+        "daemon_touched": ["mcd-daemon"],
+    }))
+    script = str(
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "scripts" / "plan_smells.py"
+    )
+    result = subprocess.run(
+        ["python3", script, "--strict",
+         "--change-map", str(cm_path),
+         "--setup-context", str(sc_path)],
+        stdin=open(plan_path), capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert "missing-runtime-verify-when-daemon-present" in result.stdout
+
+
+# --- v0.7.7: planner + reporter SKILL.md prose contracts ------------------
+
+
+def test_planner_skill_md_documents_daemon_awareness_v077():
+    """The planning-pr-tests SKILL.md must document the v0.7.7+
+    daemon-awareness section — without this prose, the AI driving
+    the planner won't know to parse `setup:` or build
+    setup_context."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills" / "planning-pr-tests"
+        / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    # Section header / key vocabulary
+    assert "Detect which daemons run in local setup" in text
+    assert "setup_context.daemons_running" in text
+    assert "setup_context.daemon_touched" in text
+    # The two-path discipline: runtime item when daemon present,
+    # explicit skip item when daemon absent.
+    assert "no-daemon-in-setup" in text
+    # Lint integration — --setup-context flag mentioned.
+    assert "--setup-context" in text
+
+
+def test_reporter_skill_md_documents_runtime_verification_gaps_v077():
+    """The reporting-pr-test-results SKILL.md must document the
+    v0.7.7+ "Runtime verification gaps" section template, so the
+    reporter renders missing-daemon gaps in a dedicated section
+    instead of scattering them as ordinary skips."""
+    skill_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "skills"
+        / "reporting-pr-test-results" / "SKILL.md"
+    )
+    text = skill_path.read_text()
+    assert "Runtime verification gaps" in text
+    assert "no-daemon-in-setup" in text
+    # The actionable closing prose — tells the reviewer how to fix.
+    assert "/proctor:proctor-init" in text
+
+
+def test_proctor_init_md_documents_step_7_5_multi_main_detection_v077():
+    """The /proctor-init command prose must describe the v0.7.7+
+    Step 7.5 multi-binary detection step so the fresh-mode AI runs
+    the new helper script and emits the daemon-multi-select."""
+    cmd_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "plugins" / "proctor" / "commands" / "proctor-init.md"
+    )
+    text = cmd_path.read_text()
+    # Step header + helper script name.
+    assert "Step 7.5" in text
+    assert "wizard_detect_binaries.py" in text
+    # The fresh-mode gating note.
+    assert "MODE=fresh" in text
+    # The pidfile pattern (so daemons can be restarted across runs).
+    assert "proctor-" in text and ".pid" in text

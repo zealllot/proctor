@@ -71,13 +71,33 @@ Group items by journey for the report.
 
 Order journeys by their position in the plan's `journeys` array (structured) or by first-appearance among items (legacy). After all journeys, append an "Other" section for items that don't carry a journey reference. Skip the "Other" section if it's empty.
 
-Skipped items come in three flavors — render each distinctly so the reviewer doesn't lump them together:
+Skipped items come in four flavors — render each distinctly so the reviewer doesn't lump them together:
 
 - **`reason: "data-dep-failed: t-007"`** → `⏭ skipped (upstream t-007 failed)`. Test was INVALIDATED by an intra-run sibling. Reviewer should fix the upstream first.
 - **`reason: "data-template-missing: t-007.created_id"`** → `⏭ skipped (upstream t-007 didn't produce created_id)`. Same family — producer broke its contract; reviewer jumps to t-007's row.
 - **`reason: "precondition-not-met"`** (v0.3.29+) → `⚠ skipped (environment precondition failed)`. Different cause: the test's assumed starting state is missing — this is an ENVIRONMENT GAP, not a bug in the diff under test. Render the failing command and its exit code from `evidence` so the reviewer can rerun PRoctor against a properly seeded environment.
+- **`reason: "no-daemon-in-setup"`** (v0.7.7+) → `⚠ skipped (daemon not in local setup)`. The planner wanted to runtime-verify a daemon-produced output (published JSON, S3 object, periodic emit) but the daemon binary isn't started by `.proctor/local.yml setup:`. See the "Runtime verification gaps" section below for the consolidated view.
 
 Don't render any of these collapsed identically to ordinary opt-out `skipped` items (`tool: "skip"` or `status: "skipped"` without a reason).
+
+## Runtime verification gaps section (v0.7.7+)
+
+When test-results contains one or more items with `reason: "no-daemon-in-setup"`, render a dedicated section RIGHT BEFORE the per-item sections (after the header and visual-regression sections). This consolidates the "wanted to runtime-verify but couldn't" gaps so the reviewer sees the structural blocker — not just N skipped items scattered through the body.
+
+```markdown
+### Runtime verification gaps
+
+The planner wanted to runtime-verify these daemon-produced outputs but the daemon binaries aren't started by `.proctor/local.yml setup:`. Affected items ran a lint-only fallback instead.
+
+- `<binary-name-1>` (item `<t-id>`): would run `<one-line how:>` — skipped because `<binary-name-1>` is not in setup.
+- `<binary-name-2>` (item `<t-id>`): would run `<one-line how:>` — skipped because `<binary-name-2>` is not in setup.
+
+**To enable runtime verification**, re-run `/proctor:proctor-init` and select the listed daemon binaries when prompted at the "which binaries should PRoctor start" step. PRoctor will append `go run ./cmd/<name>` lines to your `.proctor/local.yml setup:`, the daemons will run during the next PRoctor invocation, and these items will execute as planned instead of skipping.
+```
+
+Skip the whole section when no item has `reason: "no-daemon-in-setup"`.
+
+Derive the binary name from the item's `rationale` or `how:` — the planner cites it explicitly. If multiple items reference the same binary, list each item under that binary (don't merge across binaries — they're separate verification gaps).
 
 In the HTML report, journeys become `<details>` blocks that default open if the journey has any fail items, closed if all-pass. Same logic as per-item details but one level higher.
 
